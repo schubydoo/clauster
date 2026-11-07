@@ -1,0 +1,3207 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Self-hosted web UI for spawning and managing Claude Code remote-control bridges on a remote host.">
+      
+      
+      
+        <link rel="canonical" href="https://schubydoo.github.io/clauster/1.4/guides/config-editor/">
+      
+      
+        <link rel="prev" href="../configuration/">
+      
+      
+        <link rel="next" href="../../networking/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
+    
+    
+      
+        <title>The in-app config editor - Clauster</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.57a0d79d.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.fb2fffe2.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#the-in-app-config-editor" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+          <aside class="md-banner md-banner--warning">
+            <div class="md-banner__inner md-grid md-typeset">
+              
+  You are not reading the documentation for the latest release.
+  <a href="../../..">
+    <strong>Go to the latest release.</strong>
+  </a>
+
+            </div>
+            <script>var el=document.querySelector("[data-md-component=outdated]"),base=new URL("../.."),outdated=__md_get("__outdated",sessionStorage,base);!0===outdated&&el&&(el.hidden=!1)</script>
+          </aside>
+        
+      </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="Clauster" class="md-header__button md-logo" aria-label="Clauster" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            Clauster
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              The in-app config editor
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m17.75 4.09-2.53 1.94.91 3.06-2.63-1.81-2.63 1.81.91-3.06-2.53-1.94L12.44 4l1.06-3 1.06 3zm3.5 6.91-1.64 1.25.59 1.98-1.7-1.17-1.7 1.17.59-1.98L15.75 11l2.06-.05L18.5 9l.69 1.95zm-2.28 4.95c.83-.08 1.72 1.1 1.19 1.85-.32.45-.66.87-1.08 1.27C15.17 23 8.84 23 4.94 19.07c-3.91-3.9-3.91-10.24 0-14.14.4-.4.82-.76 1.27-1.08.75-.53 1.93.36 1.85 1.19-.27 2.86.69 5.83 2.89 8.02a9.96 9.96 0 0 0 8.02 2.89m-1.64 2.02a12.08 12.08 0 0 1-7.8-3.47c-2.17-2.19-3.33-5-3.49-7.82-2.81 3.14-2.7 7.96.31 10.98 3.02 3.01 7.84 3.12 10.98.31"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 7a5 5 0 0 1 5 5 5 5 0 0 1-5 5 5 5 0 0 1-5-5 5 5 0 0 1 5-5m0 2a3 3 0 0 0-3 3 3 3 0 0 0 3 3 3 3 0 0 0 3-3 3 3 0 0 0-3-3m0-7 2.39 3.42C13.65 5.15 12.84 5 12 5s-1.65.15-2.39.42zM3.34 7l4.16-.35A7.2 7.2 0 0 0 5.94 8.5c-.44.74-.69 1.5-.83 2.29zm.02 10 1.76-3.77a7.131 7.131 0 0 0 2.38 4.14zM20.65 7l-1.77 3.79a7.02 7.02 0 0 0-2.38-4.15zm-.01 10-4.14.36c.59-.51 1.12-1.14 1.54-1.86.42-.73.69-1.5.83-2.29zM12 22l-2.41-3.44c.74.27 1.55.44 2.41.44.82 0 1.63-.17 2.37-.44z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/schubydoo/clauster" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    schubydoo/clauster
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="Clauster" class="md-nav__button md-logo" aria-label="Clauster" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    Clauster
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/schubydoo/clauster" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    schubydoo/clauster
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Start here
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Start here
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quickstart
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Concepts
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Concepts
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/how-it-works/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    How it works
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/glossary/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Glossary
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture (contributors)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../security/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    How Clauster secures itself
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../privacy/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Privacy
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Guides
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Guides
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../configuration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuring Clauster
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The in-app config editor
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The in-app config editor
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#editing-clausteryml" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Editing clauster.yml
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Editing clauster.yml">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#what-it-deliberately-wont-edit" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What it deliberately won't edit
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#advanced-settings-step-up-re-auth" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Advanced settings (step-up re-auth)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#how-a-save-is-applied" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        How a save is applied
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#restarting-from-the-dashboard" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Restarting from the dashboard
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#managing-claude-code-config" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Managing Claude Code config
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Managing Claude Code config">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#mcp-server-definitions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        MCP server definitions
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-settings-tab" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The Settings tab
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-permissions-tab" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The Permissions tab
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#masked-values-in-subagent-and-skill-files" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Masked values in subagent and skill files
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#subagent-frontmatter-checks" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Subagent frontmatter checks
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Subagent frontmatter checks">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#inline-mcp-servers" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Inline MCP servers
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-hooks-tab" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The Hooks tab
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#plugins-and-marketplaces" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Plugins and marketplaces
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#yaml-spellings-that-clauster-refuses" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        YAML spellings that Clauster refuses
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#what-a-skill-save-writes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What a skill save writes
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#skill-frontmatter-checks" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Skill frontmatter checks
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#skill-visibility" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Skill visibility
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#troubleshooting-and-limits" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Troubleshooting and limits
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../networking/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Networking & exposing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/config/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuration reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/cli/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI commands
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../public-api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Public API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../mcp/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MCP server
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/platforms/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Platform support
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Operations
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Operations
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../operations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Operations runbook
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Troubleshooting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../upgrading/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Upgrading
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../changelog/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Changelog
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Project
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Project
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../contributing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../support/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Support
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../security-policy/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reporting a vulnerability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#editing-clausteryml" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Editing clauster.yml
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Editing clauster.yml">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#what-it-deliberately-wont-edit" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What it deliberately won't edit
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#advanced-settings-step-up-re-auth" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Advanced settings (step-up re-auth)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#how-a-save-is-applied" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        How a save is applied
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#restarting-from-the-dashboard" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Restarting from the dashboard
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#managing-claude-code-config" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Managing Claude Code config
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Managing Claude Code config">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#mcp-server-definitions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        MCP server definitions
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-settings-tab" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The Settings tab
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-permissions-tab" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The Permissions tab
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#masked-values-in-subagent-and-skill-files" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Masked values in subagent and skill files
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#subagent-frontmatter-checks" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Subagent frontmatter checks
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Subagent frontmatter checks">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#inline-mcp-servers" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Inline MCP servers
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-hooks-tab" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The Hooks tab
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#plugins-and-marketplaces" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Plugins and marketplaces
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#yaml-spellings-that-clauster-refuses" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        YAML spellings that Clauster refuses
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#what-a-skill-save-writes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What a skill save writes
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#skill-frontmatter-checks" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Skill frontmatter checks
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#skill-visibility" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Skill visibility
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#troubleshooting-and-limits" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Troubleshooting and limits
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="the-in-app-config-editor">The in-app config editor<a class="headerlink" href="#the-in-app-config-editor" title="Permanent link">&para;</a></h1>
+<p>Clauster's dashboard can change configuration from the browser through two
+distinct surfaces, opened from buttons in the dashboard header:</p>
+<ul>
+<li><strong>Edit configuration</strong> (pencil icon) — edits Clauster's own <code>clauster.yml</code>
+  through a fixed, fail-closed allowlist.</li>
+<li><strong>Manage Claude Code config</strong> (wrench icon) — manages the host's Claude Code
+  configuration: CLAUDE.md, settings, permissions, hooks, MCP servers,
+  subagents, skills, and plugins. This button only renders when the
+  <a href="../../reference/config/#config_write-code-executing-config-write-trust-tier-configwriteconfig"><code>config_write</code> trust tier</a>
+  is enabled — a disabled deployment ships no dead surface.</li>
+</ul>
+<p>This page is the operator's guide to both. For what every key means, see the
+<a href="../../reference/config/">configuration reference</a> — the field tables there are
+the single home for key-by-key detail.</p>
+<h2 id="editing-clausteryml">Editing <code>clauster.yml</code><a class="headerlink" href="#editing-clausteryml" title="Permanent link">&para;</a></h2>
+<p>The pencil button opens the <strong>Configuration</strong> modal. Fields are grouped into
+sections — General, Claude, Instance defaults, Direct Session (live-view),
+Logs, Reaper, Usage, Metrics, Observability, Notifications — with jump chips
+at the top and a search box that filters by label, key, or description. Each
+field renders as a typed control (toggle, bounded number, text, or a select
+with human-readable option labels), with its raw YAML key shown as subtext so
+you can cross-reference the file.</p>
+<p>A bounded number carries its real range, and the editor checks that range
+before it sends the save. The input's <code>min</code>/<code>max</code> attributes only advertise
+the range and bound the spinner arrows — the save is a <code>fetch</code>, not a form
+submit, so a value you <em>type</em> is never enforced by the browser. The editor
+therefore compares it itself and refuses an out-of-range one with a message,
+rather than sending it and surfacing a <code>422</code> from the full-config
+re-validation. That covers <strong>exclusive</strong> bounds too: a timeout that must be
+<em>greater than</em> zero, not <em>at least</em> zero, is refused at zero — something
+<code>min="0"</code> alone cannot express.</p>
+<p>A switch whose feature needs an <strong>optional dependency</strong> that isn't installed
+(Direct Sessions → the <code>claustrum</code> binary, notifications → <code>apprise</code>, the live
+terminal view → <code>pyte</code>) can't be turned on and shows a "Requires … — run
+<code>clauster deps install …</code>" note, so you're told what a feature needs at the
+moment you'd enable it rather than discovering it dormant later. Availability is
+resolved exactly the way the runtime resolves it (including a configured
+<code>claustrum.binary</code>), so a dependency that <em>is</em> present never greys out its
+switch.</p>
+<p>Only the <strong>Tier-A allowlist</strong> of day-to-day operational fields appears here:</p>
+<!-- BEGIN GEN: editable_fields -->
+<table>
+<thead>
+<tr>
+<th>Section</th>
+<th>Editable fields</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>(top-level)</code></td>
+<td><code>log_format</code></td>
+</tr>
+<tr>
+<td><code>api</code></td>
+<td><code>openapi_enabled</code></td>
+</tr>
+<tr>
+<td><code>claude</code></td>
+<td><code>min_version</code>, <code>agents_json_poll_interval_seconds</code>, <code>startup_grace_seconds</code>, <code>auto_enable_remote_control</code>, <code>resume_recap</code>, <code>resume_recap_max_chars</code>, <code>launch_mode</code>, <code>pty_screen_enabled</code></td>
+</tr>
+<tr>
+<td><code>instance_defaults</code></td>
+<td><code>spawn_mode</code>, <code>permission_mode</code>, <code>verbose</code>, <code>session_name_prefix</code>, <code>capacity</code>, <code>max_bridges</code></td>
+</tr>
+<tr>
+<td><code>claustrum</code></td>
+<td><code>enabled</code>, <code>socket_path</code>, <code>spawn_timeout_seconds</code>, <code>keep_children</code>, <code>request_timeout_seconds</code></td>
+</tr>
+<tr>
+<td><code>logs</code></td>
+<td><code>bridge_log_max_size_mb</code>, <code>keep_rotated</code>, <code>redact_session_url</code>, <code>strip_ansi_in_stream</code>, <code>retention_max_age_days</code>, <code>retention_max_files</code>, <code>retention_max_total_mb</code></td>
+</tr>
+<tr>
+<td><code>reaper</code></td>
+<td><code>ui_enabled</code></td>
+</tr>
+<tr>
+<td><code>usage</code></td>
+<td><code>mode</code>, <code>currency</code>, <code>currency_symbol</code>, <code>fx_rate</code>, <code>token_total_includes_cache</code>, <code>show_cost</code></td>
+</tr>
+<tr>
+<td><code>metrics</code></td>
+<td><code>enabled</code>, <code>normalize_cpu</code>, <code>show_disk</code>, <code>sample_interval_seconds</code>, <code>poll_seconds</code></td>
+</tr>
+<tr>
+<td><code>observability</code></td>
+<td><code>prometheus_enabled</code></td>
+</tr>
+<tr>
+<td><code>notifications</code></td>
+<td><code>enabled</code>, <code>browser_enabled</code>, <code>notify_on_crash</code>, <code>notify_on_ready</code>, <code>notify_on_stop</code>, <code>notify_on_permission</code>, <code>notify_on_session_end</code>, <code>notify_on_reconnect_failed</code></td>
+</tr>
+</tbody>
+</table>
+<!-- END GEN: editable_fields -->
+
+<p>The allowlist's source of truth is <code>EDITABLE_FIELDS</code> in
+<code>src/clauster/config_editor.py</code> (the table above is generated from it);
+<code>GET /api/config</code> returns it, so the UI only renders fields it can actually
+write.</p>
+<h3 id="what-it-deliberately-wont-edit">What it deliberately won't edit<a class="headerlink" href="#what-it-deliberately-wont-edit" title="Permanent link">&para;</a></h3>
+<p>The allowlist is a structural security boundary, and that is a feature:
+anything that is a secret, an auth gate, a network-bind decision, a binary
+path, a structural boot setting, or a code-executing capability is excluded
+and enforced fail-closed in two ways:</p>
+<ul>
+<li><strong>Never read back.</strong> The editor's read API serializes only allowlisted
+  values, so a secret, credential hash, or bind value never reaches the
+  browser in the first place — redaction is structural, not a post-filter.</li>
+<li><strong>Never written.</strong> A save carrying a non-allowlisted key (an <code>auth.*</code> field,
+  say) is rejected with <code>400</code> at the allowlist — never silently dropped — and
+  the merged result of an <em>allowed</em> edit is re-validated by constructing the
+  full <code>ClausterConfig</code> before any disk I/O, so a value that fails the same
+  fail-closed startup validation is refused with <code>422</code>.</li>
+</ul>
+<p>Concretely, that excludes — for example — <code>auth.*</code> (passwords, tokens, the
+<code>enabled</code> master switch), <code>host</code>/<code>port</code>, <code>projects_root</code>, the <code>projects</code> map,
+<code>config_write.*</code> / <code>login_shepherd.*</code> (RCE / account-auth surface), the secret
+URL lists (<code>webhooks.urls</code>, <code>notifications.urls</code>), auth trust lists
+(<code>auth.allowed_origins</code>, <code>auth.reverse_proxy.trusted_ips</code>), and the binary
+paths (<code>claude.binary</code>/<code>claustrum.binary</code>).</p>
+<p>If you can't find a field in the editor, that is by design, not a gap. Edit
+<code>clauster.yml</code> on the host (or use the CLI) instead. That same host access also
+allows the corresponding comma-separated <code>CLAUSTER_*</code> environment override for
+the list keys above — both require the host, which is exactly the boundary the
+editor's exclusions draw.</p>
+<h3 id="advanced-settings-step-up-re-auth">Advanced settings (step-up re-auth)<a class="headerlink" href="#advanced-settings-step-up-re-auth" title="Permanent link">&para;</a></h3>
+<p>At the bottom of the Configuration modal, an <strong>Advanced settings</strong> section
+exposes a second, operational-but-sensitive allowlist (Tier-B): the <code>clone.*</code>
+and <code>webhooks.*</code> guardrail knobs, including rows editors for
+<code>clone.allowed_schemes</code> / <code>clone.allowed_private_cidrs</code> and a
+checkbox-per-event editor for <code>webhooks.events</code>. It appears only when
+<code>config_write.enabled</code> is on, and saving requires you to re-enter your
+password first — a short-lived "step-up" unlock, separate from your login
+session. Deployments without a password set (reverse-proxy or token-only
+auth) see a note instead of the unlock form; set one with
+<code>clauster hash-password</code>. The Tier-B allowlist:</p>
+<!-- BEGIN GEN: tier_b_fields -->
+<table>
+<thead>
+<tr>
+<th>Section</th>
+<th>Advanced fields</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>clone</code></td>
+<td><code>enabled</code>, <code>allow_private_hosts</code>, <code>allowed_schemes</code>, <code>allowed_private_cidrs</code>, <code>timeout_seconds</code>, <code>max_mb</code></td>
+</tr>
+<tr>
+<td><code>webhooks</code></td>
+<td><code>enabled</code>, <code>timeout_seconds</code>, <code>block_private_targets</code>, <code>events</code></td>
+</tr>
+</tbody>
+</table>
+<!-- END GEN: tier_b_fields -->
+
+<p>Its source of truth is <code>TIER_B_FIELDS</code> in the same module;
+<code>GET</code>/<code>PUT /api/config/advanced</code> back the panel.</p>
+<h2 id="how-a-save-is-applied">How a save is applied<a class="headerlink" href="#how-a-save-is-applied" title="Permanent link">&para;</a></h2>
+<p>Every save of <code>clauster.yml</code> (Tier-A and Advanced alike) follows the same
+fail-closed pipeline — a bad edit never reaches disk:</p>
+<ol>
+<li><strong>Validate.</strong> Disallowed keys are rejected (<code>400</code>); the merged config must
+   re-validate as a full <code>ClausterConfig</code> (<code>422</code> otherwise).</li>
+<li><strong>Lost-update guard.</strong> If the file changed on disk since the editor loaded
+   it (an external edit, or a concurrent save), the write is rejected with
+   <code>409</code> instead of clobbering the newer content.</li>
+<li><strong>Backup, then atomic replace.</strong> The previous file is copied to a
+   timestamped <code>clauster.yml.bak-*</code> (the five newest are kept), then the new
+   content is written to a same-directory temp file and atomically swapped
+   into place. The edit is rendered onto a comment-preserving round-trip, so
+   your inline YAML comments survive.</li>
+</ol>
+<div class="admonition note">
+<p class="admonition-title">Saves never live-reload</p>
+<p>The running process keeps its startup configuration until it restarts.
+After a save, the editor shows "Saved — restart Clauster to apply".</p>
+</div>
+<h2 id="restarting-from-the-dashboard">Restarting from the dashboard<a class="headerlink" href="#restarting-from-the-dashboard" title="Permanent link">&para;</a></h2>
+<p>The Configuration modal's <strong>Restart Clauster</strong> button applies saved changes
+without shelling into the host (#483). It re-executes the process in place:
+the same PID, a re-read of the config, and — because the service unit is
+never stopped — running bridges and hosted sessions survive the swap and are
+reattached on startup. The confirm dialog tells you how many sessions are
+running and that they keep running and reconnect; the page briefly
+disconnects, polls <code>/healthz</code>, and reloads once the restarted process binds.</p>
+<p>For restarting from the shell under systemd (and the <code>KillMode</code> caveat that
+makes it safe), see
+<a href="../../operations/#restart">Operations → the restart caveat</a>.</p>
+<h2 id="managing-claude-code-config">Managing Claude Code config<a class="headerlink" href="#managing-claude-code-config" title="Permanent link">&para;</a></h2>
+<p>The wrench button opens <strong>Manage Claude Code config</strong> — a separate modal over
+the gated <code>/api/config-write/*</code> surface for the host's Claude Code
+configuration (not Clauster's). It exists only when <code>config_write.enabled</code> is
+on; the User scope additionally requires <code>config_write.allow_user_scope</code>.</p>
+<p>Common mechanics across the modal:</p>
+<ul>
+<li><strong>Scope toggle</strong> — User / Project / Local, with a project picker for the
+  project-level scopes. Subagents have no project-local scope (Claude Code has
+  no local directory for them). The Skills tab has a Local scope for
+  <a href="#skill-visibility">skill visibility</a> only, because Claude Code has no local
+  skills folder.</li>
+<li><strong>Typed confirmation</strong> — every document save asks you to type the scope
+  name; destructive list actions (delete, reset, plugin install) have their
+  own typed confirms.</li>
+<li><strong>Secret masking</strong> — the Settings, MCP, Hooks, Subagents, and Skills
+  surfaces, and the <code>autoMode</code> box and read-only view on the Permissions tab,
+  mask secret-shaped values on read. The MCP surface also masks every <code>env</code>
+  and <code>headers</code> value, the <code>headersHelper</code> command, and the strings in
+  <code>oauth</code>, whatever their key names. It also masks the query values, the fragment and the token-like path
+  segments of a server <code>url</code>. A masked value left untouched keeps the stored
+  secret on write. If
+  Clauster cannot match a mask to its stored value, it refuses the save and
+  writes nothing. The CLAUDE.md surface and the <code>permissions</code> rules return the
+  raw content, because they round-trip the exact text on write. For what the
+  Subagents and Skills editors mask, see
+  <a href="#masked-values-in-subagent-and-skill-files">Masked values in subagent and skill files</a>.
+  For what the Hooks tab masks, see <a href="#the-hooks-tab">The Hooks tab</a>. The
+  Plugins surface is read-only for these values, and it masks them too. See
+  <a href="#plugins-and-marketplaces">Plugins and marketplaces</a>.</li>
+</ul>
+<p>The surface tabs:</p>
+<table>
+<thead>
+<tr>
+<th>Tab</th>
+<th>What it manages</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>CLAUDE.md</td>
+<td>The scope's <code>CLAUDE.md</code> memory file, as plain text.</td>
+</tr>
+<tr>
+<td>Settings</td>
+<td><code>settings.json</code> — a row for each key, typed by its value, with a Raw JSON escape hatch, plus a read-only merged ("effective") view showing which scopes each value comes from. See <a href="#the-settings-tab">The Settings tab</a>.</td>
+</tr>
+<tr>
+<td>Permissions</td>
+<td>The <code>permissions</code> object, as rows or raw JSON, and the auto mode classifier rules (<code>autoMode</code>). See <a href="#the-permissions-tab">The Permissions tab</a>.</td>
+</tr>
+<tr>
+<td>Hooks</td>
+<td>The <code>hooks</code> key, as rows or raw JSON.</td>
+</tr>
+<tr>
+<td>MCP</td>
+<td>MCP server definitions (add / edit / delete), as fields or raw JSON, plus per-server <strong>approvals</strong> for committed <code>.mcp.json</code> servers — Approve / Reject each, or reset all choices behind a typed confirm.</td>
+</tr>
+<tr>
+<td>Subagents</td>
+<td>Subagent definition files: list, edit, create, delete.</td>
+</tr>
+<tr>
+<td>Skills</td>
+<td>Skills: list, a per-skill <code>SKILL.md</code> editor, create, delete, and the visibility of each skill (<code>skillOverrides</code>). See <a href="#skill-frontmatter-checks">Skill frontmatter checks</a> and <a href="#skill-visibility">Skill visibility</a>.</td>
+</tr>
+<tr>
+<td>Plugins</td>
+<td>Installed plugins (install / uninstall / enable / disable / update) and the marketplaces they come from (add / remove).</td>
+</tr>
+</tbody>
+</table>
+<h3 id="mcp-server-definitions">MCP server definitions<a class="headerlink" href="#mcp-server-definitions" title="Permanent link">&para;</a></h3>
+<p>The MCP tab edits each server in one of two modes. Use the <strong>Fields</strong> and
+<strong>Raw JSON</strong> buttons above the definition to switch between them:</p>
+<ul>
+<li><strong>Fields</strong> is the default. Select the <code>type</code> first. The form then shows the
+  fields for that type: <code>command</code>, <code>args</code> and <code>env</code> for <code>stdio</code>, or <code>url</code>,
+  <code>headers</code> and <code>headersHelper</code> for <code>http</code>, <code>streamable-http</code>, <code>sse</code> and <code>ws</code>.
+  The form also shows the <code>oauth</code> fields (<code>clientId</code>, <code>callbackPort</code>,
+  <code>authServerMetadataUrl</code> and <code>scopes</code>) for <code>http</code>, <code>streamable-http</code> and <code>sse</code>,
+  and <code>timeout</code> and <code>alwaysLoad</code> for every type. Clauster builds the JSON
+  entry from the form, so you do not write JSON for a typical server.</li>
+<li><strong>Raw JSON</strong> shows the server as one JSON object, in the same shape as an
+  <code>mcpServers</code> entry in <code>.mcp.json</code>, without the server name around it. Use it
+  for the fields that the form does not show, such as <code>role</code>, <code>tools</code> or
+  <code>oauth.xaa</code>. A server that has such a field opens in Raw JSON, and a note
+  names the fields. A value with a line break, for example a <code>python -c</code>
+  script in <code>args</code>, also opens in Raw JSON, because each field is one line. So
+  does an <code>env</code> or header name that is empty or has spaces around it, because
+  the form trims each name.</li>
+</ul>
+<p>The switch from Fields to Raw JSON is refused while an <code>env</code> or header row has
+a value but no name, or shares its name with another row. One entry cannot
+hold these rows, so the switch would lose values. A note names the rows. The
+same rows also keep <strong>Save</strong> off.</p>
+<p>In both modes, a masked value shows as <code>********</code>. A server <code>url</code> is masked as
+the <a href="#the-hooks-tab">Hooks tab</a> masks an <code>http</code> hook URL: every query value, the
+fragment, and each path segment or query key that looks like a token show as
+<code>********</code>. The scheme, the host, the port, the plain path, and the plain query
+keys stay visible, for example <code>https://mcp.example.com/v1?key=********</code>. A
+<code>ws</code> or <code>wss</code> URL is masked in the same way. A URL with a user name or password,
+or a <code>${...}</code> reference, shows as one <code>********</code>. A URL path segment or query
+key shorter than 20 characters is not masked if it has fewer than 8 letters and
+digits, or only letters, or only digits. Do not put a secret there.</p>
+<p>If you leave the mask in place, the save keeps the stored value. A <code>url</code> that
+holds a mask keeps the stored URL only when every visible character of it is
+unchanged. Clauster compares the text exactly. If you change any part of such a
+URL, for example the host, the path, or a query key, the save is refused
+(<code>422</code>). Type the full URL again. If you change the <code>type</code> or a URL of a
+remote server, or the <code>command</code> or <code>args</code> of a stdio server, the save cannot
+keep a masked value (see the list below). The save also cannot keep a mask that
+has no stored value behind it, for example in a row that you renamed. In both
+cases, the editor names each masked value and keeps <strong>Save</strong> off until you
+type each of these values again.</p>
+<p>The editor accepts each field that the
+<a href="https://code.claude.com/docs/en/mcp">Claude Code MCP documentation</a> lists for
+a transport, and each field that the installed <code>claude</code> CLI reads and keeps
+for that transport even when the documentation does not list it:</p>
+<table>
+<thead>
+<tr>
+<th><code>type</code></th>
+<th>Required</th>
+<th>Optional</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>stdio</code>, or no <code>type</code></td>
+<td><code>command</code></td>
+<td><code>args</code>, <code>env</code></td>
+</tr>
+<tr>
+<td><code>http</code> (alias <code>streamable-http</code>), <code>sse</code></td>
+<td><code>url</code></td>
+<td><code>headers</code>, <code>headersHelper</code>, <code>oauth</code>, <code>request_timeout_ms</code>, <code>tools</code>, <code>toolPermissions</code>, <code>displayName</code>, <code>discoveryCache</code></td>
+</tr>
+<tr>
+<td><code>ws</code></td>
+<td><code>url</code></td>
+<td><code>headers</code>, <code>headersHelper</code></td>
+</tr>
+</tbody>
+</table>
+<p>Every transport also accepts <code>timeout</code> (milliseconds, a positive integer),
+<code>alwaysLoad</code> and <code>bareElicitationCapability</code> (both <code>true</code> or <code>false</code>), and
+<code>role</code> (only <code>"comms"</code>). The <code>oauth</code> object accepts <code>clientId</code>, <code>callbackPort</code>
+(1 to 65535), <code>authServerMetadataUrl</code> (an <code>https://</code> URL), <code>scopes</code> (a
+space-separated string) and <code>xaa</code> (<code>true</code> or <code>false</code>). On <code>http</code> and <code>sse</code>,
+<code>tools</code> is a list of <code>{"name": …, "permission_policy": …}</code> objects, where the
+policy is <code>always_allow</code>, <code>always_ask</code> or <code>always_deny</code>. <code>toolPermissions</code> maps
+a tool name to <code>allow</code>, <code>ask</code> or <code>blocked</code>.</p>
+<p>The editor refuses the whole entry when a field is unknown or has the wrong
+type. It also refuses these values, because Claude Code refuses, skips or
+ignores them:</p>
+<ul>
+<li>
+<p>The <code>transport</code> key, and <code>env</code> on an <code>http</code>, <code>sse</code> or <code>ws</code> server. Earlier
+  Clauster versions accepted both, but Claude Code ignores them. Use <code>type</code>
+  instead of <code>transport</code>. When Clauster loads a stored server that has them, it
+  converts the server (see below).</p>
+</li>
+<li>
+<p>A server name with a character other than a letter, a number, a hyphen or an
+  underscore, or a name that starts with a hyphen. Earlier Clauster versions
+  accepted a dot. You can still delete a stored server with a dot in its name,
+  but a save that includes it is refused. Claude Code skips that server.</p>
+</li>
+<li>A masked value (<code>********</code>) when nothing is stored behind it, for example in
+  a new server that you copied from the masked view of another one. Type the
+  real value instead.</li>
+<li>A masked value in an <code>http</code>, <code>sse</code> or <code>ws</code> server when you changed its <code>type</code>,
+  or any character of its <code>url</code> or of another url field such as
+  <code>oauth.authServerMetadataUrl</code>. Clauster compares the text exactly, so a
+  change of letter case, an added default port or a new query string also
+  counts. Clauster does not send a stored credential to a new destination.
+  Type the credential again.</li>
+<li>A masked value in a stdio server, usually an <code>env</code> value, when you changed
+  its <code>command</code> or any element of its <code>args</code>, including their order. Clauster
+  compares the text exactly. It does not hand a stored value to a new command.
+  Type the masked values again. A change to an unmasked <code>env</code> value keeps the
+  other masked values.</li>
+<li>A reserved name, such as <code>workspace</code>, <code>claude-in-chrome</code> or <code>computer-use</code>.</li>
+<li>An entry with a <code>url</code> and no <code>type</code>. Claude Code reads such an entry as a
+  stdio server and skips it.</li>
+<li><code>"type": "sdk"</code>, <code>"sse-ide"</code>, <code>"ws-ide"</code> or <code>"claudeai-proxy"</code>. Claude Code
+  registers these servers at runtime and refuses them in a configuration file.</li>
+</ul>
+<p>When the MCP tab loads a stored server that has a field Claude Code ignores,
+Clauster converts the server in the editor and shows a note above the list
+that names each change. It does not change the file until you save:</p>
+<ul>
+<li>If <code>type</code> is not set, a <code>transport</code> value of <code>stdio</code>, <code>http</code>,
+  <code>streamable-http</code>, <code>sse</code> or <code>ws</code> becomes <code>type</code>. If <code>type</code> is set, Clauster
+  removes <code>transport</code>.</li>
+<li>Clauster removes <code>env</code> from an <code>http</code>, <code>sse</code> or <code>ws</code> server. Claude Code never
+  read these values, so nothing is lost. The note gives the number of values.</li>
+</ul>
+<p>To write the fix, open the server and save it. You do not have to edit it
+first. A save through the API that still has these fields is refused, and the
+error message tells you to reload the server and save it.</p>
+<p>Clauster stores a <code>headersHelper</code> command but never runs it. Claude Code runs it
+when it connects to the server. For a server in <code>.mcp.json</code> or at local scope,
+Claude Code runs it only after you accept the trust dialog for that project.</p>
+<p>An OAuth client secret is not part of the entry. Claude Code keeps it in the
+system keychain or a credentials file. The <code>POST /api/config-write/mcp/server</code>
+route takes an optional <code>client_secret</code> for an <code>http</code> or <code>sse</code> server. The
+dashboard does not send one. Clauster passes it to
+<code>claude mcp add-json --client-secret</code> through the <code>MCP_CLIENT_SECRET</code>
+environment variable, never on the command line. The route refuses a
+<code>client_secret</code> for an entry that holds a masked value, because Clauster then
+writes the file directly and cannot deliver the secret. To change the secret of
+a stored server, delete the server and add it again with every value typed in.</p>
+<p>Three entries can look broken when they are not. The <strong>Source</strong> badge on each
+row tells the first two apart:</p>
+<ul>
+<li><strong>A built-in subagent is listed with no description, and cannot be edited or
+  deleted.</strong> Claude Code compiles <code>general-purpose</code>, <code>explore</code>, <code>plan</code>,
+  <code>claude</code>, <code>statusline-setup</code> and <code>claude-code-guide</code> into the CLI, so there
+  is no file anywhere to edit. Every install shows these six, at both scopes,
+  before you add anything of your own. You also cannot create a subagent with
+  one of these names in Clauster.</li>
+<li><strong>A plugin-provided subagent is listed, but cannot be edited or deleted.</strong> A
+  plugin owns that file, so Clauster refuses to change it. To change it, change
+  the plugin. When the plugin supplies it as a symlink, Clauster never follows
+  the link, so the description is blank as well.</li>
+<li><strong>A skill Clauster cannot read still appears, carrying an error in place of
+  the missing information.</strong> One unreadable skill never hides the others.</li>
+</ul>
+<h3 id="the-settings-tab">The Settings tab<a class="headerlink" href="#the-settings-tab" title="Permanent link">&para;</a></h3>
+<p>The Settings tab edits each top-level key of the settings file for the scope,
+except the keys that another tab writes. These are <code>permissions</code> and <code>autoMode</code>
+(the Permissions tab), <code>hooks</code> (the Hooks tab) and <code>enabledPlugins</code> (the Plugins
+tab). A save that names one of them is refused (<code>422</code>), and the error names the
+tab to use. Clauster checks the shape of <code>env</code> only. It does not run or interpret
+any other value. Claude Code reads the values when a session starts.</p>
+<p>The tab has two modes, Rows and Raw JSON. In Rows mode, each top-level key of the
+file is one row, and the editor follows the JSON type of the value:</p>
+<ul>
+<li>A Boolean is a switch.</li>
+<li>A number is a number box. A save sends a number, and an empty box blocks the
+  save.</li>
+<li>A string is a text box. When the
+  <a href="https://code.claude.com/docs/en/settings-reference">settings reference</a> names
+  values for the key, for example <code>tui</code> or <code>theme</code>, the box suggests them. To see
+  all the suggestions, clear the box, then press the Down arrow key. You can type
+  any value, and it saves as you
+  typed it. A value that is not one of the known values shows a warning on its
+  row and in a note at the top of the tab. The save is not refused. The known
+  values also cover a custom theme (<code>custom:&lt;slug&gt;</code>) and a <code>timeFormat</code> pattern
+  that holds a <code>%</code>.</li>
+<li>An object, a list or <code>null</code> shows its value, its type and an <strong>Edit in Raw
+  JSON</strong> button. A save writes it back unchanged.</li>
+<li><code>env</code> has its own table of variables below the rows.</li>
+</ul>
+<p>The known values are suggestions only. Clauster copies them by hand from the
+settings reference (read on 2026-11-05) and does not check them against the
+installed <code>claude</code>. They can lag behind Claude Code: a value that a newer Claude
+Code reads can show the warning, and a misspelled value saves too. The warning is
+the only check that Clauster makes on these values.</p>
+<p>Each value saves with the JSON type that it had when it loaded, unless you change
+it. For example, the string <code>"1"</code> stays a string. To add a key, type its name in
+<strong>Add a key</strong>, or pick one of the suggestions, then pick the type of the value:
+text, true/false or number. The key suggestions are the documented keys of one
+value that Claude Code reads at the current scope. When you type a documented
+key, the tab selects its type for you, and you can change it. A new switch starts
+off, and a new number box starts empty. A documented key that holds an object or
+a list is added in Raw JSON, and the tab says so. Clauster sends any other name as
+you typed it. If you type a key that another tab edits, the tab names that tab
+and links to it.
+The browser does not decide whether Claude Code reads a key at a scope. The server
+checks every key when you save, and the error gives its reason. Raw JSON shows
+the same keys as JSON. A switch between the two modes keeps every value. While a
+number box is empty or two <code>env</code> variables have the same name, the tab stays in
+Rows mode, and a note above the rows says why.</p>
+<p>No other tab writes these keys in a settings file, so the Settings tab shows them:</p>
+<ul>
+<li><code>enabledMcpjsonServers</code> and <code>disabledMcpjsonServers</code>. The MCP tab shows an
+  approval from a settings file as read-only, with a <code>settings</code> badge. Change
+  it here.</li>
+<li><code>skillOverrides</code>. The Skills tab has no editor for it yet.</li>
+<li><code>disabledPlugins</code>. Claude Code 2.1.318 does not read this key. If a file
+  still has it, remove it here.</li>
+</ul>
+<p>Every <code>env</code> value shows as <code>********</code>. If a hand-edited <code>env</code> is not an object,
+it shows as one <code>********</code>, and the save is refused (<code>422</code>, "'env' must be an
+object") until you replace it with an object in Raw JSON. The value of each
+credential helper shows
+as <code>********</code> too, because the command can hold the credential that it prints.
+The helpers are <code>apiKeyHelper</code>, <code>awsAuthRefresh</code>, <code>awsCredentialExport</code>,
+<code>gcpAuthRefresh</code>, <code>otelHeadersHelper</code> and <code>proxyAuthHelper</code>. Other values show
+as <code>********</code> when they look like a secret. If you leave a mask as it is, the
+save keeps the stored value. If a mask no longer matches a stored value, the
+save is refused (<code>422</code>) and the settings file is not changed. This occurs when
+you rename an <code>env</code> variable that shows a mask, or when you move or remove an entry of a list
+that holds a mask. Type the real value again. All masks look the same, so to
+change one masked entry of a list, type the real value of every masked entry in
+that list.</p>
+<p>The <a href="https://code.claude.com/docs/en/settings-reference">settings reference</a>
+gives each key a scope. Claude Code reads some keys only from user settings,
+only from user and local settings, only from managed settings, or only from
+<code>~/.claude.json</code>. Clauster refuses a save that puts such a key at a scope where
+Claude Code ignores it (<code>422</code>), and the error names the scope that works. For
+example:</p>
+<ul>
+<li><code>skipAutoPermissionPrompt</code>, <code>modelPicker</code> and <code>spellcheck</code> work only at User
+  scope.</li>
+<li><code>useAutoModeDuringPlan</code> and <code>skipDangerousModePermissionPrompt</code> work at User
+  and Local scope.</li>
+<li><code>strictKnownMarketplaces</code> and <code>allowManagedHooksOnly</code> work only in managed
+  settings. Clauster never writes managed settings.</li>
+<li><code>diffTool</code> and <code>autoConnectIde</code> belong in <code>~/.claude.json</code>, which the Claude
+  Code <code>/config</code> command writes.</li>
+</ul>
+<p>If a file already holds such a key, remove the key (its <strong>Remove</strong> button in
+Rows mode, or Raw JSON) before you save the file again at that scope. The auto
+mode key <code>disableAutoMode</code> and the hook keys <code>disableAllHooks</code>,
+<code>allowedHttpHookUrls</code> and <code>httpHookAllowedEnvVars</code> work in every settings file,
+so the tab accepts them at every scope.</p>
+<p>The settings reference gives <code>bashEditDiffEnabled</code> and
+<code>sandbox.allowNestedUserNamespaces</code> User scope, but Claude Code also reads
+<code>false</code> for them from a project or local file, so the tab accepts <code>false</code> at
+every scope. Of the three files, Claude Code reads <code>true</code> for them only from
+user settings, so the tab refuses <code>true</code> at Project and Local scope. If a project or local file
+already holds <code>true</code> for one of them, change it to <code>false</code> or remove it before
+you save. Clauster checks no other values, so it does not refuse a <code>mask</code> entry
+of <code>sandbox.credentials.envVars</code> in a project file, although Claude Code drops
+that entry.</p>
+<p>Some keys are Desktop-only: only Claude Desktop reads them, and the Claude Code
+CLI ignores them. The tab keeps the scope that the settings reference gives
+each one. <code>sshConfigs</code> works at User scope only. <code>sshHostAllowlist</code>,
+<code>browserExternalPageTools</code>, <code>disableBrowserExternalNavigation</code>,
+<code>disableDesktopLocalSessions</code> and <code>disableMobileSimulatorTools</code> work only in
+managed settings, so the tab refuses them at every scope. The refusal says that
+only Claude Desktop reads the key. If the file that you load holds a
+Desktop-only key, a note above the editor names it, and the merged view leaves
+it out.</p>
+<p>At Project and Local scope, the merged ("effective") view shows the value that
+Claude Code applies from the three files. Local settings override project
+settings, and project settings override user settings. Claude Code merges an
+object such as <code>env</code> key by key and combines the lists from each file. A plain
+value from a higher scope replaces the lower one, and <code>fallbackModel</code> comes
+whole from one file. A key or value that a file is not allowed to set is left
+out. When more than one file makes up a value, the <strong>From</strong> column names each file.
+Managed settings and the <code>--settings</code> flag are not part of the view.</p>
+<p>If a scope fails to load, the tab clears its rows. A save therefore cannot write
+the values of the scope that you looked at before into the new scope.</p>
+<h3 id="the-permissions-tab">The Permissions tab<a class="headerlink" href="#the-permissions-tab" title="Permanent link">&para;</a></h3>
+<p>The rows editor shows every key that the Claude Code
+<a href="https://code.claude.com/docs/en/settings-reference#permissions">settings reference</a>
+documents for the <code>permissions</code> object:</p>
+<ul>
+<li>The rule lists <code>allow</code>, <code>deny</code> and <code>ask</code>, and the directory list
+  <code>additionalDirectories</code>, which gives Claude file access outside the
+  directory that the session starts in. Clauster stores each entry as you type
+  it. It never parses a rule or resolves a path.</li>
+<li><code>defaultMode</code>. The list offers <code>default</code>, <code>acceptEdits</code>, <code>plan</code>, <code>dontAsk</code>,
+  <code>manual</code> (an alias for <code>default</code>), and <code>auto</code> at User scope only.</li>
+<li>Four switches. A checked box writes <code>true</code> for
+  <code>blockReadsOutsideWorkingDirectories</code> and
+  <code>blockWritesOutsideWorkingDirectories</code>, and <code>"disable"</code> for
+  <code>disableBypassPermissionsMode</code> and <code>disableAutoMode</code>.</li>
+</ul>
+<p>A shape that the rows cannot show opens in Raw JSON. A save with an unknown key
+or a wrong type is refused whole, with a <code>422</code> that names the key.</p>
+<p><code>bypassPermissions</code> is not offered, and a save that sets it as <code>defaultMode</code> is
+refused at every scope, so Clauster never writes it. A hand-written
+<code>bypassPermissions</code> in User or managed settings takes effect for a session that
+starts with <strong>No forced mode</strong> (<code>inherit</code>). For this reason, a project offers
+<code>inherit</code> only when it sets <code>allow_bypass_permissions: true</code>. See the
+<a href="../../security/#bypasspermissions-footgun-gate">bypassPermissions footgun gate</a>.</p>
+<p>At User scope, the box under the rows edits <code>autoMode</code>, the rules for the
+auto mode classifier. <code>autoMode</code> is a top-level key next to <code>permissions</code>, so
+the Settings tab does not show it. The box takes a JSON object with the lists
+<code>environment</code>, <code>allow</code>, <code>soft_deny</code> and <code>hard_deny</code>, and the Boolean
+<code>classifyAllShell</code>. Put the entry
+<code>"$defaults"</code> in a list to keep the built-in rules at that position. A list
+without it replaces the built-in rules for that section. A <code>soft_deny</code> or
+<code>hard_deny</code> list without <code>"$defaults"</code> removes the built-in blocks, including
+the block for force push and the data-exfiltration rule. Run
+<code>claude auto-mode defaults</code> to see the built-in rules. See
+<a href="https://code.claude.com/docs/en/auto-mode-config">Configure auto mode</a>.</p>
+<p>Claude Code reads <code>autoMode</code> from User settings, managed settings and the
+<code>--settings</code> flag, and it reads <code>defaultMode: "auto"</code> from User and managed
+settings. It ignores both in a project or local settings file, so that a
+repository cannot add its own classifier rules. For this reason, the tab has no
+<code>autoMode</code> box at Project or Local scope:</p>
+<ul>
+<li>If the file has no <code>autoMode</code> block, the tab says that Claude Code reads
+  <code>autoMode</code> only from User scope, and a <strong>Switch to User scope</strong> button opens
+  the box there. If <code>config_write.allow_user_scope</code> is off, the tab has no User
+  scope, so it tells you to edit <code>~/.claude/settings.json</code> on the host instead.</li>
+<li>If the file has an <code>autoMode</code> block, the tab shows it read-only, masked as
+  below, and marked as ignored by Claude Code. <strong>Remove it</strong> marks the block for
+  removal (<strong>Keep it</strong> undoes that). Type the scope name and press <strong>Save</strong> to
+  remove the <code>autoMode</code> key from the file. The save leaves every other key in
+  the file as it is.</li>
+</ul>
+<p>A save at Project or Local scope that sends a non-empty <code>autoMode</code> or
+<code>defaultMode: "auto"</code> is refused, and the error names User scope.</p>
+<p>If the text of an <code>autoMode</code> entry holds a secret-shaped value anywhere, the
+entry shows as <code>********</code>. A secret-shaped value is a URL with a user name or
+password, a <code>${...}</code> reference, or a <code>key: value</code> line with a secret-shaped key.
+Leave the mask to keep the stored
+entry. You can add, remove or move the other entries around a mask. If a list
+still holds masks but their number no longer matches the number of masked
+entries on disk, the save is refused. Restore the masks as they loaded, or type
+the full entry again. If you remove every mask from a list, the save is
+accepted, and it deletes those entries.</p>
+<h3 id="masked-values-in-subagent-and-skill-files">Masked values in subagent and skill files<a class="headerlink" href="#masked-values-in-subagent-and-skill-files" title="Permanent link">&para;</a></h3>
+<p>The Subagents editor shows each secret value in the frontmatter as <code>********</code>.
+Each field is masked as the tab that owns its shape masks it:</p>
+<ul>
+<li>In an inline <code>mcpServers</code> definition, every <code>env</code> and <code>headers</code> value, a
+  <code>headersHelper</code> command, a URL with a user name or password, and the query
+  values and token-like path segments of a <code>url</code> are masked, as on the MCP
+  tab. A server name is not a secret, so a server called <code>oauth-gw</code> keeps its
+  <code>type</code> and the plain parts of its <code>url</code> visible.</li>
+<li>In <code>hooks</code>, the parts of a hook URL and the <code>headers</code> values that the
+  <a href="#the-hooks-tab">Hooks tab</a> masks are masked.</li>
+<li>Every non-empty <code>env</code> value is masked.</li>
+<li>In every field, a value with a secret-shaped key, a <code>${...}</code> reference, or a
+  URL with a user name or password is masked.</li>
+</ul>
+<p>The Markdown body after the frontmatter is never masked or changed. Comments in
+the frontmatter are not masked either. Do not put a secret in the body or in a
+comment. If the frontmatter is not valid YAML, the editor cannot read its
+fields. It then masks the frontmatter line by line, as the Skills editor does,
+and that misses a secret under a key that does not look secret. A masked value
+in such a file cannot be kept, so type the real values when you repair it. The
+file keeps its line endings. If the file holds masked values and its frontmatter is
+valid YAML only after Claude Code adds quotes to some values, the editor shows
+those values with the quotes, and a save writes them with the quotes.</p>
+<p>If you leave a mask in place, the save keeps the stored value. The save is
+refused, and nothing is written, in these cases:</p>
+<ul>
+<li>A mask with no stored value behind it, for example in a new file, under a
+  renamed key, or in a server that you renamed.</li>
+<li>A masked value in an <code>http</code>, <code>sse</code> or <code>ws</code> server when you changed its <code>type</code>
+  or any character of a URL in it. Clauster compares the URL text exactly and
+  never parses it.</li>
+<li>A masked <code>env</code> value in a stdio server when you changed its <code>command</code> or any
+  element of its <code>args</code>.</li>
+<li>A masked hook value when the <a href="#the-hooks-tab">Hooks tab</a> rules cannot keep it.</li>
+</ul>
+<p>Type the real value again to save the change. If a secret is on a value with a
+YAML anchor, an alias, or a merge key, or inside an ordered map or a set, the
+editor cannot mask it in place. It then shows a note and not the file. Edit
+that file on the host.</p>
+<p>The Skills editor masks each file line by line: a <code>key: value</code> line with a
+secret-shaped key, a <code>${...}</code> reference, or a URL with a user name or password.
+The body of <code>SKILL.md</code> is masked too, because skills often hold commands.</p>
+<p>In the frontmatter of <code>SKILL.md</code>, the editor also masks every <code>url</code> value, for
+example the <code>url</code> of a server in <code>mcpServers</code> or of an <code>http</code> hook in <code>hooks</code>.
+It masks the value as the <a href="#the-hooks-tab">Hooks tab</a> masks a URL. Each query
+value, the fragment, and each token-like path segment show as <code>********</code>. The
+scheme, the host, the port, the plain path, and the plain query keys stay
+visible, for example <code>https://mcp.example.com/v1?key=********</code>. A URL with a
+user name or password, or with a <code>${...}</code> reference, shows as one <code>********</code>. If
+the value covers more than one line, holds an escape, or has an anchor or a tag
+in front of it, each line of the value shows as one <code>********</code>.</p>
+<p>The editor decides this view from the text of a file, not from its name. Every
+file of the skill that starts with a frontmatter block gets it. So <code>SKILL.md</code>
+gets it under every path that reaches it, for example <code>./SKILL.md</code> or a link,
+and a copy of it gets it too. Only the frontmatter block gets the view. A <code>url</code>
+line in the Markdown body, or in a later document of a YAML file, gets only the
+line masks above. A save refuses (<code>422</code>) a file key that names <code>SKILL.md</code> under
+another spelling or case, for example <code>./SKILL.md</code>, <code>skill.md</code> or <code>SKILL.md.</code>,
+because macOS or Windows opens <code>SKILL.md</code> for it. Send the file once, as
+<code>SKILL.md</code>.</p>
+<p>Some URL text is not masked. A path segment or query key shorter than 20
+characters is not masked if it has fewer than 8 letters and digits, or only
+letters, or only digits. Do not put a secret in them.</p>
+<p>If Clauster cannot read a frontmatter block the way Claude Code reads it, every
+line of the block shows as <code>********</code>. This applies only to a block that holds
+the text <code>url</code> (in any case), <code>http:</code>, <code>https:</code>, <code>ws:</code>, <code>wss:</code> or a backslash.
+A block without any of them gets only the line masks. These are the cases:</p>
+<ul>
+<li>The block is not valid YAML to Clauster.</li>
+<li>It holds <code>---</code> before its closing fence.</li>
+<li>It holds a line break that only YAML 1.1 knows.</li>
+<li>Only Claude Code reads its opening fence.</li>
+<li>It is valid only after Claude Code re-quotes it.</li>
+<li>It holds syntax that YAML 1.2 refuses, for example a quoted value that
+  continues on a line that starts at column 0.</li>
+<li>It is larger than the 256 KiB file cap.</li>
+</ul>
+<p>For <code>SKILL.md</code>, a save of such a file is refused, except when the frontmatter is
+valid only after Claude Code re-quotes it. To change the file, type the whole
+frontmatter again or edit the file on the host.</p>
+<p>A masked line keeps its stored text on save only when every other character of
+the line is unchanged. For a frontmatter <code>url</code>, the scheme, the host, the port,
+the path, and every query key must be unchanged, and no query parameter can be
+added. Otherwise the save is refused (<code>422</code>) and nothing is written. A kept line
+must also stay where the editor masks it. A masked <code>url</code> line that you move into
+the Markdown body is refused, because the body would show its token. Each stored
+line is kept at most once, in order, so a
+copied masked line is refused. If two stored lines look the same when masked, a
+save that adds or removes one of them is refused too. A
+masked line in the frontmatter is kept only while <code>hooks</code> and <code>mcpServers</code> are
+unchanged. Otherwise a changed URL on another line receives the stored
+credential. A new line that holds <code>********</code> is refused, so type the
+real value.</p>
+<p>A mask hides a stored value, but not its length. A refusal about a masked value
+never names a size, but repeated saves near a size limit can show how long a
+masked value is.</p>
+<h3 id="subagent-frontmatter-checks">Subagent frontmatter checks<a class="headerlink" href="#subagent-frontmatter-checks" title="Permanent link">&para;</a></h3>
+<p>The Subagents editor checks the frontmatter of a subagent file before it
+saves the file. It checks each field in the
+<a href="https://code.claude.com/docs/en/sub-agents#supported-frontmatter-fields">Claude Code frontmatter reference</a>.
+It accepts every value that the installed Claude Code (2.1.318) reads for
+that field, also a value that the reference does not list. It refuses a value
+that Claude Code rejects or ignores. If one field fails, Clauster refuses the
+whole save and writes nothing.</p>
+<p>Clauster reads YAML 1.1 and Claude Code reads YAML 1.2, so a few unquoted
+spellings mean different things to the two. Clauster refuses the ones it can
+detect. For example, write <code>true</code>, not <code>yes</code>. Write a plain decimal number,
+not <code>010</code>, <code>0b101</code> or <code>1_000</code>. Quote a value that must stay a string. See
+<a href="#yaml-spellings-that-clauster-refuses">YAML spellings that Clauster refuses</a>.
+Clauster never runs a hook command and never connects to an MCP server from
+this editor.</p>
+<ul>
+<li><code>name</code> must be lowercase letters, digits and hyphens, at most 239
+  characters, and the same as the name of the file. The name is also the
+  file name, so this rule is narrower than the Claude Code rule. A file with
+  a longer or other name does not show in the list.</li>
+<li><code>memory</code>, <code>color</code> and <code>experimental.cacheTtl</code> accept only their listed
+  values, written exactly as listed.</li>
+<li><code>effort</code> accepts a level name in any case, the alias <code>med</code>, or an integer.
+  <code>isolation</code> accepts <code>worktree</code> and also <code>remote</code>, which Claude Code reads
+  but does not document.</li>
+<li><code>maxTurns</code> and <code>autoCompactWindow</code> accept a number or a string that Claude
+  Code reads as a whole number, for example <code>200000</code>, <code>"200,000"</code> or <code>2e5</code>.
+  <code>autoCompactWindow</code> must be from <code>100000</code> to <code>1000000</code>. Do not write
+  <code>200k</code>: Claude Code reads it as 200, which is out of range.</li>
+<li><code>background</code> and <code>omitClaudeMd</code> accept <code>true</code> and <code>false</code>, also as quoted
+  strings. They refuse <code>yes</code>, <code>no</code>, <code>on</code> and <code>off</code>: Claude Code reads those as
+  text and ignores them.</li>
+<li><code>tools</code> must name at least one tool. <code>disallowedTools</code> refuses a <code>*</code> entry,
+  because Claude Code then applies no denylist at all.</li>
+<li><code>mcpServers</code> must be a list. Each item is the name of a server that you
+  configured already, or one <code>name: definition</code> object. Claude Code reads only
+  the list form and ignores a mapping. See
+  <a href="#inline-mcp-servers">Inline MCP servers</a> for the checks on a definition.</li>
+<li><code>permissionMode</code> accepts <code>manual</code> as an alias for <code>default</code>. It refuses
+  <code>bypassPermissions</code>, as every config-editor surface does. See the
+  <a href="../../security/#bypasspermissions-footgun-gate">bypassPermissions footgun gate</a>.</li>
+<li>A field that is not in the reference is saved as written. Claude Code
+  ignores a field that it does not recognize. The one exception is <code>env</code>:
+  Clauster still refuses an <code>env</code> that is not a map of names to plain values.</li>
+</ul>
+<p>If you open a subagent file that writes <code>mcpServers</code> as a mapping, the editor
+shows it already converted to the list form, with a note above the text. The
+file on disk does not change until you save. Read the converted text, then
+save to write the list form. The conversion only changes the indentation of
+the <code>mcpServers</code> block, so every value and comment stays as you wrote it. If
+the editor cannot convert the block safely, it shows the file as it is, and
+the save tells you to rewrite <code>mcpServers</code> as a list. Two examples are a
+mapping written on one line, such as <code>mcpServers: {github: {...}}</code>, and two
+servers with the same name.</p>
+<h4 id="inline-mcp-servers">Inline MCP servers<a class="headerlink" href="#inline-mcp-servers" title="Permanent link">&para;</a></h4>
+<p>Claude Code reads an inline server definition in the same shape as an entry in
+<code>.mcp.json</code>. The Subagents editor therefore checks each definition with the
+field rules of the MCP tab, which
+<a href="#mcp-server-definitions">MCP server definitions</a> describes. It accepts the
+same fields for each transport. It refuses the same values, for example
+<code>transport</code>, <code>env</code> on an <code>http</code>, <code>sse</code> or <code>ws</code> server, a <code>url</code> with no <code>type</code>,
+and <code>"type": "sdk"</code>. The YAML spelling rules above also apply to the true or
+false fields and the number fields of a definition, for example <code>alwaysLoad</code>
+and <code>timeout</code>. Quote a text value that looks like a number, for example
+<code>env: {PORT: "1e3"}</code> or <code>args: ["0o17"]</code>. Claude Code reads the unquoted value
+as a number and skips the server, so the editor refuses it.</p>
+<p>The name rule is not the same as on the MCP tab. Claude Code accepts any
+inline server name that is not reserved, so the editor accepts a name with a
+dot, a space or a leading hyphen. The editor refuses these items, because
+Claude Code skips them:</p>
+<ul>
+<li>A reserved name, such as <code>workspace</code>, <code>claude-in-chrome</code>, <code>computer-use</code>,
+  <code>Claude Preview</code> or <code>Claude Browser</code>.</li>
+<li>An item that defines more than one server. Write each server as its own
+  <code>- name:</code> item.</li>
+<li>Two inline servers with the same name. Claude Code connects only one of them.</li>
+</ul>
+<p>If an inline server in the file has <code>transport</code>, or has <code>env</code> on an <code>http</code>,
+<code>sse</code> or <code>ws</code> server, the editor converts it as the MCP tab does. The note
+above the text names each change. The file on disk does not change until you
+save.</p>
+<ul>
+<li>If <code>type</code> is not set, a <code>transport</code> value of <code>stdio</code>, <code>http</code>,
+  <code>streamable-http</code>, <code>sse</code> or <code>ws</code> becomes <code>type</code>. If <code>type</code> is set, Clauster
+  removes <code>transport</code>.</li>
+<li>Clauster removes <code>env</code> from an <code>http</code>, <code>sse</code> or <code>ws</code> server, with the lines
+  under it. Claude Code never read these values. The note gives their number.</li>
+</ul>
+<p>Only those lines change, so every other value and comment stays as you wrote
+it. If the editor cannot convert a server safely, it shows the file as it is,
+and the save tells you what to change. An example is a definition written on
+one line, such as <code>- srv: {transport: sse, url: ...}</code>.</p>
+<p>A file with the name of a built-in subagent, such as <code>claude.md</code>, overrides
+that built-in in Claude Code. The list shows the file as a read-only row next
+to the built-in row. Clauster does not edit or delete that file, so change it
+on the host.</p>
+<h3 id="the-hooks-tab">The Hooks tab<a class="headerlink" href="#the-hooks-tab" title="Permanent link">&para;</a></h3>
+<p>The Hooks tab edits the <code>hooks</code> key of the settings file for the scope. It
+accepts every hook event, every matcher form, every hook type, and every handler
+field that the <a href="https://code.claude.com/docs/en/hooks">Claude Code hooks reference</a>
+documents. It also accepts the fields that the Claude Code CLI reads but the
+reference does not list: <code>rewakeMessage</code>, <code>rewakeSummary</code>, and <code>cloud</code>. Any
+other field for that hook type stops the save with a validation error (<code>422</code>),
+and nothing is written. A <code>timeout</code> must be a number of seconds above 0, as the
+CLI requires.
+Clauster stores each hook as data and never runs it. It does not run a command,
+send a request to a URL, call an MCP tool, or send a prompt to a model.</p>
+<p>In Rows view, each hook has two lines. The first line holds the event, the
+matcher, and the type. The second line holds the handler inputs of the selected
+type and only those, then the timeout and the Remove button.</p>
+<table>
+<thead>
+<tr>
+<th>Type</th>
+<th>What Claude Code does when the hook fires</th>
+<th>Handler inputs</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>command</code></td>
+<td>Runs a shell command</td>
+<td>Command</td>
+</tr>
+<tr>
+<td><code>http</code></td>
+<td>Sends the event data as an HTTP POST to a URL</td>
+<td>URL</td>
+</tr>
+<tr>
+<td><code>mcp_tool</code></td>
+<td>Calls a tool on a configured MCP server</td>
+<td>Server and tool</td>
+</tr>
+<tr>
+<td><code>prompt</code></td>
+<td>Asks a model to allow or block the action</td>
+<td>Prompt</td>
+</tr>
+<tr>
+<td><code>agent</code></td>
+<td>Starts a subagent that checks a condition</td>
+<td>Prompt</td>
+</tr>
+</tbody>
+</table>
+<p>If any hook at the scope uses another field, for example <code>headers</code>, <code>args</code>,
+<code>async</code>, <code>model</code>, or an MCP tool <code>input</code>, the whole tab opens in Raw JSON. The
+same happens if any value contains a line break, because a row cannot show it.</p>
+<p>An <code>http</code> hook sends data off the host, so the tab shows where the data goes: the
+scheme, the host, the port, the plain path segments, and the plain query keys of
+its URL.
+These parts of the URL show as <code>********</code>:</p>
+<ul>
+<li><code>user:password@</code> credentials.</li>
+<li>Path segments and query keys that look like a token: a <code>${VAR}</code> reference, a
+  segment of 20 or more characters, or a segment whose letters and digits number
+  8 or more and mix both, with punctuation such as <code>;</code>, <code>:</code> or <code>=</code> not counted
+  (for example the three segments after <code>/services/</code> in a Slack webhook).</li>
+<li>Every query value (for example <code>?token=</code> or <code>?sig=</code>), and the fragment.</li>
+<li>The whole URL, if it contains a tab or a line break, if its port is not a number,
+  or if it is not a valid <code>http</code> or <code>https</code> URL.</li>
+</ul>
+<p>Every non-empty <code>headers</code> value also shows as <code>********</code>, and so do
+secret-shaped values in an MCP tool <code>input</code>.</p>
+<p>If you leave a mask in place, the save keeps the stored value. These rules decide
+when Clauster keeps it:</p>
+<ul>
+<li>The URL, the headers, and the <code>input</code> must be unchanged, including every visible
+  part of the URL. If you change any of them, type every masked value in that hook
+  again. You can change other fields, for example <code>timeout</code>, without retyping.</li>
+<li>If several hooks at the scope send to one destination with different masked
+  values (for example two Slack webhooks), Clauster keeps them only as a set. Each
+  hook keeps its own value when the hooks come back exactly as they were read, in
+  any order. A save that changes any field of one of them (the <code>timeout</code> too),
+  adds or removes one, or moves one to another event or matcher needs every masked
+  value among them typed again.</li>
+</ul>
+<p>Otherwise the save is refused (<code>422</code>) and nothing is written. These rules stop a
+stored token from going to a new host or path, or into a hook that you edited. If
+you edit a hook until it is identical, mask for mask, to another stored hook with
+the same URL, it becomes a copy of that hook. Clauster cannot tell the text
+<code>********</code> in any other hook field from a mask, so a save that holds it there is
+also refused. Change that value to save.</p>
+<p>Some secrets are not masked. The tab does not mask a <code>command</code>, its <code>args</code>, a
+<code>prompt</code>, a <code>model</code>, an <code>if</code> rule, a <code>statusMessage</code>, or a <code>matcher</code>. A URL path
+segment or query key shorter than 20 characters is not masked either if it has
+fewer than 8 letters and digits, or only letters, or only digits. Do not put a
+secret in them. For an <code>http</code> hook, put the secret in a header as a <code>$VAR</code> that
+<code>allowedEnvVars</code> lists.</p>
+<p>Clauster treats a hook that refers to <code>CLAUDE_PLUGIN_ROOT</code> in any field as a
+plugin hook. While one is in the settings file, every save of the Hooks tab at
+that scope is refused (<code>422</code>). Remove it in Raw JSON. To change a plugin hook,
+change the plugin.</p>
+<p>The <code>disableAllHooks</code>, <code>allowedHttpHookUrls</code>, and <code>httpHookAllowedEnvVars</code>
+settings are top-level keys, not part of the <code>hooks</code> key, so the Hooks tab does
+not edit them. Edit them on <a href="#the-settings-tab">the Settings tab</a>.</p>
+<h3 id="plugins-and-marketplaces">Plugins and marketplaces<a class="headerlink" href="#plugins-and-marketplaces" title="Permanent link">&para;</a></h3>
+<p>The Plugins tab runs the <code>claude plugin</code> command on the host for every change.
+For enable, disable, install, update, uninstall, and marketplace add and
+remove, Clauster passes <code>--scope</code> with the scope you chose, so one change never
+reaches a second settings file. The marketplace Update button is the exception:
+<code>claude plugin marketplace update</code> takes no <code>--scope</code>, because a marketplace's
+checkout is shared by every scope and project. An update therefore refreshes
+that marketplace for every project on the host, not only the one you selected.
+The commands, flags and settings below were checked against Claude Code 2.1.318.
+The scope rules and the update results below were checked against Claude Code
+2.1.319.</p>
+<ul>
+<li><strong>Each plugin row shows the scope that the plugin is installed at.</strong> The
+  plugin list holds every install on the host, at every scope, also the
+  installs of other projects. Claude Code updates or uninstalls a plugin only
+  at the scope (and project) where it is installed. At any other scope it
+  refuses, for example with "Plugin is not installed at scope project". So the
+  tab shows Update and Uninstall only on a row that is installed at the scope
+  and project you are looking at.</li>
+<li><strong>Enable and Disable also work from a scope that outranks the install
+  scope.</strong> For a User-scope plugin, they work at Project and Local scope. For a
+  Project-scope plugin, they work at Local scope of the same project. Claude
+  Code then writes the plugin in <code>enabledPlugins</code> of that project's
+  <code>.claude/settings.json</code> (Project) or <code>.claude/settings.local.json</code> (Local).
+  The value overrides the lower scope for that project only, and the file of
+  the install scope does not change. Claude Code refuses the other direction,
+  for example a Local-scope plugin at Project scope.</li>
+<li><strong>A plugin that is installed at another scope is read-only for every other
+  action.</strong> Its row tells you where it is installed, and a link switches the
+  editor to that scope (and to its project, when the project is under
+  <code>projects_root</code>). The link to User scope shows only when
+  <code>config_write.allow_user_scope</code> is on. A row that has no scope, or the Managed
+  scope, offers no action.</li>
+<li><strong>Update says what it did.</strong> Clauster reads the plugin list before and after
+  the update. It then shows the version change ("Updated x from version 1.0.0
+  to version 1.1.0."), or "already up to date" with the version. The marketplace
+  Update reads the marketplace's own plugin list (the <code>marketplace.json</code> file in
+  its checkout) before and after. It then shows whether that list changed, how
+  many plugins the marketplace now offers, and which names were added or
+  removed. If a read after the update fails, the message says that the update
+  ran and that Clauster could not read the result. If the read before the update
+  fails, Clauster does not run the update and shows the error.</li>
+<li><strong>Install and update never accept a marketplace command for you.</strong> Some
+  marketplace entries install a plugin by running a command, or fetch it with a
+  <code>headersHelper</code> command. Claude Code shows that command and asks before it
+  runs it. Clauster never passes <code>-y</code> or <code>--accept-command</code>, so Claude Code
+  refuses the install and the tab shows the error. To install such a plugin,
+  read the command and run <code>claude plugin install</code> from a terminal on the host.</li>
+<li><strong>Enable and Disable can refuse a plugin that already has that state.</strong> The
+  badge on each row shows the merged state from all scopes. If the plugin is
+  already enabled at the scope you chose, Claude Code refuses and names that
+  scope. A plugin that the project enables cannot be disabled at user scope. To
+  turn it off for yourself only, disable it at the Local scope.</li>
+<li><strong>Each marketplace row shows the source type and its location</strong>, for example
+  <code>github · owner/repo</code>. A URL that carries a user name or password, such as
+  <code>https://user:token@host/repo.git</code>, shows as <code>********</code>.</li>
+<li><strong>Clauster masks credentials in what it reads.</strong> It masks every <code>headers</code>,
+  <code>env</code> and MCP server <code>args</code> value, every <code>headersHelper</code> command, and every URL
+  that carries a user name or password. Every other <code>url</code> is masked as the
+  <a href="#the-hooks-tab">Hooks tab</a> masks an <code>http</code> hook URL: each query value (for
+  example <code>?token=</code> or <code>?sig=</code>), the fragment, and each path segment that looks
+  like a token show as <code>********</code>. The host and the plain query keys stay
+  visible. A path segment or query key under 20 characters is not masked if it
+  has fewer than 8 letters and digits, or only letters, or only digits. Do not
+  put a credential there. This applies to the marketplace list, to the
+  marketplaces that a scope declares (<code>extraKnownMarketplaces</code>), and to the
+  MCP server definitions in the plugin list. A masked value is never written
+  back. A value that is not an <code>http</code>, <code>https</code>, <code>ws</code> or <code>wss</code> URL, such as
+  <code>git@host:owner/repo.git</code>, shows as stored, or as one <code>********</code> if it holds
+  <code>?</code> or <code>#</code>. A token in the path of such a value is not detected.
+  Marketplace add refuses (<code>422</code>) a source that holds <code>********</code>, for example a
+  masked URL copied from the list. Type the full URL.</li>
+<li><strong>The Settings tab masks <code>extraKnownMarketplaces</code> in the same way.</strong> If you
+  save the Raw JSON with a masked value unchanged, Clauster keeps the stored
+  value. An <code>args</code> list shows as one <code>********</code>, so you keep it whole or type
+  the full list again. Clauster refuses the save (<code>422</code>) if a masked value can no
+  longer be matched to its stored value. This happens when you rename or move an
+  entry or a header that holds one. It also happens when you delete, reorder or
+  edit an element of a list (such as a <code>settings</code> source's <code>plugins</code>) that holds
+  one. Type the real values again, then save.</li>
+<li><strong>A masked credential stays bound to its marketplace URL.</strong> If you change any
+  <code>url</code> in a marketplace entry on the Settings tab, or remove one, Clauster
+  refuses the save (<code>422</code>) while that entry still holds any masked value, for
+  example a <code>headers</code> value or a <code>headersHelper</code>. Any change to the text counts,
+  including the letter case of the host or an added <code>:443</code>. This stops the
+  stored credential from going to a new host. Type the credential again, then
+  save. A <code>url</code> that shows a masked query value or path segment keeps the
+  stored URL only when every visible character of it is unchanged. Any change to
+  it, or a rename of its entry, refuses the save (<code>422</code>). Inside a list, such as
+  a <code>settings</code> source's <code>plugins</code>, the element that holds the URL must also be
+  unchanged and keep its place, and the list must keep its length. Type the
+  full URL again.</li>
+<li><strong>The <code>additionalMarketplaces</code> spelling is read too.</strong> Claude Code 2.1.232 and
+  later accept it as another name for <code>extraKnownMarketplaces</code>. When a file sets
+  both, the canonical key wins, as it does in Claude Code.</li>
+<li><strong>Claude Code ignores marketplaces that a project declares until you trust the
+  folder.</strong> This applies to the <code>extraKnownMarketplaces</code> entries in a project's
+  <code>.claude/settings.json</code> and <code>.claude/settings.local.json</code>. Such an entry has no
+  effect until the folder is trusted.</li>
+</ul>
+<p>The tab does not offer these commands and settings:</p>
+<ul>
+<li><code>plugin configure</code> and <code>install --config</code>. Plugin options can be secrets, and
+  Clauster does not put a secret in a command line.</li>
+<li><code>install --marketplace</code>, <code>marketplace add --claudeai</code>, <code>marketplace add
+  --sparse</code>, <code>disable --all</code>, <code>prune</code>, and the authoring commands (<code>init</code>,
+  <code>validate</code>, <code>eval</code>, <code>tag</code>, <code>test</code>).</li>
+<li>Managed policy settings such as <code>strictKnownMarketplaces</code>,
+  <code>blockedMarketplaces</code> and <code>disableCommandPluginSources</code>. Only managed settings
+  can hold them, and Clauster never writes managed settings. Claude Code still
+  applies them: a change that the policy blocks fails with Claude Code's own
+  message.</li>
+</ul>
+<h3 id="yaml-spellings-that-clauster-refuses">YAML spellings that Clauster refuses<a class="headerlink" href="#yaml-spellings-that-clauster-refuses" title="Permanent link">&para;</a></h3>
+<p>These rules apply to the frontmatter of subagent files and of <code>SKILL.md</code>
+files. The frontmatter is the YAML block between the two <code>---</code> lines, which
+are called fences. If the frontmatter has one of these, Clauster refuses the
+whole save:</p>
+<ul>
+<li>A NEL (U+0085), LINE SEPARATOR (U+2028) or PARAGRAPH SEPARATOR (U+2029)
+  character. YAML 1.1 reads it as a line break, and YAML 1.2 does not, so the
+  two see different fields.</li>
+<li>The text <code>---</code> anywhere before the closing fence, also inside a value or in
+  quotes. Claude Code ends the frontmatter at the first <code>---</code>.</li>
+<li>An alias (a <code>*name</code> reference) to a node that contains it, such as
+  <code>a: &amp;a {&lt;&lt;: *a}</code>.</li>
+<li>A nested value that YAML 1.1 and YAML 1.2 read differently. Examples are
+  <code>async: yes</code>, <code>timeout: 1_000</code> or <code>timeout: 010</code> inside <code>hooks</code>, and
+  <code>DEBUG: yes</code> inside an MCP server's <code>env</code>. Other examples are <code>1:30</code>,
+  <code>0b101</code>, <code>1e3</code>, <code>0o17</code>, and a tagged value such as <code>!!int "10"</code>, which the
+  two read differently. Write <code>true</code>, <code>false</code> or a plain decimal. If the value
+  must stay text, quote it.</li>
+<li>A <code>#</code> with no space before it, right after a quoted value or a bracket, such
+  as <code>"a"#b</code>, <code>[x]#b</code> or <code>[a,#c</code>. YAML 1.2 refuses it, so Claude Code reads a
+  changed copy of the frontmatter, or none of it. Put a space before the <code>#</code>.</li>
+<li>A lone carriage return (CR) that is not part of a CRLF line ending.</li>
+<li>A quoted value that goes on to a line that starts at column 0. Indent the
+  next line.</li>
+<li>A key that appears twice in the same mapping. This includes two spellings
+  that one YAML version reads as the same key, such as <code>1</code> and <code>01</code>, or <code>null</code>
+  and <code>~</code>, and two <code>&lt;&lt;</code> merge keys in one mapping.</li>
+<li>A tab inside a plain value or after it, such as <code>a</code> then a tab then <code>b</code>.
+  YAML 1.2 accepts it, but Clauster's parser does not. Use a space.</li>
+</ul>
+<p>Some frontmatter is not valid YAML, but Claude Code still reads it, and so does
+Clauster. When the first parse fails, Claude Code parses a changed copy of the
+frontmatter. In that copy, a top-level <code>key: value</code> line gets its value in
+double quotes if the key has only letters, <code>_</code> and <code>-</code>, and the value holds a
+YAML symbol such as <code>[</code>, <code>{</code>, <code>#</code>, or a colon and a space. A value that is
+already quoted or is a flow list such as <code>[Read, Grep]</code> stays as it is. Each
+tab at the start of a line becomes two spaces. Clauster reads the same copy,
+so it checks the values that Claude Code sees in the known cases. For example,
+<code>argument-hint: [filename] [format]</code> saves, and its value is the text
+<code>[filename] [format]</code>. The editor does not remove fields on load from a file
+that Claude Code reads through this copy.</p>
+<p>A file that is not valid YAML even after these changes is refused. One example
+is a bad line that is indented under another key. Another example is a line in
+a file with Windows (CRLF) line endings, because Claude Code does not change
+those lines. Clauster also refuses some files that YAML 1.2 reads but its own
+parser does not, because it cannot read the values the same way. The examples
+are a file that uses one anchor name twice, such as <code>&amp;t</code> on two values, an
+anchor name with a dot or a non-ASCII letter, such as <code>&amp;d.1</code>, a list item
+that starts with <code>:</code>, such as <code>[:a]</code>, and a tab between a value and a comment,
+such as <code>Bash</code>, a tab, then <code># note</code>.</p>
+<h3 id="what-a-skill-save-writes">What a skill save writes<a class="headerlink" href="#what-a-skill-save-writes" title="Permanent link">&para;</a></h3>
+<p>A skill save writes only the files that it sends. The Skills editor sends
+<code>SKILL.md</code> alone. So a save replaces <code>SKILL.md</code> and keeps every other file in
+the skill directory, for example <code>scripts/</code> and reference files. The kept
+files stay byte for byte as they were. Clauster removes files from a skill only
+when you delete the whole skill.</p>
+<p>On Linux and macOS, the kept files and directories also keep their modes and
+their group, with these changes:</p>
+<ul>
+<li>Clauster clears the setuid and setgid bits. A directory keeps its sticky bit.</li>
+<li>The owner of a directory always gets read, write and search access, so that
+  the next save can remove the old copy.</li>
+<li>The skill directory itself never gets group or world write access.</li>
+<li>If you are not a member of the stored group, Clauster clears the group bits.
+  It never gives them to another group.</li>
+</ul>
+<p>While Clauster builds the new copy, every directory in it is private to the
+owner. Clauster sets the final modes only as the last step before the new copy
+replaces the old one. Clauster does not keep the file owner, access control
+lists, or extended attributes.</p>
+<p>On Windows, Clauster keeps no modes. The new copy gets the access rules of the
+skills directory that holds it, also while Clauster builds it.</p>
+<p>Clauster refuses the save and writes nothing in these cases:</p>
+<ul>
+<li>The skill directory holds a symlink, or an entry that is not a regular file
+  or a directory. Clauster does not follow a symlink inside the skill
+  directory, and it cannot keep one without following it. Replace the symlink
+  with a regular file, then save.</li>
+<li>Clauster cannot read a file or a directory that it must keep, or one of them
+  changes while Clauster copies it.</li>
+<li>A sent path is a directory in the stored skill, or it is inside a path that
+  the stored skill holds as a file.</li>
+<li>A sent path names a stored file under another spelling, and Clauster cannot
+  prove which file it is. Examples are a case variant of a file that has a hard
+  link, or a Windows short name such as <code>LONGNA~1.MD</code>. Send the file under its
+  stored name. On macOS and Windows, a plain case variant such as <code>RUN.sh</code> for
+  a stored <code>run.sh</code> replaces that file.</li>
+<li>The kept files and the sent files together are larger than 2 MiB, the size
+  limit for one skill directory. Clauster never drops a file to make the skill
+  fit.</li>
+</ul>
+<h3 id="skill-frontmatter-checks">Skill frontmatter checks<a class="headerlink" href="#skill-frontmatter-checks" title="Permanent link">&para;</a></h3>
+<p>The Skills editor checks the frontmatter of <code>SKILL.md</code> before it saves the
+file. The fields are those of the
+<a href="https://code.claude.com/docs/en/skills#frontmatter-reference">frontmatter reference</a>.
+The editor accepts every value that Claude Code 2.1.318 reads for that field,
+including a value that the reference does not list. Version 2.1.318 is the
+version that these checks were last compared against. Clauster refuses a
+value that Claude Code rejects or ignores, and it then writes nothing.
+Clauster never runs a hook command or a skill script from this editor.</p>
+<ul>
+<li>Every field is optional. A <code>SKILL.md</code> without frontmatter is also valid:
+  Claude Code reads the whole file as the skill's instructions. Without a
+  <code>description</code>, Claude Code uses the first non-empty line of the
+  instructions.</li>
+<li>Clauster refuses a file that opens a <code>---</code> block but never closes it.
+  Clauster also refuses a fence that only Claude Code can read, for example
+  a fence with a no-break space after <code>---</code>. Put each <code>---</code> alone on its
+  line.</li>
+<li><code>disable-model-invocation</code>, <code>user-invocable</code>, <code>background</code> and <code>fallback</code>
+  accept <code>true</code> and <code>false</code>. They also accept <code>yes</code>, <code>no</code>, <code>on</code>, <code>off</code>, <code>1</code>
+  and <code>0</code> in any letter case. A <code>user-invocable:</code> line with no value hides the
+  skill from the <code>/</code> menu, because Claude Code reads it as <code>false</code>.</li>
+<li><code>allowed-tools</code>, <code>disallowed-tools</code> and <code>disallowedTools</code> accept a space- or
+  comma-separated string or a list of strings. If <code>disallowed-tools</code> is set,
+  Claude Code ignores <code>disallowedTools</code>. So Clauster refuses the two
+  together.</li>
+<li><code>paths</code> accepts a comma-separated string or a list. <code>arguments</code> accepts a
+  space-separated string or a list of names. Clauster refuses an argument
+  name that is only digits.</li>
+<li><code>argument-hint</code>, <code>when_to_use</code>, <code>agent</code> and <code>version</code> accept text, a number,
+  <code>true</code>, <code>false</code>, or a list such as <code>[issue-number]</code>. Claude Code shows that
+  list as <code>issue-number</code>. Clauster refuses a mapping. The field is
+  <code>when_to_use</code>. Claude Code does not read <code>when-to-use</code>.</li>
+<li><code>effort</code> accepts a level name in any case, the alias <code>med</code>, or an integer.
+  It accepts these inside a one-item list too, such as <code>[high]</code>.</li>
+<li><code>model</code> accepts any alias, any model ID, or <code>inherit</code>. <code>context</code> accepts
+  only <code>fork</code>. <code>shell</code> accepts <code>bash</code> or <code>powershell</code> in any case.</li>
+<li><code>name</code> is the command name. It can differ from the folder name and can
+  hold single spaces. Clauster refuses a name that Claude Code cannot show.
+  Examples are a hidden or direction-changing character, two spaces in a row,
+  a space at the start or end, and <code>&lt;</code> or <code>&gt;</code>. The limit is 256 UTF-16 units,
+  so an emoji counts as two. Clauster also refuses a name with a combining
+  mark, even where Claude Code shows it.</li>
+<li>Clauster checks <code>hooks</code> with the same rules as the
+  <a href="#the-hooks-tab">Hooks tab</a> and as subagent frontmatter hooks. So it accepts
+  every documented hook event, hook type and field, and it refuses any other
+  value. Claude Code drops a bad entry under most events and keeps the others,
+  but Clauster refuses the save instead.</li>
+<li>Clauster also refuses hook definitions outside <code>hooks</code>, because Claude Code
+  then loads the skill with no hooks and no <code>allowed-tools</code>. A hook definition
+  is a <code>PreToolUse</code> or <code>PermissionRequest</code> key, or a matcher group (a <code>matcher</code>
+  and its list of <code>hooks</code> entries). Clauster looks for them at the top level
+  and up to three levels into another field. It does not look into
+  <code>metadata</code>, <code>mcpServers</code> or <code>lspServers</code>, because Claude Code does not.</li>
+<li><code>metadata</code> must be a mapping. <code>created_by</code> and <code>improved_by</code> are fields that
+  Claude Code uses for its own records, and they accept only
+  <code>dream-proposal</code>. <code>version</code>, <code>fallback</code> and <code>disallowedTools</code> are not in the
+  reference, but Claude Code reads them, so Clauster checks them as above.</li>
+<li>Clauster saves <code>license</code>, <code>compatibility</code> and every other field as written.
+  The nested-value rule in
+  <a href="#yaml-spellings-that-clauster-refuses">YAML spellings that Clauster refuses</a>
+  still applies to them.</li>
+</ul>
+<p>Clauster reads YAML 1.1 and Claude Code reads YAML 1.2. If a field means
+something different in the two, Clauster refuses it and names the field. For
+example, <code>description: yes</code> is the text <code>yes</code> to Claude Code. <code>effort: 010</code> is
+10 to Claude Code but 8 to Clauster. Quote the value, or write it as a plain
+number. Clauster accepts <code>user-invocable: yes</code>, because both read it as true.</p>
+<p>If you open a <code>SKILL.md</code> that holds a field whose value Claude Code ignores,
+the editor can remove that field from the text. Examples are <code>shell: zsh</code> and
+<code>effort: banana</code>. Claude Code treats such a field as if it were not there.
+The removal does not change what the skill does. The editor then shows a note
+above the text. The file on disk does not change until you save.</p>
+<p>The editor removes fields only if all of these conditions are true:</p>
+<ul>
+<li>Every problem in the file is such a field.</li>
+<li>Each of those fields holds a single value, or it is a <code>metadata</code> value that
+  is not a mapping.</li>
+<li>No field has a YAML tag that Clauster cannot read the same way as Claude
+  Code, such as <code>!!bool "true"</code>.</li>
+<li>The frontmatter is a plain block of <code>key: value</code> lines, each field appears
+  once, and no field is indented or comes from a <code>&lt;&lt;</code> merge.</li>
+</ul>
+<p>If one of these is false, the editor shows the file as it is, and Clauster
+refuses its save. The error names the field. Two other cases are never
+removed, because Claude Code acts on them. The first is a <code>hooks</code> value that is
+not a mapping and not empty: Claude Code then also drops <code>allowed-tools</code>. The
+second is a <code>disallowed-tools</code> value next to <code>disallowedTools</code>: it still hides
+<code>disallowedTools</code>.</p>
+<h3 id="skill-visibility">Skill visibility<a class="headerlink" href="#skill-visibility" title="Permanent link">&para;</a></h3>
+<p>The <strong>Skill visibility</strong> panel on the Skills tab edits the <code>skillOverrides</code> key
+in the settings file of the scope: <code>~/.claude/settings.json</code> at User scope,
+<code>.claude/settings.json</code> at Project scope, and <code>.claude/settings.local.json</code> at
+Local scope. The key tells Claude Code how to list each skill. A skill that has
+no key is <code>on</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Value</th>
+<th>Effect in Claude Code</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>on</code></td>
+<td>Claude Code lists the skill with its description.</td>
+</tr>
+<tr>
+<td><code>name-only</code></td>
+<td>Claude Code lists the skill without its description.</td>
+</tr>
+<tr>
+<td><code>user-invocable-only</code></td>
+<td>Claude does not see the skill. You can still run it with its <code>/</code> command.</td>
+</tr>
+<tr>
+<td><code>off</code></td>
+<td>Neither Claude nor you can use the skill.</td>
+</tr>
+</tbody>
+</table>
+<p>The panel shows one row for each skill folder at the scope, and one row for
+each key that is already in the file. At Local scope, the rows show the skill
+folders of the project. A key that matches no folder gets a <strong>no skill folder</strong>
+badge, so you can see it and remove it. A stored value that Claude Code does
+not read shows as <strong>Not valid</strong>. Clauster refuses a save until you choose a
+value for that row.</p>
+<p>To change the visibility of skills:</p>
+<ol>
+<li>Open <strong>Manage Claude Code config</strong>, select the scope and the project, then
+   open the <strong>Skills</strong> tab.</li>
+<li>Choose a value for each row. To remove a key from the file, choose
+   <strong>No override</strong>.</li>
+<li>To set a skill that has no row, such as the bundled skill <code>doctor</code>, type its
+   name in <strong>Add a skill name</strong>, choose a value, then select <strong>Add</strong>.</li>
+<li>Type the scope name, then select <strong>Save visibility</strong>.</li>
+</ol>
+<p>A save replaces the whole <code>skillOverrides</code> map with the rows that have a value.
+It does not change the other keys in the settings file. If the file changed
+after the panel loaded it, Clauster refuses the save and writes nothing. Close
+and reopen the panel to load the file again.</p>
+<p>A key is the name of a skill, as Claude Code shows it. The key can be a
+frontmatter <code>name</code>, the name of a bundled skill such as <code>doctor</code>, or a name with
+a colon such as <code>anthropic-skills:pdf</code>. Clauster refuses an empty key, the key
+<code>__proto__</code>, and a name that Claude Code cannot show. The refusal names the key,
+and Clauster writes nothing. The panel sends each name as you typed it, so a
+space at the start or the end is part of the name.</p>
+<h2 id="troubleshooting-and-limits">Troubleshooting and limits<a class="headerlink" href="#troubleshooting-and-limits" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Symptom</th>
+<th>Why</th>
+<th>What to do</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>A field isn't in the editor</td>
+<td>Excluded by design (secret / auth / bind / structural / code-executing)</td>
+<td>Edit <code>clauster.yml</code> on the host; see <a href="#what-it-deliberately-wont-edit">What it deliberately won't edit</a></td>
+</tr>
+<tr>
+<td>Save rejected: config changed on disk (<code>409</code>)</td>
+<td>The file was edited externally (or by a concurrent save) after the editor loaded it</td>
+<td>Reopen the editor and re-apply your change</td>
+</tr>
+<tr>
+<td>Save refused with a validation error (<code>422</code>)</td>
+<td>The value fails full-config validation — including the fail-closed auth check</td>
+<td>Fix the value; the same rule would have refused it at startup</td>
+</tr>
+<tr>
+<td>Advanced settings ask for a password you don't have</td>
+<td>Step-up re-auth requires a password even when login uses another mechanism</td>
+<td>Set one with <code>clauster hash-password</code></td>
+</tr>
+<tr>
+<td>No Advanced section / no wrench button</td>
+<td><code>config_write.enabled</code> is off (the whole surface 404s)</td>
+<td>Enable it in <code>clauster.yml</code> — deliberately not web-editable</td>
+</tr>
+<tr>
+<td>A saved change has no effect</td>
+<td>Saves never live-reload</td>
+<td>Use <strong>Restart Clauster</strong> in the Configuration modal</td>
+</tr>
+<tr>
+<td>A subagent has no description and won't edit</td>
+<td>It is built-in, or a plugin owns it — the <strong>Source</strong> badge says which</td>
+<td>Built-in: nothing to do, there is no file. Plugin: change the plugin, not Clauster</td>
+</tr>
+<tr>
+<td>A plugin install or update fails and the message names a command</td>
+<td>The marketplace entry runs a command, and Clauster never accepts one for you</td>
+<td>Read the command, then run <code>claude plugin install</code> from a terminal on the host</td>
+</tr>
+<tr>
+<td>Enable or Disable fails with "is already enabled" or "is installed at project scope, not user"</td>
+<td>The badge is the merged state, and the chosen scope already has that value or cannot override it</td>
+<td>Pick the scope that the message names, or use the Local scope to override a project setting for yourself</td>
+</tr>
+<tr>
+<td>Removing a marketplace returns <code>404</code> with "is not declared in user settings"</td>
+<td>A different scope declares it</td>
+<td>Switch to the scope that declares it and remove it there</td>
+</tr>
+<tr>
+<td>A Settings save returns <code>422</code> with "Claude Code reads … only from"</td>
+<td>The file holds a key (or a <code>true</code> value) that Claude Code ignores at this scope</td>
+<td>Remove the key (in Rows mode or Raw JSON), or save it at the scope that the message names. For a <code>true</code> value, set it to <code>false</code></td>
+</tr>
+</tbody>
+</table>
+<p>Need to recover an earlier config? The five most recent pre-save snapshots
+sit next to the file as <code>clauster.yml.bak-*</code> — copy one back over
+<code>clauster.yml</code> and restart.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; schubydoo — Apache-2.0
+    </div>
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.sections", "navigation.top", "navigation.instant", "navigation.tracking", "toc.follow", "content.code.copy", "search.suggest", "search.highlight"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"default": "latest", "provider": "mike"}}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
+      
+    
+  </body>
+</html>
