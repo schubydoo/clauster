@@ -470,6 +470,8 @@
       hostedResuming: {},         // hosted id -> true while a resume is in flight
       hostedRestarting: {},       // hosted id -> true while a restart is in flight (TASK-459)
       restarting: {},             // bridge row key -> true while a restart is in flight (TASK-459)
+      restartError: {},           // bridge row key -> the last restart's error text, shown on the row
+      hostedRestartError: {},     // hosted id -> the last restart's error text, shown on the row
       hostedView: {},             // hosted id -> { open, ws, token, lastSeq, events[], input, sending, connLost, attempts }
       _hostedSeq: 0,              // monotonic token per opened hosted live-view (retire check; see openHosted)
       errors: {},
@@ -962,12 +964,24 @@
       // interactive (pty) session — one row per instance, keyed by rk (#779, #1143).
       activeBridges() {
         const live = ["running", "starting", "stopping"];
-        return [...Object.values(this.instances), ...this.ptySessions].filter((i) => live.includes(i.status));
+        // A row with a restart in flight stays here (TASK-459): the poll sees it "stopped"
+        // between the stop and the resume, and moving it to Recent would hide the
+        // "Restarting…" state and offer a Resume/Forget that races the restart.
+        return [...Object.values(this.instances), ...this.ptySessions].filter(
+          (i) => live.includes(i.status) || !!this.restarting[i.rk]
+        );
       },
       // --- Zone 2 split: a live-only main list + a collapsed "Recent / resumable" group ---
       // so the Active zone (fixed at the top) only ever shows what's genuinely running.
-      liveHosted() { return this.hosted.filter((h) => ["running", "starting", "stopping"].includes(h.status)); },
-      endedHosted() { return this.hosted.filter((h) => this._hostedIsEnded(h)); },
+      // A hosted row with a restart in flight stays live (TASK-459), as for bridges above.
+      liveHosted() {
+        return this.hosted.filter((h) => ["running", "starting", "stopping"].includes(h.status)
+          || !!this.hostedRestarting[h.claustrum_process_id]);
+      },
+      endedHosted() {
+        return this.hosted.filter((h) => this._hostedIsEnded(h)
+          && !this.hostedRestarting[h.claustrum_process_id]);
+      },
       // One ended-status list for the Recent group and the View panel's Resume wording. The
       // row's Resume `x-if` keeps the same list inline, where the test that pins every
       // mirror of the Resume gate reads it.
@@ -985,7 +999,7 @@
         // error as ended so the card stays on screen with its failure — parity with
         // endedHosted(), which already includes "error".
         return [...Object.values(this.instances), ...this.ptySessions].filter(
-          (i) => this.isResumable(i.rk) || i.status === "error"
+          (i) => (this.isResumable(i.rk) || i.status === "error") && !this.restarting[i.rk]
         );
       },
       hasLive() { return this.liveHosted().length + this.activeBridges().length + this.liveAgents().length + this.externalSessionsFlat().length + this.ptyPendingNames().length > 0; },
@@ -5413,6 +5427,11 @@
       // user who focuses the control; a sighted keyboard user got nothing. Truthy when it
       // refused, so the caller reads `refuseResume(rk) || resume(rk)`.
       refuseResume(key) {
+        // A restart of this row is already stopping and resuming it (TASK-459).
+        if (this.restarting[key]) {
+          this.toast(this.labelOf(key) + ": a restart is running", "warning");
+          return true;
+        }
         const why = this.resumeBlockedReason(key);
         if (why) this.toast(this.labelOf(key) + ": " + why, "warning");
         return !!why;
@@ -6353,6 +6372,7 @@
         this.errors[label] = null;
         const id = this._requireBridgeId(key);  // pin the row's identity up front
         if (!id) return;
+        this.restartError[key] = null;  // a failed restart's note is stale once Resume runs
         // Optimistic, collection-agnostic: mutate the row in place (both the map and
         // the pty array hold reactive proxies), so a resumed Recent card moves to the
         // Active zone immediately; the response/refresh below settles the truth.
@@ -6365,7 +6385,7 @@
           if (!res.ok) {
             this.errors[label] = body.detail || "failed to resume";
             if (row && prevStatus) row.status = prevStatus;
-            this.toast(label + ": restart failed", "error");
+            this.toast(label + ": resume failed", "error");
           } else {
             // created===false means NOTHING was revived — the cap handed back the
             // project's already-live bridge, or the target was already live. Reporting
@@ -6400,7 +6420,7 @@
         } catch (e) {
           this.errors[label] = String(e);
           if (row && prevStatus) row.status = prevStatus;
-          this._failToast(label + ": restart");
+          this._failToast(label + ": resume");
         }
         await this.refresh();
       },
@@ -6478,31 +6498,31 @@
         if (!id) return;
         const pty = row && row.resume_mode === "pty";
         const loses = pty
-          ? "The interactive session stops and comes back in the same conversation (--continue)."
+          ? "The interactive session stops, which interrupts a turn in progress, and comes back in the same conversation (--continue)."
           : "Every live remote session on this bridge ends. The bridge then reconnects in the same folder.";
         if (!window.confirm("Restart the session in \"" + label + "\"?\n\n" + loses
             + "\n\nThe new process runs the claude version installed now.")) return;
         this.restarting[key] = true;
-        this.errors[label] = null;
-        this.closeLogs(key);
+        this.restartError[key] = null;
         try {
           const res = await fetch(ROOT + "/api/instances/" + encodeURIComponent(id)
                                   + "/restart", { method: "POST" });
           if (this._authExpired(res)) return;
           const body = await res.json().catch(() => ({}));
           if (!res.ok) {
-            // Inline, not just a toast: the detail says whether the stop already ran.
-            this.errors[label] = body.detail || "restart failed";
+            // On the row, not just a toast: the detail says whether the stop already ran.
+            this.restartError[key] = this._errDetail(res, body);
             this.toast(label + ": restart failed", "error");
           } else if (body.created === false) {
             this.toast(label + ": " + (body.reason || "the bridge did not start again"), "warning");
-          } else {
+          } else if (body.instance_id) {
+            this.closeLogs(key);  // the old process's tail; the restarted row opens its own
             this._absorbRow(body);
             for (const w of body.warnings || []) this.toast(w, "warning");
             this.toast(label + ": restarted", "success");
           }
         } catch (e) {
-          this.errors[label] = String(e);
+          this.restartError[key] = String(e);
           this._failToast(label + ": restart");
         }
         // reset on EVERY path incl. the 401 early-return so the button can't wedge.
@@ -6516,23 +6536,33 @@
             + "It stops and resumes the same conversation as a new process. "
             + "The new process runs the claude version installed now.")) return;
         this.hostedRestarting[id] = true;
+        this.hostedRestartError[id] = null;
+        let ok = false;
+        let fresh = null;
         try {
           const res = await fetch(ROOT + "/api/instances/" + encodeURIComponent(id) + "/restart",
                                   { method: "POST" });
           if (this._authExpired(res)) return;
           const b = await res.json().catch(() => ({}));
           if (res.ok) {
+            ok = true;
+            fresh = b && b.claustrum_process_id;
             this.toast("hosted session restarted", "success");
-            await this.refresh();
-            // Like resume: the restarted session has a new process id under a new card.
-            this.closeHosted(id);
-            if (b && b.claustrum_process_id) this.openHosted(b.claustrum_process_id);
           } else {
-            this.toast("restart failed — " + this._errDetail(res, b), "error");
-            await this.refresh();
+            this.hostedRestartError[id] = this._errDetail(res, b);
+            this.toast("hosted restart failed", "error");
           }
-        } catch (e) { this._failToast("restart"); }
+        } catch (e) {
+          this.hostedRestartError[id] = String(e);
+          this._failToast("hosted restart");
+        }
         finally { this.hostedRestarting[id] = false; }
+        await this.refresh();
+        // Like resume: the restarted session has a new process id under a new card. On a
+        // failure, close the old view only once the old row is no longer live.
+        const old = this.hosted.find((x) => x.claustrum_process_id === id);
+        if (ok || !old || this._hostedIsEnded(old)) this.closeHosted(id);
+        if (fresh) this.openHosted(fresh);
       },
       async trust(name) {
         this.errors[name] = null;  // clear any stale inline error from a prior failed action

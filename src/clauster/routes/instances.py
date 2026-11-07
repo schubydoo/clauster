@@ -669,11 +669,21 @@ async def _restart_hosted(
 ) -> dict:
     """Stop a hosted session, then resume its conversation as a new daemon process.
 
-    Every precondition the resume checks (project, bypass ceiling, trust, binary, daemon) runs
-    BEFORE the stop, so a restart that cannot succeed refuses with the live session intact.
+    Every precondition the resume checks (project, usable conversation id, bypass ceiling,
+    trust, binary, daemon) runs BEFORE the stop, so a restart that cannot succeed refuses
+    with the live session intact. A session still starting has no conversation id yet, so
+    it is refused too: stopping it would end a conversation that nothing can resume.
     """
     if not instance.project:
         raise HTTPException(status_code=409, detail=NO_PROJECT_RESUME_DETAIL)
+    if not instance.claude_session_uuid_usable:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "restart refused: this session has no usable conversation id yet, so it "
+                "could not resume after the stop"
+            ),
+        )
     await resolve_project_path(instance.project, engine)
     enforce_bypass_ceiling(config, instance.project, instance.permission_mode)
     await _hosted_prereqs(
@@ -686,6 +696,14 @@ async def _restart_hosted(
             stopped = await hosted.kill_orphan(instance_id)
     except HostedSessionError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    # `HostedSession.stop` can return with the agent still alive (its last wait after the
+    # kill timed out). Say so instead of a "stopped, but did not start again" that lies.
+    after = hosted.get_instance(instance_id)
+    if after is not None and after.status in (InstanceStatus.RUNNING, InstanceStatus.STARTING):
+        raise HTTPException(
+            status_code=502,
+            detail="restart: the stop did not complete; the session may still be running",
+        )
     try:
         fresh = await _resume_hosted(
             instance_id,
@@ -702,7 +720,7 @@ async def _restart_hosted(
 
 
 async def _restart_bridge(
-    instance_id: str, *, runner: SessionRunner, config: ClausterConfig
+    instance_id: str, *, runner: SessionRunner, config: ClausterConfig, engine: ClausterEngine
 ) -> dict:
     """Stop a managed bridge, then resume it through its own mode's path.
 
@@ -710,8 +728,12 @@ async def _restart_bridge(
     routes make, so a pty bridge comes back with ``--continue`` and a standard bridge with
     ``claude remote-control`` in the same folder. The two modes never share a path. The
     resume resolves the ``claude`` binary again, so the new process runs the release now on
-    disk. The binary and the bypass ceiling are checked BEFORE the stop, so the two
-    predictable failures refuse with the bridge still running.
+    disk. The project, its trust, the bypass ceiling and the binary are checked BEFORE the
+    stop, so the predictable failures refuse with the bridge still running.
+
+    A new process that fails at start does not raise from the resume: it comes back as an
+    ERROR row. That is turned into an error here, so a crash of the new ``claude`` release is
+    never reported as a successful restart.
     """
     resolved = runner.resolve_bridge_id(instance_id)
     if resolved is None:
@@ -721,6 +743,12 @@ async def _restart_bridge(
     instance = runner.get_instance(resolved)
     if instance is None:
         raise HTTPException(status_code=404, detail=f"no managed instance: {instance_id!r}")
+    path = await resolve_project_path(instance.project, engine)
+    if not await asyncio.to_thread(is_trusted, path, runner.claude_json):
+        raise HTTPException(
+            status_code=409,
+            detail=f"directory not trusted: {path}. Use the Trust action first.",
+        )
     enforce_bypass_ceiling(config, instance.project, instance.permission_mode)
     try:
         await asyncio.to_thread(claude_cli.resolve_binary, config.claude.binary)
@@ -732,6 +760,12 @@ async def _restart_bridge(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     try:
         outcome = await _spawn_or_http(runner.resume_detailed(resolved))
+        if outcome.created and outcome.instance.status is InstanceStatus.ERROR:
+            raise HTTPException(
+                status_code=409,
+                detail=outcome.instance.error_detail
+                or "the new process did not start; read the bridge log",
+            )
     except HTTPException as exc:
         if exc.status_code == 409:
             runner.notify_app_event(
@@ -774,7 +808,13 @@ async def api_restart(
     """
     in_flight: set[str] = request.app.state.restarts_in_flight
     hosted_instance = hosted.get_instance(instance_id)
-    key = instance_id if hosted_instance is not None else runner.resolve_bridge_id(instance_id)
+    # The hosted key is the process id, not the path id: the manager also accepts the
+    # instance_id, and two aliases of one row must share one slot.
+    key = (
+        hosted_instance.claustrum_process_id or instance_id
+        if hosted_instance is not None
+        else runner.resolve_bridge_id(instance_id)
+    )
     if key is not None and key in in_flight:
         raise HTTPException(status_code=409, detail="a restart of this row is already running")
     if key is not None:
@@ -790,7 +830,7 @@ async def api_restart(
                 config=config,
                 engine=engine,
             )
-        return await _restart_bridge(instance_id, runner=runner, config=config)
+        return await _restart_bridge(instance_id, runner=runner, config=config, engine=engine)
     finally:
         if key is not None:
             in_flight.discard(key)

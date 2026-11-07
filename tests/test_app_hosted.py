@@ -632,7 +632,9 @@ def test_hosted_ended_banner_is_built_from_the_row_on_every_render(
     assert '_hostedIsEnded(h) { return ["stopped", "crashed", "error"].includes(h.status); }' in (
         body
     )
-    assert "endedHosted() { return this.hosted.filter((h) => this._hostedIsEnded(h)); }" in body
+    # A row with a restart in flight (TASK-459) is held out of Recent, nothing more.
+    assert "return this.hosted.filter((h) => this._hostedIsEnded(h)\n" in body
+    assert "&& !this.hostedRestarting[h.claustrum_process_id]);" in body
 
 
 def test_hosted_status_badge_colors_match_bridge(write_config, projects_root, monkeypatch):

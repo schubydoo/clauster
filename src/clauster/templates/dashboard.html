@@ -508,13 +508,13 @@
                      the honest set of actions for such a row. #}
                   <template x-if="['crashed', 'stopped', 'error'].includes(h.status) && h.claude_session_uuid_usable && h.project">
                     <button type="button" class="btn btn-sm btn-success"
-                            :disabled="!!hostedResuming[h.claustrum_process_id]" @click="resumeHosted(h)">
+                            :disabled="!!hostedResuming[h.claustrum_process_id] || !!hostedRestarting[h.claustrum_process_id]" @click="resumeHosted(h)">
                       <span x-text="hostedResuming[h.claustrum_process_id] ? 'Resuming…' : 'Resume'">Resume</span>
                     </button>
                   </template>
                   <template x-if="h.is_orphan">
                     <button type="button" class="btn btn-sm btn-outline-danger"
-                            :disabled="!!hostedStopping[h.claustrum_process_id]" @click="killHosted(h)">
+                            :disabled="!!hostedStopping[h.claustrum_process_id] || !!hostedRestarting[h.claustrum_process_id]" @click="killHosted(h)">
                       <span x-text="hostedStopping[h.claustrum_process_id] ? 'Killing…' : 'Kill'">Kill</span>
                     </button>
                   </template>
@@ -536,12 +536,16 @@
                      survivor — Kill it first). `!!` coercion: see the detached-row note. #}
                   <button type="button" class="btn btn-sm btn-ghost-secondary"
                           x-show="['crashed', 'stopped', 'error'].includes(h.status) && !h.is_orphan"
-                          :disabled="!!forgetting[h.claustrum_process_id]" @click="forgetHosted(h)"
+                          :disabled="!!forgetting[h.claustrum_process_id] || !!hostedRestarting[h.claustrum_process_id]" @click="forgetHosted(h)"
                           title="Forget — drop this ended session from the list to start fresh. Does not stop a live session.">
                     <span x-text="forgetting[h.claustrum_process_id] ? 'Forgetting…' : 'Forget'">Forget</span>
                   </button>
                 </span>
               </div>
+              {# The last restart's error on this hosted row (TASK-459). x-text: CLI output. #}
+              <div class="text-danger small mt-1" role="alert" data-test="hosted-restart-error"
+                   x-show="!!hostedRestartError[h.claustrum_process_id]" x-cloak
+                   x-text="hostedRestartError[h.claustrum_process_id]"></div>
               <!-- live conversation view -->
               <template x-if="hostedView[h.claustrum_process_id] && hostedView[h.claustrum_process_id].open">
                 <div class="mt-2">
@@ -995,8 +999,9 @@
                      confirm in restart() names what this mode loses. #}
                   <button type="button" class="btn btn-sm btn-outline-secondary" data-test="restart-session"
                           @click="restart(i.rk)"
-                          :disabled="!!restarting[i.rk] || isStopping(i.rk)"
-                          :title="'Restart — stop and start this bridge again so it runs the claude now installed.'">
+                          :disabled="!!restarting[i.rk] || isStopping(i.rk) || isBusy(i.rk)"
+                          :aria-label="(restarting[i.rk] ? 'Restarting ' : 'Restart ') + i.project"
+                          title="Restart: stop this bridge and start it again, so it runs the claude binary installed now.">
                     <span class="spinner-border spinner-border-sm me-1" x-show="!!restarting[i.rk]" x-cloak></span>
                     <span x-text="restarting[i.rk] ? 'Restarting…' : 'Restart'">Restart</span></button>
                   <button type="button" class="btn btn-sm btn-outline-danger" data-test="stop-session" @click="stop(i.rk)"
@@ -1004,6 +1009,11 @@
                     <span class="spinner-border spinner-border-sm me-1" x-show="isStopping(i.rk)" x-cloak></span>
                     <span x-text="isStopping(i.rk) ? 'Stopping…' : 'Stop'">Stop</span></button>
                 </span>
+              </div>
+              {# The last restart's error, on the row it belongs to (TASK-459). The detail says
+                 whether the stop already ran. x-text: the detail carries CLI output. #}
+              <div class="text-danger small mt-1" role="alert" data-test="restart-error"
+                   x-show="!!restartError[i.rk]" x-cloak x-text="restartError[i.rk]">
               </div>
               {# Live-session list (#570): a STANDARD remote-control bridge can host several
                  concurrent sessions, and the row's "Open in Claude" link is only the bridge
@@ -1207,6 +1217,10 @@
                   <span class="text-danger small ms-1" data-test="bridge-error-detail"
                         x-show="displayStatus(i.rk) === 'error' && detailOf(i.rk)" x-cloak
                         x-text="detailOf(i.rk)"></span>
+                  {# A restart that stopped this row and could not start it again (TASK-459):
+                     its error follows the row from Active into Recent. #}
+                  <span class="text-danger small ms-1" role="alert" data-test="restart-error-recent"
+                        x-show="!!restartError[i.rk]" x-cloak x-text="restartError[i.rk]"></span>
                   {# Why Resume can't run, as VISIBLE text: a disabled control's tooltip
                      never fires on touch, and this is a phone-first product. Carries an id
                      so the button can point at it with aria-describedby. #}
@@ -1243,7 +1257,7 @@
                        under Alpine 3.15.x inside an x-for clone — coerce to a concrete bool.
                        Keyed by rk (= the instance_id _forget spins on), so the spinner tracks
                        THIS row (#779). #}
-                    <button type="button" class="btn btn-sm btn-ghost-secondary" :disabled="!!forgetting[i.rk]"
+                    <button type="button" class="btn btn-sm btn-ghost-secondary" :disabled="!!forgetting[i.rk] || !!restarting[i.rk]"
                             @click="forget(i.rk)"
                             title="Forget — drop this stopped session from the list to start fresh. Does not stop a live session.">
                       <span x-text="forgetting[i.rk] ? 'Forgetting…' : 'Forget'">Forget</span></button>

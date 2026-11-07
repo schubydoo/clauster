@@ -147,9 +147,11 @@ stay visible on the card.
     new card.
 
   Clauster checks the `claude` binary and the permission ceiling before the stop. If
-  either check fails, the session keeps running and the card shows the error. If the
-  start fails after the stop, the card stays *Stopped* and shows the error, and you can
-  Resume it. A second click while a restart runs does nothing.
+  either check fails, the session keeps running and the card shows the error. Clauster
+  also checks that the project still exists and is trusted. If the start fails after the
+  stop, the card shows *Stopped* or *Error* with the error text. For example, the new
+  release can crash at start or ask for a new login. A second click while a restart runs
+  does nothing.
 - **Fork a past conversation** — launching an *Interactive Session*, the
   **Conversation** picker (under *More options*) lists the project's previous
   conversations by their first prompt. Picking one forks it into the new
