@@ -8,28 +8,28 @@
 class Clauster < Formula
   desc "Self-hosted web UI for spawning and managing Claude Code remote-control bridges"
   homepage "https://github.com/schubydoo/clauster"
-  version "1.3.3"
+  version "1.4.0"
   license "Apache-2.0"
 
   on_macos do
     on_arm do
-      url "https://github.com/schubydoo/clauster/releases/download/v1.3.3/clauster-1.3.3-macos-arm64"
-      sha256 "0fba3d6e4401b503f46a7d976cb0506c48e0a288ad8ce2078114a99539867958"
+      url "https://github.com/schubydoo/clauster/releases/download/v1.4.0/clauster-1.4.0-macos-arm64"
+      sha256 "f07cbd1f85e1f0a251057cf5cefc92aca1994263bf98ac87c4a893adc016f80e"
     end
     on_intel do
-      url "https://github.com/schubydoo/clauster/releases/download/v1.3.3/clauster-1.3.3-macos-x86_64"
-      sha256 "87d3c7a0f86703bd35398c4c008b3b3aa202e1b137706e988d3731641918a190"
+      url "https://github.com/schubydoo/clauster/releases/download/v1.4.0/clauster-1.4.0-macos-x86_64"
+      sha256 "4e3f403fc75dd696eea4c0a4f264c66b18b42e3caeb30ce3b8396fbc57fb98d1"
     end
   end
 
   on_linux do
     on_intel do
-      url "https://github.com/schubydoo/clauster/releases/download/v1.3.3/clauster-1.3.3-linux-x86_64"
-      sha256 "85ac7eb74139b84a9d72cc6fb50d5ace4ed9207d247197f0b4e7e4f6d8793273"
+      url "https://github.com/schubydoo/clauster/releases/download/v1.4.0/clauster-1.4.0-linux-x86_64"
+      sha256 "040de0b97b63e07bc14a8d0dbaa8374a7b247cc56d1ffe88afc5e53bf595b55e"
     end
     on_arm do
-      url "https://github.com/schubydoo/clauster/releases/download/v1.3.3/clauster-1.3.3-linux-arm64"
-      sha256 "9f7e57604a074f24d272d759b589c4c7d93fa4158ab334ed2a45c0693f76c717"
+      url "https://github.com/schubydoo/clauster/releases/download/v1.4.0/clauster-1.4.0-linux-arm64"
+      sha256 "6c568291533ad94fa2e5f52322611e40af9e289cbbd4a7a7df8cfe1d8ee160b2"
     end
   end
 
