@@ -520,8 +520,16 @@
                   </template>
                   <button type="button" class="btn btn-sm btn-ghost-secondary" data-test="hosted-view-toggle" @click="toggleHosted(h.claustrum_process_id)"
                           x-text="(hostedView[h.claustrum_process_id] && hostedView[h.claustrum_process_id].open) ? 'Hide' : 'View'">View</button>
+                  {# Restart (TASK-459): only where Resume could follow the stop — the same
+                     uuid + project gate as the Resume button above. #}
+                  <button type="button" class="btn btn-sm btn-outline-secondary" data-test="hosted-restart"
+                          x-show="['running', 'starting'].includes(h.status) && h.claude_session_uuid_usable && h.project"
+                          :disabled="!!hostedRestarting[h.claustrum_process_id] || !!hostedStopping[h.claustrum_process_id]"
+                          @click="restartHosted(h)">
+                    <span x-text="hostedRestarting[h.claustrum_process_id] ? 'Restarting…' : 'Restart'">Restart</span>
+                  </button>
                   <button type="button" class="btn btn-sm btn-outline-danger" x-show="['running', 'starting'].includes(h.status)"
-                          :disabled="!!hostedStopping[h.claustrum_process_id]" @click="stopHosted(h)">
+                          :disabled="!!hostedStopping[h.claustrum_process_id] || !!hostedRestarting[h.claustrum_process_id]" @click="stopHosted(h)">
                     <span x-text="hostedStopping[h.claustrum_process_id] ? 'Stopping…' : 'Stop'">Stop</span>
                   </button>
                   {# Forget only for an ended, non-orphan hosted session (an orphan is a live
@@ -982,8 +990,17 @@
                           :title="'View read-only session transcripts for ' + i.project"
                           :aria-label="'View transcripts for ' + i.project">
                     <svg class="ico me-1" aria-hidden="true"><use href="#ic-page"/></svg>Transcript</button>
+                  {# Restart (TASK-459): stop + resume through this row's own mode path, so the
+                     bridge picks up the claude binary now on disk. Single-flight per row; the
+                     confirm in restart() names what this mode loses. #}
+                  <button type="button" class="btn btn-sm btn-outline-secondary" data-test="restart-session"
+                          @click="restart(i.rk)"
+                          :disabled="!!restarting[i.rk] || isStopping(i.rk)"
+                          :title="'Restart — stop and start this bridge again so it runs the claude now installed.'">
+                    <span class="spinner-border spinner-border-sm me-1" x-show="!!restarting[i.rk]" x-cloak></span>
+                    <span x-text="restarting[i.rk] ? 'Restarting…' : 'Restart'">Restart</span></button>
                   <button type="button" class="btn btn-sm btn-outline-danger" data-test="stop-session" @click="stop(i.rk)"
-                          :disabled="isStopping(i.rk)">
+                          :disabled="isStopping(i.rk) || !!restarting[i.rk]">
                     <span class="spinner-border spinner-border-sm me-1" x-show="isStopping(i.rk)" x-cloak></span>
                     <span x-text="isStopping(i.rk) ? 'Stopping…' : 'Stop'">Stop</span></button>
                 </span>

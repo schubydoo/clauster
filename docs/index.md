@@ -40,7 +40,8 @@ Interactive Session mode, this *recaps* the prior conversation rather than truly
 
 - One card per child directory of your `projects_root`, plus a card for each
   additional bridge or session a project is running or has stopped.
-- **Run Claude here** (launch) / Stop / Resume a bridge from the card. For a
+- **Run Claude here** (launch) / Stop / Resume / Restart a bridge from the card.
+  Restart picks up a newly installed Claude Code. For a
   deliberate fresh start, **Forget** a stopped session (drops it from Recent),
   then relaunch.
 - Per-card **Open in Claude** link and **QR code** to attach from anywhere.

@@ -33,7 +33,7 @@ from collections.abc import Awaitable
 from typing import TYPE_CHECKING, TypeVar, cast
 
 import segno
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response
 
 from .. import __version__, claude_cli
@@ -643,6 +643,157 @@ async def api_resume(
                 f"Resuming the bridge for {instance_id!r} failed.",
             )
         raise
+
+
+def _restart_failed(stage: str, exc: HTTPException) -> HTTPException:
+    """Re-raise a resume failure of a restart with the stage named in the detail.
+
+    The stop already ran, so the row is now STOPPED, not in its old state. The detail says
+    so, which keeps the operator from reading a failed restart as "nothing happened".
+    """
+    return HTTPException(
+        status_code=exc.status_code,
+        detail=f"restart: the {stage} stopped, but it did not start again: {exc.detail}",
+    )
+
+
+async def _restart_hosted(
+    instance_id: str,
+    instance: RemoteControlInstance,
+    *,
+    hosted: HostedManager,
+    daemon: ClaustrumDaemon | None,
+    runner: SessionRunner,
+    config: ClausterConfig,
+    engine: ClausterEngine,
+) -> dict:
+    """Stop a hosted session, then resume its conversation as a new daemon process.
+
+    Every precondition the resume checks (project, bypass ceiling, trust, binary, daemon) runs
+    BEFORE the stop, so a restart that cannot succeed refuses with the live session intact.
+    """
+    if not instance.project:
+        raise HTTPException(status_code=409, detail=NO_PROJECT_RESUME_DETAIL)
+    await resolve_project_path(instance.project, engine)
+    enforce_bypass_ceiling(config, instance.project, instance.permission_mode)
+    await _hosted_prereqs(
+        instance.project, daemon=daemon, runner=runner, config=config, engine=engine
+    )
+    try:
+        if hosted.session(instance_id) is not None:
+            stopped = await hosted.stop(instance_id)
+        else:
+            stopped = await hosted.kill_orphan(instance_id)
+    except HostedSessionError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    try:
+        fresh = await _resume_hosted(
+            instance_id,
+            stopped,
+            hosted=hosted,
+            daemon=daemon,
+            runner=runner,
+            config=config,
+            engine=engine,
+        )
+    except HTTPException as exc:
+        raise _restart_failed("hosted session", exc) from exc
+    return _spawn_body(fresh, created=True)
+
+
+async def _restart_bridge(
+    instance_id: str, *, runner: SessionRunner, config: ClausterConfig
+) -> dict:
+    """Stop a managed bridge, then resume it through its own mode's path.
+
+    ``runner.stop`` and ``runner.resume_detailed`` are the same calls the Stop and Resume
+    routes make, so a pty bridge comes back with ``--continue`` and a standard bridge with
+    ``claude remote-control`` in the same folder. The two modes never share a path. The
+    resume resolves the ``claude`` binary again, so the new process runs the release now on
+    disk. The binary and the bypass ceiling are checked BEFORE the stop, so the two
+    predictable failures refuse with the bridge still running.
+    """
+    resolved = runner.resolve_bridge_id(instance_id)
+    if resolved is None:
+        raise _unresolved_bridge(
+            runner, instance_id, f"no managed instance to restart: {instance_id!r}"
+        )
+    instance = runner.get_instance(resolved)
+    if instance is None:
+        raise HTTPException(status_code=404, detail=f"no managed instance: {instance_id!r}")
+    enforce_bypass_ceiling(config, instance.project, instance.permission_mode)
+    try:
+        await asyncio.to_thread(claude_cli.resolve_binary, config.claude.binary)
+    except claude_cli.ClaudeNotFound as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    try:
+        await runner.stop(resolved)
+    except UnknownProject as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    try:
+        outcome = await _spawn_or_http(runner.resume_detailed(resolved))
+    except HTTPException as exc:
+        if exc.status_code == 409:
+            runner.notify_app_event(
+                "reconnect-failed",
+                "clauster: reconnect failed",
+                f"Restarting the bridge for {instance_id!r} failed.",
+            )
+        raise _restart_failed("bridge", exc) from exc
+    return _spawn_body(
+        outcome.instance,
+        created=outcome.created,
+        reason=outcome.reason,
+        warnings=outcome.warnings,
+    )
+
+
+@router.post("/api/instances/{instance_id}/restart")
+async def api_restart(
+    instance_id: str,
+    request: Request,
+    runner: RunnerDep,
+    hosted: HostedDep,
+    daemon: ClaustrumDaemonDep,
+    config: ConfigDep,
+    engine: EngineDep,
+) -> dict:
+    """Stop a bridge or hosted session and start it again with the same settings (TASK-459).
+
+    The usual reason is a Claude Code update: a running process keeps the old ``claude``
+    binary until it is restarted. Each row type follows its own stop and resume path:
+
+    - a **pty** bridge resumes the same conversation (``--continue``);
+    - a **standard** bridge reconnects in the same folder, and its live remote sessions end;
+    - a **hosted** session resumes its conversation as a new daemon process (a new id).
+
+    The body is the resume body (the instance plus ``created`` / ``reason`` / ``warnings``).
+    A failure after the stop keeps the stop (the row is STOPPED) and names that in the
+    error detail. Single-flight per row: a second restart of the same row while one runs
+    is refused with 409.
+    """
+    in_flight: set[str] = request.app.state.restarts_in_flight
+    hosted_instance = hosted.get_instance(instance_id)
+    key = instance_id if hosted_instance is not None else runner.resolve_bridge_id(instance_id)
+    if key is not None and key in in_flight:
+        raise HTTPException(status_code=409, detail="a restart of this row is already running")
+    if key is not None:
+        in_flight.add(key)
+    try:
+        if hosted_instance is not None:
+            return await _restart_hosted(
+                instance_id,
+                hosted_instance,
+                hosted=hosted,
+                daemon=daemon,
+                runner=runner,
+                config=config,
+                engine=engine,
+            )
+        return await _restart_bridge(instance_id, runner=runner, config=config)
+    finally:
+        if key is not None:
+            in_flight.discard(key)
 
 
 @router.post("/api/instances/{instance_id}/forget")
