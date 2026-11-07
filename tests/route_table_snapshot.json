@@ -333,6 +333,12 @@
     [
       "POST"
     ],
+    "/api/instances/{instance_id}/restart"
+  ],
+  [
+    [
+      "POST"
+    ],
     "/api/login-shepherd/cancel"
   ],
   [

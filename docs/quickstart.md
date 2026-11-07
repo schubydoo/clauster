@@ -135,6 +135,23 @@ stay visible on the card.
   stopped card. A bridge started *outside* Clauster is only found on the click, so there
   the card stays silent and the resume is declined with a message instead. A live
   *Interactive Session* never blocks a resume; those aren't capped.
+- **Restart** is on a running card. It stops the bridge and starts it again with the
+  same project, mode and launch settings. Use it after a Claude Code update: a running
+  bridge keeps the old `claude` binary until it restarts, and the new process runs the
+  version installed now. The card shows that version. What a restart loses depends on
+  the mode:
+  - A *Server Mode* bridge ends every live remote session on it, then reconnects in
+    the same folder.
+  - An *Interactive Session* comes back in the same conversation (`--continue`).
+  - A *Direct Session* resumes the same conversation as a new process, so it gets a
+    new card.
+
+  Clauster checks the `claude` binary and the permission ceiling before the stop. If
+  either check fails, the session keeps running and the card shows the error. Clauster
+  also checks that the project still exists and is trusted. If the start fails after the
+  stop, the card shows *Stopped* or *Error* with the error text. For example, the new
+  release can crash at start or ask for a new login. A second click while a restart runs
+  does nothing.
 - **Fork a past conversation** — launching an *Interactive Session*, the
   **Conversation** picker (under *More options*) lists the project's previous
   conversations by their first prompt. Picking one forks it into the new

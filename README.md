@@ -208,6 +208,10 @@ list.
    [configuration guide](https://schubydoo.github.io/clauster/latest/guides/configuration/)).
    For a deliberate fresh start,
    **Forget** the stopped session and launch again with **Run Claude here**.
+   **Restart** on a running card stops the bridge and starts it again with the same
+   settings, so it runs the Claude Code version that is installed now. A standard
+   bridge ends its live remote sessions; an *Interactive Session* continues the same
+   conversation.
 
 > Exposing this beyond loopback (e.g. on your LAN)? Read
 > [Auth & networking](#auth--networking) first — a non-loopback bind requires

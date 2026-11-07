@@ -564,6 +564,10 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     # ``restart_requested`` is read by ``_run`` after shutdown to decide whether to re-exec.
     app.state.uvicorn_server = None
     app.state.restart_requested = False
+    # Per-row restart single-flight (TASK-459): the ids of the bridge and hosted rows with a
+    # `POST /api/instances/{id}/restart` in flight. A second restart of the same row gets a
+    # 409 instead of a second stop racing the first one's resume.
+    app.state.restarts_in_flight = set()
 
     # Hosted-channel sessions (CL-4); always present. The store (CL-6) persists them
     # so a clauster restart can reattach the survivors via lifespan reattach_all.

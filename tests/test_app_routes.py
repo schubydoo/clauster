@@ -1769,8 +1769,15 @@ def test_dashboard_coerces_detached_stop_disabled_binding(write_config, tmp_path
 
 def test_dashboard_coerces_hosted_busy_disabled_bindings(write_config, tmp_path):
     html = _client_with(write_config, tmp_path, "claustrum:\n  enabled: true\n").get("/").text
-    assert ':disabled="!!hostedStopping[h.claustrum_process_id]"' in html
-    assert ':disabled="!!hostedResuming[h.claustrum_process_id]"' in html
+    assert (
+        ':disabled="!!hostedStopping[h.claustrum_process_id]'
+        ' || !!hostedRestarting[h.claustrum_process_id]" @click="killHosted(h)"' in html
+    )
+    assert (
+        ':disabled="!!hostedStopping[h.claustrum_process_id]'
+        ' || !!hostedRestarting[h.claustrum_process_id]" @click="stopHosted(h)"' in html
+    )
+    assert ':disabled="!!hostedResuming[h.claustrum_process_id] ||' in html
     assert ':disabled="hostedStopping[h.claustrum_process_id]"' not in html
     assert ':disabled="hostedResuming[h.claustrum_process_id]"' not in html
 
@@ -1815,13 +1822,13 @@ def test_dashboard_renders_bridge_forget_button(write_config, tmp_path):
     assert '@click="forget(i.rk)"' in html  # bridge Forget in Recent/resumable
     # Coerced so the busy-state binding isn't stuck-disabled on first paint; keyed
     # by rk (= the instance_id _forget spins on) so the spinner tracks THIS row (#779).
-    assert ':disabled="!!forgetting[i.rk]"' in html
+    assert ':disabled="!!forgetting[i.rk] || !!restarting[i.rk]"' in html
 
 
 def test_dashboard_renders_hosted_forget_button(write_config, tmp_path):
     html = _client_with(write_config, tmp_path, "claustrum:\n  enabled: true\n").get("/").text
     assert '@click="forgetHosted(h)"' in html
-    assert ':disabled="!!forgetting[h.claustrum_process_id]"' in html
+    assert ':disabled="!!forgetting[h.claustrum_process_id] ||' in html
 
 
 # ----- /api/projects/{name}/metrics (live per-bridge resource sample) ----
