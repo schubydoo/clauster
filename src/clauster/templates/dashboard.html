@@ -1221,8 +1221,11 @@
                         x-text="detailOf(i.rk)"></span>
                   {# A restart that stopped this row and could not start it again (TASK-459):
                      its error follows the row from Active into Recent. #}
+                  {# Hidden only while bridge-error-detail above shows the same cause; an
+                     ERROR row with no error_detail keeps this as its only reason. #}
                   <span class="text-danger small ms-1" role="alert" data-test="restart-error-recent"
-                        x-show="!!restartError[i.rk]" x-cloak x-text="restartError[i.rk]"></span>
+                        x-show="!!restartError[i.rk] && !(displayStatus(i.rk) === 'error' && detailOf(i.rk))" x-cloak
+                        x-text="restartError[i.rk]"></span>
                   {# Why Resume can't run, as VISIBLE text: a disabled control's tooltip
                      never fires on touch, and this is a phone-first product. Carries an id
                      so the button can point at it with aria-describedby. #}

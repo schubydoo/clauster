@@ -18,6 +18,7 @@ from fastapi.testclient import TestClient
 import clauster.routes.instances as instances_module
 from clauster import claude_cli
 from clauster.app import create_app
+from clauster.claustrum_client import ClaustrumError
 from clauster.hosted import HostedSessionError
 from clauster.models import InstanceStatus
 from clauster.runner import PermissionModeNotAllowed, SessionRunner, SpawnError, UnknownProject
@@ -157,12 +158,24 @@ def _seed(manager: _StubManager):
 def _hosted_ready(monkeypatch):
     monkeypatch.setattr(instances_module, "is_trusted", lambda *a, **k: True)
     monkeypatch.setattr(claude_cli, "resolve_binary", lambda b: "/usr/bin/claude")
+    # The real grace window is seconds; the start-watch logic is the same at 0.05 s.
+    monkeypatch.setattr(instances_module, "_HOSTED_RESTART_GRACE_SECONDS", 0.05)
+    monkeypatch.setattr(instances_module, "_HOSTED_RESTART_POLL_SECONDS", 0.01)
 
 
-def test_restart_hosted_stops_then_resumes(write_config, projects_root, monkeypatch):
+@pytest.mark.parametrize("latched", [InstanceStatus.STOPPED, InstanceStatus.CRASHED])
+def test_restart_hosted_stops_then_resumes(write_config, projects_root, monkeypatch, latched):
+    # CRASHED is what a stop that had to escalate to SIGKILL latches; it must resume too.
     _hosted_ready(monkeypatch)
     manager = _StubManager()
-    _seed(manager)
+    inst = _seed(manager)
+
+    async def _stop(hosted_id: str):
+        manager.stopped.append(hosted_id)
+        inst.status = latched
+        return inst
+
+    monkeypatch.setattr(manager, "stop", _stop)
     app = _app(write_config, manager=manager, daemon=_StubDaemon())
     with TestClient(app) as client:
         r = client.post(f"/api/instances/{_HID}/restart")
@@ -497,11 +510,16 @@ def test_dashboard_bridge_restart_button_and_guards(write_config, monkeypatch):
     assert "Every live remote session on this bridge ends." in page
     assert "comes back in the same conversation (--continue)." in page
     # A 2xx without a row never reaches _absorbRow.
-    assert "} else if (body.instance_id) {" in page
+    assert "} else if (body && body.instance_id) {" in page
     # The error is on the row, in Active and in Recent.
     assert 'data-test="restart-error"' in page
     assert 'data-test="restart-error-recent"' in page
     assert "this.restartError[key] = null;  // a deliberate stop" in page
+    assert (
+        "x-show=\"!!restartError[i.rk] && !(displayStatus(i.rk) === 'error' && detailOf(i.rk))\""
+        in page
+    )
+    assert 'x-data="{ recentOpen' not in page  # a local scope would shadow the root flag
     assert "recentOpen: false," in page  # on the root component, so restart() can open it
 
 
@@ -519,8 +537,67 @@ def test_dashboard_hosted_restart_button_and_guards(write_config, monkeypatch):
     assert "&& !this.hostedRestarting[h.claustrum_process_id]);" in page
     assert 'data-test="hosted-restart-error"' in page
     assert "this.hostedRestartError[id] = null;  // a deliberate stop" in page
+    assert "this.hostedRestartError[id] = null;  // a kill makes" in page
+    # The button stays (disabled, "Restarting…") when a poll sees the row stopped mid-restart.
+    assert '.project) || !!hostedRestarting[h.claustrum_process_id]"' in page
     # A failure after the stop opens Recent, where the stopped row and its error now are.
     assert (
         page.count('.includes("stopped, but it did not start again")) this.recentOpen = true;')
         == 2
     )
+
+
+@pytest.mark.parametrize(
+    ("ended", "error_detail", "expect"),
+    [
+        (InstanceStatus.CRASHED, None, "failed at start (crashed)"),
+        (InstanceStatus.STOPPED, None, "failed at start (stopped)"),
+        (InstanceStatus.ERROR, None, "failed at start (error)"),
+        (InstanceStatus.ERROR, "daemon link lost", "daemon link lost"),
+    ],
+)
+def test_restart_hosted_new_process_exiting_at_start_is_an_error(
+    write_config, projects_root, monkeypatch, ended, error_detail, expect
+):
+    # The daemon answers the spawn before the child can fail; the exit lands a moment later.
+    _hosted_ready(monkeypatch)
+    manager = _StubManager()
+    _seed(manager)
+    real_resume = manager.resume
+
+    async def _resume_then_crash(*a, **k):
+        fresh = await real_resume(*a, **k)
+
+        async def _crash() -> None:
+            await asyncio.sleep(0.01)
+            fresh.status = ended
+            fresh.error_detail = error_detail
+
+        asyncio.get_running_loop().create_task(_crash())
+        return fresh
+
+    monkeypatch.setattr(manager, "resume", _resume_then_crash)
+    app = _app(write_config, manager=manager, daemon=_StubDaemon())
+    notified: list[tuple] = []
+    monkeypatch.setattr(app.state.runner, "notify_app_event", lambda *a: notified.append(a))
+    with TestClient(app) as client:
+        r = client.post(f"/api/instances/{_HID}/restart")
+    assert r.status_code == 409, r.text
+    detail = r.json()["detail"]
+    assert "stopped, but it did not start again" in detail
+    assert expect in detail
+    assert notified and notified[0][0] == "reconnect-failed"
+
+
+def test_restart_hosted_failing_resume_notifies(write_config, projects_root, monkeypatch):
+    _hosted_ready(monkeypatch)
+    manager = _StubManager()
+    _seed(manager)
+    manager.resume_error = ClaustrumError("spawn failed")
+    app = _app(write_config, manager=manager, daemon=_StubDaemon())
+    notified: list[tuple] = []
+    monkeypatch.setattr(app.state.runner, "notify_app_event", lambda *a: notified.append(a))
+    with TestClient(app) as client:
+        r = client.post(f"/api/instances/{_HID}/restart")
+    assert r.status_code == 502
+    assert notified and notified[0][0] == "reconnect-failed"

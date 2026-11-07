@@ -645,6 +645,14 @@ async def api_resume(
         raise
 
 
+# How long a Direct Session restart watches the new process before it reports success
+# (TASK-459). The daemon answers the spawn before the child can fail, and a stream-json agent
+# sends no frame until its first turn, so an early exit is the only startup signal there is.
+# A binary that dies at start (the likeliest failure after an update) exits well inside this.
+_HOSTED_RESTART_GRACE_SECONDS = 3.0
+_HOSTED_RESTART_POLL_SECONDS = 0.1
+
+
 def _restart_failed(stage: str, exc: HTTPException) -> HTTPException:
     """Re-raise a resume failure of a restart with the stage named in the detail.
 
@@ -699,9 +707,9 @@ async def _restart_hosted(
     # `HostedSession.stop` can return without the agent having exited: its last wait after
     # the kill timed out (still RUNNING), or the daemon link dropped during the signal
     # (ERROR, the signal may never have arrived). Resuming then would run a second agent on
-    # the same conversation. Go on only from an exit the session latched itself.
-    after = hosted.get_instance(instance_id)
-    if after is not None and after.status not in (InstanceStatus.STOPPED, InstanceStatus.CRASHED):
+    # the same conversation. Go on only from a terminal STOPPED or CRASHED. On the orphan
+    # branch that STOPPED is the manager's own mark after its identity-gated kill.
+    if stopped.status not in (InstanceStatus.STOPPED, InstanceStatus.CRASHED):
         raise HTTPException(
             status_code=502,
             detail="restart: the stop did not complete; the session may still be running",
@@ -716,9 +724,45 @@ async def _restart_hosted(
             config=config,
             engine=engine,
         )
+        await _await_hosted_start(hosted, fresh)
     except HTTPException as exc:
+        # Every failure here comes after the stop: the session ended and did not come back.
+        runner.notify_app_event(
+            "reconnect-failed",
+            "clauster: reconnect failed",
+            f"Restarting the hosted session {instance_id!r} failed.",
+        )
         raise _restart_failed("hosted session", exc) from exc
-    return _spawn_body(fresh, created=True)
+    return _spawn_body(
+        hosted.get_instance(fresh.claustrum_process_id or "") or fresh, created=True
+    )
+
+
+async def _await_hosted_start(hosted: HostedManager, fresh: RemoteControlInstance) -> None:
+    """Watch a resumed Direct Session for its grace window; raise 409 if it exits in it.
+
+    ``hosted.resume`` returns once the daemon accepted the spawn, and the process exit is
+    seen later by the stream pump. Without this wait, a new ``claude`` that dies at start is
+    reported as a successful restart.
+    """
+    key = fresh.claustrum_process_id or ""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _HOSTED_RESTART_GRACE_SECONDS
+    while True:
+        row = hosted.get_instance(key)
+        if row is not None and row.status in (
+            InstanceStatus.STOPPED,
+            InstanceStatus.CRASHED,
+            InstanceStatus.ERROR,
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail=row.error_detail
+                or f"the new process failed at start ({row.status.value}); read the session log",
+            )
+        if loop.time() >= deadline:
+            return
+        await asyncio.sleep(_HOSTED_RESTART_POLL_SECONDS)
 
 
 async def _restart_bridge(

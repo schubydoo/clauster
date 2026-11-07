@@ -6513,13 +6513,14 @@
           const body = await res.json().catch(() => ({}));
           if (!res.ok) {
             // On the row, not just a toast: the detail says whether the stop already ran.
-            this.restartError[key] = (body && body.detail) || ("restart failed (HTTP " + res.status + ")");
+            const detail = String((body && body.detail) || "");
+            this.restartError[key] = detail || ("restart failed (HTTP " + res.status + ")");
             this.toast(label + ": restart failed", "error");
             // After the stop the row moves to Recent: open it so the error is on screen.
-            if (String(body.detail || "").includes("stopped, but it did not start again")) this.recentOpen = true;
-          } else if (body.created === false) {
+            if (detail.includes("stopped, but it did not start again")) this.recentOpen = true;
+          } else if (body && body.created === false) {
             this.toast(label + ": " + (body.reason || "the bridge did not start again"), "warning");
-          } else if (body.instance_id) {
+          } else if (body && body.instance_id) {
             this.closeLogs(key);  // the old process's tail; the restarted row opens its own
             this._absorbRow(body);
             for (const w of body.warnings || []) this.toast(w, "warning");
@@ -6553,9 +6554,10 @@
             fresh = b && b.claustrum_process_id;
             this.toast("hosted session restarted", "success");
           } else {
-            this.hostedRestartError[id] = (b && b.detail) || ("restart failed (HTTP " + res.status + ")");
+            const detail = String((b && b.detail) || "");
+            this.hostedRestartError[id] = detail || ("restart failed (HTTP " + res.status + ")");
             this.toast("hosted restart failed", "error");
-            if (String(b.detail || "").includes("stopped, but it did not start again")) this.recentOpen = true;
+            if (detail.includes("stopped, but it did not start again")) this.recentOpen = true;
           }
         } catch (e) {
           this.hostedRestartError[id] = String(e);
@@ -6677,7 +6679,7 @@
       async killHosted(h) {
         const id = h.claustrum_process_id;
         if (!window.confirm("Kill the orphaned session \"" + (h.label || id) + "\"? This terminates the surviving agent.")) return;
-        this.hostedRestartError[id] = null;
+        this.hostedRestartError[id] = null;  // a kill makes a restart's error stale
         this.hostedStopping[id] = true;
         let killed = false;
         try {
