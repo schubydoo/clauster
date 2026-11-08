@@ -990,10 +990,16 @@ class SpawnCoordinator:
         try:
             with sidecar.with_suffix(".log").open("rb") as fh:
                 fh.seek(0, os.SEEK_END)
-                fh.seek(max(0, fh.tell() - 8192))
-                text = fh.read().decode("utf-8", errors="replace").strip()
+                start = max(0, fh.tell() - 8192)
+                fh.seek(start)
+                raw = fh.read()
         except OSError:
             return None
+        if start:
+            # A window that begins mid-line could begin mid-secret, where the anchored
+            # redaction patterns would miss it: keep whole lines only.
+            raw = raw.partition(b"\n")[2]
+        text = raw.decode("utf-8", errors="replace").strip()
         return text or None
 
     @staticmethod

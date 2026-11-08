@@ -2743,10 +2743,11 @@ class SessionRunner:
 
         For a frozen pty keeper the row records the keeper and the handle is its one-file
         bootloader (TASK-503), which exits only after the keeper, once it has deleted its
-        unpack dir. ``_cleanup_keeper`` returns as soon as the KEEPER is gone, so wait a
-        bounded time for the bootloader here: dropped unreaped, it would linger as a
-        zombie until CPython's own ``subprocess`` reaper next runs. Still running at the
-        bound (a keeper ``_cleanup_keeper`` spared), it is left to that reaper.
+        unpack dir. ``_cleanup_keeper`` returns as soon as the KEEPER is gone, while the
+        bootloader may still be deleting that dir, so wait a bounded time for it here:
+        dropped while still running, it is reaped only when CPython's own ``subprocess``
+        reaper next runs, and lingers as a zombie until then. Still running at the bound
+        (a keeper ``_cleanup_keeper`` spared), it is left to that reaper.
         """
         proc = self._procs.pop(instance_id, None)
         if proc is None or keeper_pid is None or proc.pid == keeper_pid:

@@ -1078,6 +1078,10 @@ async def test_poll_once_reaps_the_bootloader_after_its_keeper_exits(
         assert launcher.returncode is None
         await runner.poll_once()
         assert launcher.returncode is not None
+        polled: list = []
+        launcher.poll = lambda: polled.append(1)  # an already-reaped launch is not re-polled
+        await runner.poll_once()
+        assert polled == []
     finally:
         await runner.stop(inst.instance_id)
 
@@ -1123,7 +1127,10 @@ def test_keeper_log_tail(tmp_path) -> None:
     assert SpawnCoordinator._keeper_log_tail(sidecar) is None  # empty
     log.write_bytes(b"x" * 20000 + b"\nlast line \xff\n")
     tail = SpawnCoordinator._keeper_log_tail(sidecar)
-    assert tail.endswith("last line �") and len(tail) <= 8192
+    # The 8 KiB window starts inside the x-run: that partial line is dropped, whole lines kept.
+    assert tail == "last line �"
+    log.write_bytes(b"first\nsecond\n")
+    assert SpawnCoordinator._keeper_log_tail(sidecar) == "first\nsecond"  # small: kept whole
 
 
 def test_keeper_identity_from_sidecar_keeps_the_launch_pid_without_a_distinct_child(
