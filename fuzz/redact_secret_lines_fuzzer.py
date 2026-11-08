@@ -130,22 +130,22 @@ _CLOSED_QUOTE_RE = {
 _PLAIN_FLOW_RE = re.compile(r"[^,}\]]*")
 #: Node properties (``&anchor``, ``!tag``) in front of a value.
 _PROPERTIES_RE = re.compile(r"(?:[&!][^ \t]*[ \t]*)*")
-#: A line that a plain value does not go on into: a comment, a ``- `` item, or a mapping
-#: key (``key:`` and then a space, a tab or the end).
-_NOT_PLAIN_TEXT_RE = re.compile(r"#|-(?:[ \t]|\Z)|([\"']?)[\w.\-]+\1[ \t]*:(?:[ \t]|\Z)")
-#: How a value goes on: a flow or block value, or a plain value (a quote character is a
-#: quoted value still open).
+#: A line that a plain value does not go on into: a comment or a mapping key (``key:`` and
+#: then a space, a tab or the end).
+_NOT_PLAIN_TEXT_RE = re.compile(r"#|([\"']?)[\w.\-]+\1[ \t]*:(?:[ \t]|\Z)")
+#: How a value goes on: a flow or block value, or a plain value (a quote character is the
+#: quoted value of a ``key: value`` line still open).
 _FLOW, _PLAIN = "", "plain"
 
 
-def _ref_flow_pairs(body: str) -> tuple[str, str | None]:
-    """Mask the value of each secret-keyed flow pair; say how the last one goes on."""
+def _ref_flow_pairs(body: str) -> tuple[str, bool]:
+    """Mask the value of each secret-keyed flow pair; say whether the last one goes on."""
     first = re.search(r"[{\[,]", body)
     if first is None:
-        return body, None
+        return body, False
     pieces: list[str] = []
     prev = 0
-    run: str | None = None
+    runs_on = False
     for match in _FLOW_KEY_RE.finditer(body, first.start()):
         if match.start() < prev or not _SECRET_KEY_RE.search(match.group("key")):
             continue
@@ -154,21 +154,21 @@ def _ref_flow_pairs(body: str) -> tuple[str, str | None]:
         if lead in _CLOSED_QUOTE_RE:
             closed = _CLOSED_QUOTE_RE[lead].match(body, begin)
             end = closed.end() if closed else len(body)
-            run = None if closed else lead
+            runs_on = closed is None
         elif lead in ("{", "[", "&", "!"):
-            end, run = len(body), _FLOW
+            end, runs_on = len(body), True
         else:
             plain = _PLAIN_FLOW_RE.match(body, begin)
             assert plain is not None  # `*` always matches
-            run = _FLOW if plain.end() == len(body) else None
+            runs_on = plain.end() == len(body)
             end = begin + len(plain.group(0).rstrip(" \t"))
         if end == begin:
             continue
         pieces += (body[prev:begin], _SENTINEL)
         prev = end
     if not pieces:
-        return body, run
-    return "".join(pieces) + body[prev:], run
+        return body, runs_on
+    return "".join(pieces) + body[prev:], runs_on
 
 
 def _ref_value_run(value: str) -> str | None:
@@ -230,9 +230,9 @@ def _reference_redact(text: str) -> str:
                 line_indent = len(masked) - len(masked.lstrip(" \t"))
                 block = (lead if run == _PLAIN else line_indent, False, run)
         else:
-            masked, run = _ref_flow_pairs(masked)
-            if run is not None and block is None:
-                block = (len(masked) - len(masked.lstrip(" \t")), False, run)
+            masked, runs_on = _ref_flow_pairs(masked)
+            if runs_on and block is None:
+                block = (len(masked) - len(masked.lstrip(" \t")), False, _FLOW)
         out.append(masked + eol)
     return "".join(out)
 

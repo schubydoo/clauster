@@ -444,7 +444,7 @@ def test_a_secret_shaped_args_item_is_masked_and_round_trips(tmp_path: Path) -> 
         # In a `- ` item the key is past the dash, so these lines are measured from the line.
         ("- token: {a: qv-ab,\n  b: qv-ac}\n- next\n", f"- token: {MASK}\n  {MASK}\n- next\n"),
         ("- token: [qv-ad,\n  qv-ae]\n", f"- token: {MASK}\n  {MASK}\n"),
-        # A quoted value ends with the line that closes its quote.
+        # The quoted value of a `key: value` line ends with the line that closes its quote.
         (
             '- token: "qv-af\n  qv-ag"\n  name: x\n',
             f"- token: {MASK}\n  {MASK}\n  name: x\n",
@@ -457,11 +457,31 @@ def test_a_secret_shaped_args_item_is_masked_and_round_trips(tmp_path: Path) -> 
             'token: "qv-ak\n  \\" qv-al\n  qv-am"\n  b: c\n',
             f"token: {MASK}\n  {MASK}\n  {MASK}\n  b: c\n",
         ),
+        # The line that closes a quoted flow value can open another secret value after it,
+        # so a flow value goes on until a line that is not indented deeper.
         (
-            'env: {token: "qv-an\n  qv-ao", mode: x,\n  level: 2}\n',
-            f"env: {{token: {MASK}\n  {MASK}\n  level: 2}}\n",
+            'env: {token: "qv-an\n  qv-ao", mode: x,\n  level: 2}\nnext: ok\n',
+            f"env: {{token: {MASK}\n  {MASK}\n  {MASK}\nnext: ok\n",
         ),
-        # A plain value goes on in the deeper lines that are not a key, a comment or an item.
+        (
+            'env: {token: "qv-ba\n  qv-bb", password: "qv-bc\n  qv-bd"}\n',
+            f"env: {{token: {MASK}\n  {MASK}\n  {MASK}\n",
+        ),
+        (
+            'env: {token: "qv-be\n  qv-bf", password:\n  qv-bg}\n',
+            f"env: {{token: {MASK}\n  {MASK}\n  {MASK}\n",
+        ),
+        (
+            "env: {token: 'qv-bh\n  qv-bi', password: 'qv-bj\n  qv-bk'}\n",
+            f"env: {{token: {MASK}\n  {MASK}\n  {MASK}\n",
+        ),
+        # Node properties before an open quote, and a one-space continuation.
+        ('- token: &a "qv-bl\n  qv-bm"\n', f"- token: {MASK}\n  {MASK}\n"),
+        ('token: !t "qv-bn\n  qv-bo: x"\n', f"token: {MASK}\n  {MASK}\n"),
+        ("env: {token: qv-bp\n qv-bq}\n", f"env: {{token: {MASK}\n {MASK}\n"),
+        # A `- ` line deeper than the key is text of a plain value in YAML.
+        ("token: qv-br\n  - qv-bs\n", f"token: {MASK}\n  {MASK}\n"),
+        # A plain value goes on in the deeper lines that are not a key or a comment.
         (
             "token: qv-ap\n  qv-aq\n  qv-ar\nnext: ok\n",
             f"token: {MASK}\n  {MASK}\n  {MASK}\nnext: ok\n",
@@ -484,7 +504,6 @@ def test_a_secret_value_that_goes_on_is_masked_on_each_line(text: str, view: str
         'token: "qv-c"\n  indented: y\n',
         "token: qv-d\n  indented: y\n",
         "token: qv-e\n  # a comment\n",
-        "token: qv-f\n  - an item\n",
         "- token: qv-g\n  name: x\n",
         "- token: qv-h\n  more text\n",
         "env: {mode:\n  fast}\n",

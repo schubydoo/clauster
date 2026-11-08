@@ -223,8 +223,8 @@ _FLOW_END_RE = re.compile(r"[,}\]]")
 
 
 #: How a secret value goes on past its line (:func:`redact_secret_lines`): ``_RUNS_ON`` is
-#: a flow value, a quote character is a quoted value still open, and ``_PLAIN`` is a plain
-#: value that YAML can fold onto the next lines.
+#: a block or flow value, a quote character is the quoted value of a ``key: value`` line
+#: still open, and ``_PLAIN`` is a plain value that YAML can fold onto the next lines.
 _RUNS_ON = ""
 _PLAIN = "plain"
 
@@ -252,7 +252,7 @@ def _quoted_end(body: str, begin: int) -> int | None:
     return None
 
 
-def _mask_flow_pairs(body: str) -> tuple[str, str | None]:
+def _mask_flow_pairs(body: str) -> tuple[str, bool]:
     """Return ``body`` with the value of each secret-keyed flow-collection pair masked.
 
     A line such as ``env: {API_KEY: sk-x, MODE: fast}`` has a benign key at its start, so
@@ -264,18 +264,17 @@ def _mask_flow_pairs(body: str) -> tuple[str, str | None]:
     bracket inside it could end the value early. Linear: the values are disjoint, and each
     scan stops at the first character that ends it.
 
-    Also returns how the last secret-keyed value goes on past the end of the line, or
-    ``None``: the quote character for an unclosed quote, and :data:`_RUNS_ON` for an empty
-    value at the end (``{token:``), a nested value, a value behind an anchor or a tag, or a
-    plain value with no ``,``, ``}`` or ``]`` after it. Its text can go on in the next
-    lines, which :func:`redact_secret_lines` then masks (TASK-536).
+    Also returns whether the last secret-keyed value goes on past the end of the line: an
+    empty value at the end (``{token:``), an unclosed quote, a nested value, a value behind
+    an anchor or a tag, or a plain value with no ``,``, ``}`` or ``]`` after it. Its text
+    can go on in the next lines, which :func:`redact_secret_lines` then masks (TASK-536).
     """
     first = _FLOW_START_RE.search(body)
     if first is None:
-        return body, None
+        return body, False
     out: list[str] = []
     prev = 0
-    run: str | None = None
+    runs_on = False
     for match in _FLOW_KEY_RE.finditer(body, first.start()):
         if match.start() < prev or not _SECRET_KEY_RE.search(match.group("key")):
             continue  # inside a value masked already, or a benign key
@@ -284,16 +283,16 @@ def _mask_flow_pairs(body: str) -> tuple[str, str | None]:
         if lead in ("'", '"'):
             quoted = _quoted_end(body, begin)
             end = len(body) if quoted is None else quoted
-            run = lead if quoted is None else None
+            runs_on = quoted is None
         elif lead in ("{", "[", "&", "!"):
             # A nested value, or one behind an anchor or a tag whose shape is not read
             # here: masked to the end of the line.
             end = len(body)
-            run = _RUNS_ON
+            runs_on = True
         else:
             stop = _FLOW_END_RE.search(body, begin)
             end = len(body) if stop is None else stop.start()
-            run = _RUNS_ON if stop is None else None
+            runs_on = stop is None
             while end > begin and body[end - 1] in " \t":
                 end -= 1
         if end == begin:
@@ -301,9 +300,9 @@ def _mask_flow_pairs(body: str) -> tuple[str, str | None]:
         out += (body[prev:begin], REDACTION_SENTINEL)
         prev = end
     if not out:
-        return body, run
+        return body, runs_on
     out.append(body[prev:])
-    return "".join(out), run
+    return "".join(out), runs_on
 
 
 #: A secret-keyed line whose value starts on the next lines: nothing after the ``:`` but
@@ -322,7 +321,7 @@ def _indent(body: str) -> int:
 
 #: A line that a plain value does not go on into: a mapping key (``key:`` and then a space,
 #: a tab or the end), matched after the indent. YAML refuses such a line as the text of a
-#: plain value.
+#: plain value, and a comment line ends one.
 _MAPPING_KEY_RE = re.compile(r"(?P<q>[\"']?)[\w.\-]+(?P=q)[ \t]*:(?:[ \t]|$)")
 
 
@@ -751,11 +750,12 @@ def redact_secret_lines(text: str) -> str:
       lines indented deeper than that line: a flow value that :func:`_mask_flow_pairs`
       reports as going on (``env: {token:``, an unclosed quote, ``&a``), and the value of
       a secret ``key: value`` that is an unclosed quote or a flow value
-      (:func:`_value_run`). A quoted value ends with the line that closes its quote. A
-      plain value goes on only in the lines indented deeper than its key that are not a
-      mapping key (:data:`_MAPPING_KEY_RE`), a comment or a ``- `` item, because YAML
-      refuses those as its text. A continued line at the column of that line (or of the
-      key, for a plain value) or less is not detected.
+      (:func:`_value_run`). The quoted value of a ``key: value`` line ends with the line
+      that closes its quote. A flow value does not, because the rest of that line can open
+      another secret value. A plain value goes on only in the lines indented deeper than
+      its key that are not a mapping key (:data:`_MAPPING_KEY_RE`) or a comment, because
+      YAML refuses the first as its text and a comment ends it. A continued line at the
+      column of that line (or of the key, for a plain value) or less is not detected.
 
     Deliberately conservative in the same direction as :func:`redact_secrets`:
     over-masking a non-secret line only costs a resend; under-masking would leak.
@@ -766,8 +766,8 @@ def redact_secret_lines(text: str) -> str:
     out: list[str] = []
     # The column of the secret key whose value the next lines hold, whether a `-` item at
     # that column belongs to it (a bare `token:`, never a block scalar), and how a value
-    # that went on past its line goes on ("" for a block or flow value, a quote character,
-    # or `_PLAIN`).
+    # that went on past its line goes on (`_RUNS_ON`, the quote character of a `key: value`
+    # line, or `_PLAIN`).
     block: tuple[int, bool, str] | None = None
     for line in lines:
         if block is not None:
@@ -783,14 +783,12 @@ def redact_secret_lines(text: str) -> str:
                 # comment outside a value gets.
                 comment = _mask_interps(content, REDACTION_SENTINEL)
                 comment = _mask_url_creds(comment, f"{REDACTION_SENTINEL}@")
-                comment, _run = _mask_flow_pairs(comment)
+                comment, _runs_on = _mask_flow_pairs(comment)
                 out.append(comment + line[len(content) :])
                 continue
             item = content[indent] == "-" and content[indent + 1 : indent + 2] in ("", " ", "\t")
-            # A plain value does not go on into a comment, an item or a mapping key.
-            structured = (
-                item or content[indent] == "#" or bool(_MAPPING_KEY_RE.match(content, indent))
-            )
+            # A plain value does not go on into a comment or a mapping key.
+            structured = content[indent] == "#" or bool(_MAPPING_KEY_RE.match(content, indent))
             if (indent > column and not (run == _PLAIN and structured)) or (
                 indent == column and items and item
             ):
@@ -821,11 +819,12 @@ def redact_secret_lines(text: str) -> str:
                 # from the line (`- token: "abc` then `  def"`).
                 block = (lead if run == _PLAIN else _indent(masked), False, run)
         else:
-            masked, run = _mask_flow_pairs(masked)
-            if run is not None and block is None:
+            masked, runs_on = _mask_flow_pairs(masked)
+            if runs_on and block is None:
                 # A secret flow value that goes on past this line (`env: {token:` then
-                # `  LEAK}`): the lines indented deeper than this line hold its text.
-                block = (_indent(masked), False, run)
+                # `  LEAK}`): the lines indented deeper than this line hold its text. Even
+                # the line that closes a quote can open another secret value after it.
+                block = (_indent(masked), False, _RUNS_ON)
         out.append(masked + eol)
     return "".join(out)
 
