@@ -221,7 +221,7 @@ class RemoteControlInstance(BaseModel):
     claude_session_uuid: str | None = None  # RFC 4122 from the init frame; drives --resume
     daemon_last_seq: int = 0  # highest daemon frame seq seen; reattach cursor across restarts
     hosted_log_path: Path | None = None  # redacted on-disk mirror of the hosted stream
-    is_orphan: bool = False  # CL-8: survived a daemon restart (live pid, no daemon session)
+    is_orphan: bool = False  # CL-8: live pid that Clauster could not reattach (no session)
 
     def model_post_init(self, context: Any, /) -> None:
         """Store the ids this record was built with for exact-value redaction (#1621)."""

@@ -183,6 +183,14 @@ connection lost and the reconnect failed`. In each case, a `claude` process that
 is still alive is shown as an orphan with **Kill**, the same as after a daemon
 restart, so that **Resume** never starts a second agent beside it.
 
+Clauster tries again when the connection itself caused the failure. This is the
+case when the reconnect failed, or when the new connection also ended during the
+reattach. The next daemon connection then reattaches the session, and the card
+shows `Running` again. For the sessions that Clauster reattaches when it starts,
+a reattach that timed out is also tried again. **Resume** on an `Error` card first ends the
+old agent through the daemon and waits for the answer. If the daemon does not
+answer, Resume refuses, so that two agents never run on one conversation.
+
 A new Direct Session also reconnects first, so it does not fail because of an
 old, closed connection. The reattach of the running sessions happens in the
 background and does not delay the new session. If Clauster could not reach the
