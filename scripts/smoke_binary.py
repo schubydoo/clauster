@@ -374,11 +374,12 @@ def _keeper_survives_its_server(keeper: dict, server: subprocess.Popen) -> None:
         _wait_until(
             lambda: not os.path.isdir(keeper_mei), 20, "the keeper's unpack dir to be deleted"
         )
-    detail = (
-        "server unpack dir deleted first, keeper's own kept, then removed"
-        if server_mei
-        else "unpack dirs not observable here"
-    )
+    if server_mei:
+        detail = "server unpack dir deleted first, keeper's own kept, then removed"
+    elif keeper_mei:
+        detail = "keeper's own unpack dir kept, then removed; the server's not observable here"
+    else:
+        detail = "unpack dirs not observable here"
     print(f"pty keeper outlived its server and exited cleanly ({detail})")
 
 

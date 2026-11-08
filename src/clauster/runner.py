@@ -334,6 +334,9 @@ _POISON_STOP_TIMEOUT = 5.0
 # — and 5s would not save that either. Kept separate so retuning the grace period can't
 # silently retune the reap.
 _TREE_REAP_WAIT = 2.0
+# How long stop() waits to reap a frozen keeper's one-file bootloader after its keeper is gone
+# (TASK-503). It exits by itself once it has deleted its unpack dir, well inside this.
+_LAUNCH_REAP_WAIT = 2.0
 # How long shutdown() waits for in-flight fire-and-forget notify sends to finish
 # before cancelling them — bounds shutdown while letting a quick send complete.
 _NOTIFY_DRAIN_GRACE = 2.0
@@ -2699,7 +2702,7 @@ class SessionRunner:
                     )
                 instance.status = InstanceStatus.STOPPED
                 await asyncio.to_thread(self._unlock_pty_worktree, instance)  # #1089
-                self._procs.pop(instance_id, None)  # release dead Popen handle; resume re-adds it
+                await self._release_launch(instance_id, keeper_pid)  # resume re-adds it
                 self._emit_lifecycle("stop", instance)
                 return instance
 
@@ -2731,9 +2734,29 @@ class SessionRunner:
                 )
             instance.status = InstanceStatus.STOPPED
             await asyncio.to_thread(self._unlock_pty_worktree, instance)  # #1089
-            self._procs.pop(instance_id, None)  # release dead Popen handle; resume re-adds it
+            await self._release_launch(instance_id, keeper_pid)  # resume re-adds it
             self._emit_lifecycle("stop", instance)
             return instance
+
+    async def _release_launch(self, instance_id: str, keeper_pid: int | None) -> None:
+        """Drop the instance's ``Popen`` handle, reaping a frozen keeper's bootloader first.
+
+        For a frozen pty keeper the row records the keeper and the handle is its one-file
+        bootloader (TASK-503), which exits only after the keeper, once it has deleted its
+        unpack dir. ``_cleanup_keeper`` returns as soon as the KEEPER is gone, so wait a
+        bounded time for the bootloader here: dropped unreaped, it would linger as a
+        zombie until CPython's own ``subprocess`` reaper next runs. Still running at the
+        bound (a keeper ``_cleanup_keeper`` spared), it is left to that reaper.
+        """
+        proc = self._procs.pop(instance_id, None)
+        if proc is None or keeper_pid is None or proc.pid == keeper_pid:
+            return
+        if proc.returncode is not None:
+            return
+        try:
+            await asyncio.to_thread(proc.wait, _LAUNCH_REAP_WAIT)
+        except subprocess.TimeoutExpired:
+            _log.debug("keeper bootloader %s still running after stop", proc.pid)
 
     async def forget(self, instance_id: str) -> None:
         """Drop a NON-LIVE bridge's record from memory and state.json (fail closed).

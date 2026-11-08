@@ -173,7 +173,9 @@ want the full supply-chain check.
     deletes the directory when it exits. So a keeper keeps working after a
     Clauster restart deletes the directory of the server that started it. Each
     keeper's copy takes as much space as the server's own (about 90 MB on Linux).
-    If `/tmp` is a `tmpfs`, that space is memory.
+    If `/tmp` is a `tmpfs`, that space is memory. The binary unpacks into
+    `TMPDIR` when it is set, and a keeper uses the `TMPDIR` of the server that
+    started it.
     The unpack step also sets `_PYI_*` variables in the binary's own environment,
     and on Linux it adds the `_MEI…` directory to `LD_LIBRARY_PATH`. Clauster
     removes them, and puts back your own `LD_LIBRARY_PATH`, before it starts a

@@ -65,7 +65,9 @@ import asyncio
 import logging
 import os
 import subprocess
+import sys
 import time
+import weakref
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -109,6 +111,9 @@ _POISON_GRACE = 4.0
 # Cadence at which the post-spawn startup-watch re-reads the bridge log to detect
 # a (late) environment registration or a stuck-but-alive bridge.
 _STARTUP_WATCH_INTERVAL = 2.0
+# Whether a pty launch may adopt the keeper pid its sidecar names (TASK-503). Off on Windows,
+# where the frozen keeper stays one process and a two-process launch is unmeasured.
+_ADOPT_KEEPER_CHILD = sys.platform != "win32"
 
 
 class SpawnCoordinator:
@@ -197,6 +202,10 @@ class SpawnCoordinator:
         self._rc_setting_ensured = False
         # Install the resume-recap SessionStart hook once, before the first spawn.
         self._recap_hook_ensured = False
+        # Keeper launches whose sidecar pid failed the adoption gate (TASK-503): the refusal
+        # is logged once, and the startup watch does not re-ask on every tick. Keyed by the
+        # Popen itself, never by its pid, which a later launch can reuse once it is reaped.
+        self._keeper_adoption_refused: weakref.WeakSet[subprocess.Popen] = weakref.WeakSet()
 
     async def spawn(
         self,
@@ -972,16 +981,32 @@ class SpawnCoordinator:
         return info  # pragma: skip-on-win
 
     @staticmethod
+    def _keeper_log_tail(sidecar: Path) -> str | None:
+        """Return the end of the keeper's own stdout/stderr log, or ``None`` when it is empty.
+
+        The log is ``<sidecar>.log`` (``BridgeLaunch._popen_keeper``). The caller redacts
+        and bounds it before it reaches the card, as for every ``error_detail``.
+        """
+        try:
+            with sidecar.with_suffix(".log").open("rb") as fh:
+                fh.seek(0, os.SEEK_END)
+                fh.seek(max(0, fh.tell() - 8192))
+                text = fh.read().decode("utf-8", errors="replace").strip()
+        except OSError:
+            return None
+        return text or None
+
+    @staticmethod
     def _keeper_identity_from_sidecar(
         info: dict, launcher_pid: int
-    ) -> tuple[int, float | None, int | None] | None:
+    ) -> tuple[int, float | None, int | None] | bool:
         """Return the keeper's own ``(pid, proc_start, start_ticks)`` when it is not the launch.
 
         A frozen keeper on POSIX is a fresh one-file instance (TASK-503,
         :func:`procutil.keeper_launch_env`): ``launcher_pid`` is its bootloader, and the
         keeper that holds the PTY is the bootloader's Python child, which writes its own
-        pid to the sidecar. ``None`` when there is nothing to change (no sidecar pid yet, or
-        it IS the launch, as for a source install) or when the pid fails the gate.
+        pid to the sidecar. ``True`` when there is nothing to change (no sidecar pid yet, or
+        it IS the launch, as for a source install); ``False`` when the pid fails the gate.
 
         The gate (:func:`procutil.is_keeper_child_of`) runs on both sides of the one
         :func:`procutil.proc_start_pair` read. The sidecar is a file on disk and this pid
@@ -992,18 +1017,12 @@ class SpawnCoordinator:
         """
         pid = _row_int(info.get("keeper_pid"))
         if pid is None or pid == launcher_pid:
-            return None
+            return True
         if not procutil.is_keeper_child_of(pid, launcher_pid):
-            _log.warning(
-                "keeper sidecar names pid %s, which is not the keeper child of launch pid %s; "
-                "keeping the launch pid",
-                pid,
-                launcher_pid,
-            )
-            return None
+            return False
         created, ticks = procutil.proc_start_pair(pid)
         if not procutil.is_keeper_child_of(pid, launcher_pid):
-            return None
+            return False
         return pid, created, ticks
 
     async def _adopt_keeper_identity(
@@ -1015,13 +1034,36 @@ class SpawnCoordinator:
         all identify a keeper by the pid in its sidecar, so the row must carry that pid. The
         three fields are replaced together, never one alone (the trio rule of
         ``Rediscovery._recover_keeper_identity``). The ``Popen`` stays in ``_procs``: the
-        bootloader is this process's child, and the poll loop reaps it through that handle.
+        bootloader is this process's child, and the poll loop, or ``stop()``, reaps it
+        through that handle.
+
+        Asked only while the launch is unreaped, so its pid cannot have been reused, and
+        only off Windows: the frozen keeper there stays one process
+        (:func:`procutil.keeper_launch_env`), and a two-process launch there is unmeasured.
+        A refusal keeps the launch pid, which the stop paths still wind down (the
+        bootloader carries the keeper's command line), and is logged once per launch.
         """
-        if instance.keeper_pid is None or instance.keeper_pid != proc.pid:
-            return  # already adopted, or not this launch's row
+        if (
+            not _ADOPT_KEEPER_CHILD
+            or instance.keeper_pid is None
+            or instance.keeper_pid != proc.pid  # already adopted, or not this launch's row
+            or proc in self._keeper_adoption_refused
+            or proc.poll() is not None  # the launch is gone: no live keeper to adopt
+        ):
+            return
         found = await asyncio.to_thread(self._keeper_identity_from_sidecar, info, proc.pid)
-        if found is None or instance.keeper_pid != proc.pid:
-            return  # the row moved on to another launch while the gate ran
+        if found is True or instance.keeper_pid != proc.pid:
+            return  # nothing to adopt, or the row moved on to another launch meanwhile
+        if found is False:
+            self._keeper_adoption_refused.add(proc)
+            _log.warning(
+                "keeper sidecar of %s names pid %r, which is not the keeper child of launch "
+                "pid %s; keeping the launch pid",
+                instance.project,
+                info.get("keeper_pid"),
+                proc.pid,
+            )
+            return
         instance.keeper_pid, instance.keeper_proc_start, instance.keeper_start_ticks = found
 
     def _apply_pty_info(
@@ -1149,6 +1191,11 @@ class SpawnCoordinator:
             # it (`pty_keeper`'s conpty read/liveness/wait/abort reasons, #1389) — text
             # that has passed through no redactor on its way here.
             keeper_error = info.get("error")
+            if not info:
+                # No sidecar at all: the keeper died before its first write. In the binary
+                # that includes a bootloader that could not unpack its own copy (a full temp
+                # dir, TASK-503), which reports only to the keeper's own log. Surface its tail.
+                keeper_error = await asyncio.to_thread(self._keeper_log_tail, sidecar)
             instance.error_detail = (
                 redact.redact_for_disk(keeper_error)[-2000:]
                 if isinstance(keeper_error, str)

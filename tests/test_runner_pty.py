@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -910,7 +911,12 @@ async def test_spawn_pty_reaches_running_then_stops(runner_config) -> None:
 # A stand-in for the one-file bootloader a frozen keeper launch now is (TASK-503): it starts
 # the real keeper as its only child and waits for it. Its cmdline carries the keeper's argv
 # unchanged, exactly as the real bootloader's does, so it passes the keeper cmdline gate too.
-_BOOTLOADER = "import subprocess, sys; sys.exit(subprocess.call(sys.argv[1:]))"
+# FAKE_BOOTLOADER_DELAY stands in for the unpack the real one does before Python starts.
+_BOOTLOADER = (
+    "import os, subprocess, sys, time;"
+    "time.sleep(float(os.environ.get('FAKE_BOOTLOADER_DELAY', '0')));"
+    "sys.exit(subprocess.call(sys.argv[1:]))"
+)
 
 
 def _launch_through_a_bootloader(monkeypatch) -> list:
@@ -962,9 +968,62 @@ async def test_spawn_pty_records_the_keeper_not_its_bootloader(runner_config, mo
     assert stopped.status is InstanceStatus.STOPPED
     assert procutil.proc_create_time(inst.bridge_pid) is None
     assert procutil.proc_create_time(inst.keeper_pid) is None
-    # The stop paths never signal the bootloader; it exits by itself after its keeper.
-    launcher.wait(timeout=10)
+    # stop() itself reaped the bootloader (no zombie left behind once the handle is dropped),
+    # and never signalled it: it exited by itself after its keeper.
+    assert inst.instance_id not in runner._procs
     assert launcher.returncode is not None
+    assert launcher.returncode >= 0
+
+
+@_POSIX_ONLY
+async def test_startup_watch_adopts_a_keeper_that_starts_late(runner_config, monkeypatch) -> None:
+    # A bootloader slow to unpack starts its keeper after the synchronous readiness wait, so
+    # the row first carries the launch pid; the startup watch must adopt the keeper's own.
+    monkeypatch.setenv("FAKE_BOOTLOADER_DELAY", "0.6")
+    monkeypatch.setattr("clauster.spawn_coordinator._READY_TIMEOUT", 0.2)
+    monkeypatch.setattr("clauster.spawn_coordinator._STARTUP_WATCH_INTERVAL", 0.1)
+    launched = _launch_through_a_bootloader(monkeypatch)
+    runner, _ = _pty_runner(runner_config)
+    inst = await runner.spawn("alpha")
+    try:
+        (launcher,) = launched
+        assert inst.status is InstanceStatus.STARTING
+        assert inst.keeper_pid == launcher.pid  # nothing to adopt yet
+        for _ in range(100):
+            if inst.status is InstanceStatus.RUNNING:
+                break
+            await asyncio.sleep(0.1)
+        assert inst.status is InstanceStatus.RUNNING
+        assert inst.keeper_pid == _sidecar_of(inst)["keeper_pid"] != launcher.pid
+        assert (inst.keeper_proc_start, inst.keeper_start_ticks) == procutil.proc_start_pair(
+            inst.keeper_pid
+        )
+    finally:
+        await runner.stop(inst.instance_id)
+    assert procutil.proc_create_time(inst.keeper_pid) is None
+
+
+@_POSIX_ONLY
+async def test_spawn_pty_surfaces_the_keeper_log_when_it_dies_before_its_sidecar(
+    runner_config, monkeypatch
+) -> None:
+    # A bootloader that cannot unpack (a full temp dir) reports only to the keeper's own log
+    # and exits before any sidecar exists: the card must say why, redacted.
+    failing = (
+        "import sys; sys.stderr.write('[PYI-1:ERROR] Could not create temporary directory! "
+        "token sk-ant-api03-SECRETSECRETSECRET\\n'); sys.exit(255)"
+    )
+    monkeypatch.setattr(
+        BridgeLaunch,
+        "_keeper_launch_cmd",
+        staticmethod(lambda *a, **k: [sys.executable, "-c", failing]),
+    )
+    runner, _ = _pty_runner(runner_config)
+    inst = await runner.spawn("alpha")
+    assert inst.status is InstanceStatus.ERROR
+    assert inst.error_detail is not None
+    assert "Could not create temporary directory" in inst.error_detail
+    assert "SECRETSECRETSECRET" not in inst.error_detail
 
 
 @_POSIX_ONLY
@@ -991,8 +1050,10 @@ async def test_rediscover_and_stop_a_two_process_keeper_after_a_restart(
     assert stopped.status is InstanceStatus.STOPPED
     assert procutil.proc_create_time(inst.bridge_pid) is None
     assert procutil.proc_create_time(inst.keeper_pid) is None
+    # In a real restart init reaps the reparented bootloader; here this test process is still
+    # its parent. It exited by itself (never signalled) once its keeper was gone.
     launched[0].wait(timeout=10)
-    assert launched[0].returncode is not None
+    assert launched[0].returncode >= 0
 
 
 @_POSIX_ONLY
@@ -1022,8 +1083,47 @@ async def test_poll_once_reaps_the_bootloader_after_its_keeper_exits(
 
 
 class _Launch:
-    def __init__(self, pid: int) -> None:
+    def __init__(self, pid: int, *, exited: bool = False) -> None:
         self.pid = pid
+        self._exited = exited
+        self.returncode = 0 if exited else None
+        self.waited: list = []
+
+    def poll(self):
+        return 0 if self._exited else None
+
+    def wait(self, timeout=None):
+        self.waited.append(timeout)
+        raise subprocess.TimeoutExpired("bootloader", timeout)
+
+
+async def test_release_launch_waits_only_for_a_live_bootloader(runner_config) -> None:
+    runner, _ = _pty_runner(runner_config)
+    cases = [
+        (_Launch(500), 501, [2.0]),  # a frozen keeper's live bootloader: waited for, bounded
+        (_Launch(500), 500, []),  # the launch IS the keeper (source install): nothing to wait
+        (_Launch(500), None, []),  # no keeper (a standard bridge)
+        (_Launch(500, exited=True), 501, []),  # already reaped
+    ]
+    for launch, keeper_pid, waited in cases:
+        runner._procs["iid"] = launch
+        await runner._release_launch("iid", keeper_pid)  # a TimeoutExpired is absorbed
+        assert "iid" not in runner._procs
+        assert launch.waited == waited
+    await runner._release_launch("iid", 501)  # no handle at all
+
+
+def test_keeper_log_tail(tmp_path) -> None:
+    from clauster.spawn_coordinator import SpawnCoordinator
+
+    sidecar = tmp_path / "k.keeper.json"
+    assert SpawnCoordinator._keeper_log_tail(sidecar) is None  # no log
+    log = sidecar.with_suffix(".log")
+    log.write_bytes(b"  \n")
+    assert SpawnCoordinator._keeper_log_tail(sidecar) is None  # empty
+    log.write_bytes(b"x" * 20000 + b"\nlast line \xff\n")
+    tail = SpawnCoordinator._keeper_log_tail(sidecar)
+    assert tail.endswith("last line �") and len(tail) <= 8192
 
 
 def test_keeper_identity_from_sidecar_keeps_the_launch_pid_without_a_distinct_child(
@@ -1038,20 +1138,18 @@ def test_keeper_identity_from_sidecar_keeps_the_launch_pid_without_a_distinct_ch
     # No sidecar pid yet, a malformed one, or the launch's own (a source install): no change,
     # and the gate is not even asked.
     for info in ({}, {"keeper_pid": True}, {"keeper_pid": "7"}, {"keeper_pid": 500}):
-        assert spawner._keeper_identity_from_sidecar(info, 500) is None
+        assert spawner._keeper_identity_from_sidecar(info, 500) is True
     assert calls == []
 
 
 def test_keeper_identity_from_sidecar_refuses_a_pid_that_is_not_the_launchs_child(
-    runner_config, monkeypatch, caplog
+    runner_config, monkeypatch
 ) -> None:
     # The sidecar is a file on disk and the adopted pid reaches a tree kill: a pid that is not
-    # the bootloader's own keeper child is refused, and the row keeps the launch pid.
+    # the bootloader's own keeper child is refused.
     runner, _ = _pty_runner(runner_config)
     monkeypatch.setattr("clauster.procutil.is_keeper_child_of", lambda pid, ppid: False)
-    with caplog.at_level("WARNING", logger="clauster.spawn_coordinator"):
-        assert runner._spawner._keeper_identity_from_sidecar({"keeper_pid": 501}, 500) is None
-    assert any("not the keeper child" in r.getMessage() for r in caplog.records)
+    assert runner._spawner._keeper_identity_from_sidecar({"keeper_pid": 501}, 500) is False
 
 
 def test_keeper_identity_from_sidecar_fences_the_start_pair(runner_config, monkeypatch) -> None:
@@ -1061,10 +1159,59 @@ def test_keeper_identity_from_sidecar_fences_the_start_pair(runner_config, monke
     answers = iter([True, False])
     monkeypatch.setattr("clauster.procutil.is_keeper_child_of", lambda pid, ppid: next(answers))
     monkeypatch.setattr("clauster.procutil.proc_start_pair", lambda pid: (1.0, 2))
-    assert runner._spawner._keeper_identity_from_sidecar({"keeper_pid": 501}, 500) is None
+    assert runner._spawner._keeper_identity_from_sidecar({"keeper_pid": 501}, 500) is False
 
     monkeypatch.setattr("clauster.procutil.is_keeper_child_of", lambda pid, ppid: True)
     assert runner._spawner._keeper_identity_from_sidecar({"keeper_pid": 501}, 500) == (501, 1.0, 2)
+
+
+async def test_adopt_keeper_identity_refuses_once_and_keeps_the_launch_pid(
+    runner_config, monkeypatch, caplog
+) -> None:
+    from clauster.models import RemoteControlInstance
+
+    monkeypatch.setattr("clauster.spawn_coordinator._ADOPT_KEEPER_CHILD", True)
+    runner, _ = _pty_runner(runner_config)
+    spawner = runner._spawner
+    asked: list = []
+    monkeypatch.setattr(
+        type(spawner),
+        "_keeper_identity_from_sidecar",
+        staticmethod(lambda info, pid: asked.append(pid) or False),
+    )
+    inst = RemoteControlInstance(project="alpha", label="alpha", keeper_pid=500)
+    launch = _Launch(500)
+    with caplog.at_level("WARNING", logger="clauster.spawn_coordinator"):
+        for _ in range(3):  # three startup-watch ticks
+            await spawner._adopt_keeper_identity(inst, {"keeper_pid": 501}, launch)
+    assert inst.keeper_pid == 500
+    assert asked == [500]  # asked once, not on every tick
+    assert sum("not the keeper child" in r.getMessage() for r in caplog.records) == 1
+
+
+@pytest.mark.parametrize(
+    ("adopt", "launch"),
+    [(False, _Launch(500)), (True, _Launch(500, exited=True))],
+    ids=["windows-one-process", "launch-already-reaped"],
+)
+async def test_adopt_keeper_identity_is_not_asked(runner_config, monkeypatch, adopt, launch):
+    # Windows keeps the one-process keeper; and a reaped launch has no live keeper child (and
+    # its pid could be reused), so the gate is never asked.
+    from clauster.models import RemoteControlInstance
+
+    monkeypatch.setattr("clauster.spawn_coordinator._ADOPT_KEEPER_CHILD", adopt)
+    runner, _ = _pty_runner(runner_config)
+    spawner = runner._spawner
+    asked: list = []
+    monkeypatch.setattr(
+        type(spawner),
+        "_keeper_identity_from_sidecar",
+        staticmethod(lambda info, pid: asked.append(pid) or (501, 1.0, 2)),
+    )
+    inst = RemoteControlInstance(project="alpha", label="alpha", keeper_pid=500)
+    await spawner._adopt_keeper_identity(inst, {"keeper_pid": 501}, launch)
+    assert inst.keeper_pid == 500
+    assert asked == []
 
 
 async def test_adopt_keeper_identity_only_replaces_this_launchs_row(
@@ -1072,6 +1219,7 @@ async def test_adopt_keeper_identity_only_replaces_this_launchs_row(
 ) -> None:
     from clauster.models import RemoteControlInstance
 
+    monkeypatch.setattr("clauster.spawn_coordinator._ADOPT_KEEPER_CHILD", True)
     runner, _ = _pty_runner(runner_config)
     spawner = runner._spawner
     monkeypatch.setattr(

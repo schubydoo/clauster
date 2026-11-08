@@ -688,8 +688,9 @@ def is_keeper_child_of(pid: int, parent_pid: int) -> bool:
     ``Popen.pid`` of its launch (:func:`keeper_launch_env`): the launch is a one-file
     bootloader, and the keeper is the bootloader's Python child. The sidecar is a file on
     disk and the adopted pid reaches a tree kill, so a cmdline match alone is not enough.
-    While the caller holds the bootloader's unreaped ``Popen``, its pid cannot be reused,
-    and the only process that names it as parent is the child it started.
+    The caller asks only while the bootloader is unreaped, so its pid is not reused, and
+    the only process that names it as parent is the one child it started: a keeper whose
+    bootloader dies is reparented, and its parent pid never comes back.
 
     Fails closed on gone / denied / zombie / negative pid, as :func:`is_keeper_process`
     does, and for the same reasons.
