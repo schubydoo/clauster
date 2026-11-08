@@ -1269,17 +1269,21 @@ def test_project_readiness_pill_shows_not_run_instead_of_hiding(write_config):
     assert 'this._allPreflightFailed(seqs, "the request failed or timed out");' in page
     assert page.count("setTimeout(() => ctrl.abort(), this.preflightTimeoutMs);") == 2
     # A failed run keeps the earlier result (the MCP soft-block fails closed), and the
-    # save paths set the block BEFORE their reload, so a failed or superseded reload
-    # cannot leave the gate open; only the newest successful load clears it.
+    # save paths set the block and supersede in-flight requests BEFORE their reload, so a
+    # failed reload or a pre-write answer cannot leave the gate open. The behaviour is
+    # pinned in tests/e2e/test_config_mgmt_e2e.py (the mcp_gate tests).
     assert "delete this.preflight[name]" not in page
     assert (
         page.count(
-            "this.mcpBlockUntilReloaded[c.project] = true; await this._loadMcp(gen); "
-            "await this.loadPreflight(c.project); }"
+            "this.mcpBlockUntilReloaded[c.project] = true; this._preflightTake(c.project); "
+            "await this._loadMcp(gen); await this.loadPreflight(c.project); }"
         )
         == 2
     )
-    assert "if (seq !== this._preflightSeq[name]) return false;" in page
+    # Only the newest request's answer lands, on the success and the failure path.
+    assert "if (seq !== this._preflightSeq[name]) return false;  // a newer request owns" in page
+    assert page.count("if (seq !== this._preflightSeq[name]) return false;") == 2
+    assert "if (!applied) return;" in page
     # The old silent-on-failure paths are gone.
     assert "advisory — pill hides on failure" not in page
     assert "advisory — leave per-project pills hidden" not in page

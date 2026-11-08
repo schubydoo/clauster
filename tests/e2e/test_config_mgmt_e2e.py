@@ -2821,6 +2821,92 @@ def test_config_mgmt_mcp_approvals_round_trip(
     assert "gizmo" in stored["projects"][alpha_key]["enabledMcpjsonServers"]
 
 
+_ROOT = "Alpine.$data(document.querySelector('[x-data^=\"dashboard\"]'))"
+_GATE = (
+    "(()=>{const d=" + _ROOT + ";d.resumeMode['alpha']='pty';return d._mcpGateBlocks('alpha')})()"
+)
+
+
+def _arm_mcp_approval(browser: AgentBrowser, server: Server) -> None:
+    """Commit a server, approve it in the approvals panel, and type the save token."""
+    _open_modal(browser, server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-mcp"]')
+    browser.expect_visible('[data-test="cm-mcp-new"]')
+    browser.click('[data-test="cm-mcp-new"]')
+    browser.expect_visible('[data-test="cm-mcp-editor"]')
+    browser.fill('[data-test="cm-mcp-name"]', "gizmo")
+    _mcp_raw_mode(browser)
+    browser.fill('[data-test="cm-mcp-entry"]', '{"command": "echo", "env": {"K": "v"}}')
+    browser.fill('[data-test="cm-mcp-confirm"]', "alpha")
+    browser.click('[data-test="cm-mcp-save"]')
+    browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
+    browser.expect_visible('[data-test="cm-mcp-approvals"]')
+    browser.expect_visible('[data-test="cm-mcp-approve-gizmo"]')
+    browser.click('[data-test="cm-mcp-approve-gizmo"]')
+    browser.fill('[data-test="cm-mcp-approvals-confirm"]', "alpha")
+    browser.expect_visible('[data-test="cm-mcp-approvals-save"]:not([disabled])')
+
+
+def _stub_alpha_preflight(browser: AgentBrowser, first: str) -> None:
+    """Answer alpha's /preflight: the first call with ``first`` (JS), every later one 500."""
+    browser.eval_js(
+        "(function(){window.__pf=0;if(!window.__realFetch)window.__realFetch=window.fetch;"
+        "window.fetch=(u,o)=>{if(!String(u).endsWith('/api/projects/alpha/preflight'))"
+        "return window.__realFetch(u,o);window.__pf++;"
+        "return window.__pf===1?" + first + ":Promise.resolve(new Response('{}',{status:500}))};"
+        "return 1})()"
+    )
+
+
+def test_mcp_gate_stays_closed_when_the_reload_after_a_save_fails(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """TASK-489: a save whose readiness reload fails keeps the pty launch soft-blocked."""
+    _arm_mcp_approval(browser, config_mgmt_server)
+    _stub_alpha_preflight(browser, "Promise.resolve(new Response('{}',{status:500}))")
+    browser.click('[data-test="cm-mcp-approvals-save"]')
+    browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
+    deadline = time.monotonic() + 10
+    while not browser.eval_json("(()=>window.__pf)()"):
+        assert time.monotonic() < deadline, "the save never reloaded alpha's readiness"
+        time.sleep(0.2)
+    time.sleep(0.3)
+    assert browser.eval_json(_GATE) is True
+
+
+def test_mcp_gate_ignores_a_pre_write_answer_that_lands_during_the_save(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """An older readiness answer that lands after the write cannot clear the save's block.
+
+    The older request answers "all passed" (pre-write) while the save is reloading its
+    MCP list; the save's own reload then fails. The gate must still block.
+    """
+    _arm_mcp_approval(browser, config_mgmt_server)
+    ok = json.dumps(
+        json.dumps({"ok": True, "checks": [{"name": "trust", "status": "ok", "detail": "x"}]})
+    )
+    _stub_alpha_preflight(
+        browser,
+        "new Promise(r=>setTimeout(()=>r(new Response(" + ok + ",{status:200,"
+        "headers:{'Content-Type':'application/json'}})),400))",
+    )
+    browser.eval_js(
+        "(function(){const d=" + _ROOT + ";const orig=d._loadMcp.bind(d);"
+        "d._loadMcp=async(g)=>{await new Promise(r=>setTimeout(r,1000));return orig(g)};"
+        "d.loadPreflight('alpha');return 1})()"
+    )
+    browser.click('[data-test="cm-mcp-approvals-save"]')
+    browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
+    deadline = time.monotonic() + 10
+    while browser.eval_json("(()=>window.__pf)()") < 2:
+        assert time.monotonic() < deadline, "the save never reloaded alpha's readiness"
+        time.sleep(0.2)
+    time.sleep(0.3)
+    assert browser.eval_json(_GATE) is True
+
+
 def test_config_mgmt_mcp_settings_owned_approval_is_read_only(
     browser: AgentBrowser, config_mgmt_server: Server
 ) -> None:

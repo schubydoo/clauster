@@ -3975,7 +3975,7 @@
           });
           if (c.gen !== gen) return;
           if (this._authExpired(res)) return;
-          if (res.ok) { c.saved = true; ap.confirm = ""; this.mcpBlockUntilReloaded[c.project] = true; await this._loadMcp(gen); await this.loadPreflight(c.project); }
+          if (res.ok) { c.saved = true; ap.confirm = ""; this.mcpBlockUntilReloaded[c.project] = true; this._preflightTake(c.project); await this._loadMcp(gen); await this.loadPreflight(c.project); }
           else await this._configMgmtWriteErr(res);
         } catch (e) { this._configMgmtWriteFailed(e, gen, "Save failed."); }
         finally {
@@ -4000,7 +4000,7 @@
           });
           if (c.gen !== gen) return;
           if (this._authExpired(res)) return;
-          if (res.ok) { c.saved = true; ap.resetConfirm = ""; this.mcpBlockUntilReloaded[c.project] = true; await this._loadMcp(gen); await this.loadPreflight(c.project); }
+          if (res.ok) { c.saved = true; ap.resetConfirm = ""; this.mcpBlockUntilReloaded[c.project] = true; this._preflightTake(c.project); await this._loadMcp(gen); await this.loadPreflight(c.project); }
           else await this._configMgmtWriteErr(res);
         } catch (e) { this._configMgmtWriteFailed(e, gen, "Reset failed."); }
         finally {
@@ -5842,8 +5842,13 @@
           const all = await res.json();
           for (const n of PROJECT_NAMES) {
             if (seqs[n] !== this._preflightSeq[n]) continue;  // a newer request owns this row
-            if (all && all[n]) { this.preflight[n] = all[n]; delete this.preflightError[n]; }
-            else this._preflightFailed(n, "the server sent no result for this project");
+            if (all && all[n]) {
+              // An applied answer was sent after any config write (the save path supersedes
+              // older requests), so it may clear the write's block like loadPreflight does.
+              this.preflight[n] = all[n];
+              delete this.preflightError[n];
+              delete this.mcpBlockUntilReloaded[n];
+            } else this._preflightFailed(n, "the server sent no result for this project");
           }
         } catch (e) {
           this._allPreflightFailed(seqs, "the request failed or timed out");
@@ -6126,8 +6131,9 @@
         // (the cached result predates the write): a reset re-unapproves the committed
         // servers, so skipping the block there would hang the session at claude's prompt
         // (#858 review). "Launch anyway" remains the override. The save path sets the flag
-        // BEFORE its reload, and only the newest successful preflight load clears it, so a
-        // failed or superseded reload leaves it set (TASK-489).
+        // BEFORE its reload and supersedes every request still in flight, so no answer the
+        // server computed before the write can clear it. Only a newer successful preflight
+        // load clears it, so a failed or superseded reload leaves it set (TASK-489).
         return pty && (!!this.mcpBlockUntilReloaded[name] || !!this._mcpApprovalCheck(name));
       },
       // The check's own message (which lists the specific unapproved servers), shown inside

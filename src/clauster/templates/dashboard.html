@@ -526,8 +526,8 @@
                           x-text="(hostedView[h.claustrum_process_id] && hostedView[h.claustrum_process_id].open) ? 'Hide' : 'View'">View</button>
                   {# Restart (TASK-459): only where Resume could follow the stop — the same
                      uuid + project gate as the Resume button above — and only on a running
-                     session. The server refuses a restart of a starting row with 409 (a
-                     restore pass that is still reattaching also reads starting). #}
+                     session. The restart route refuses a starting row with 409 from PR 1858
+                     on (a restore pass that is still reattaching also reads starting). #}
                   <button type="button" class="btn btn-sm btn-outline-secondary" data-test="hosted-restart"
                           x-show="(h.status === 'running' && h.claude_session_uuid_usable && h.project) || !!hostedRestarting[h.claustrum_process_id]"
                           :disabled="!!hostedRestarting[h.claustrum_process_id] || !!hostedStopping[h.claustrum_process_id]"

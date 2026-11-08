@@ -141,12 +141,6 @@ any, and shows `N checks passed` when every check passes. If the checks did not 
 That state is not a pass. Select the pill to see each check row and to run the checks
 again.
 
-Each project row has its own readiness pill for the checks of that project: trust,
-git, and MCP server approvals. The row shows no pill when every check passes, and
-`N checks` when a check warns. If the checks for the project did not run (an HTTP
-error, a failed or timed-out request, or an empty result), the row shows
-`Checks not run`. That state is not a pass. Select the pill to run the checks again.
-
 Checks:
 
 | Check | What it verifies | Failure vs warning |
@@ -172,6 +166,13 @@ Checks:
 but is dead" failure mode — the bridge process starts, but the inherited
 `claude` login is logged out, so it can never authenticate. If a freshly spawned
 bridge never becomes ready, check this first.
+
+Each project row can also show a readiness pill. It covers the checks for that
+project, not the table above: trust, git, and MCP server approvals. The row shows no
+pill when every check passes, and `N checks` when a check warns. If the checks for the
+project did not run (an HTTP error, a failed or timed-out request, or an answer with
+no result for the project), the row shows `Checks not run`. That state is not a pass.
+Select the pill to run the checks again. A message then reports the result.
 
 ## Metrics
 

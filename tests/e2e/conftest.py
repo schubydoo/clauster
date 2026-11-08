@@ -180,27 +180,26 @@ def _start_server(
     # is ready, so a module with enough requests filled the 64 KiB pipe buffer and the
     # server blocked on its next log write, hanging every later request.
     log = tmp / "server.log"
-    log_file = log.open("w", encoding="utf-8")
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "clauster", "run", "-c", str(cfg)],
-        stdout=log_file,
-        stderr=subprocess.STDOUT,
-        text=True,
-        start_new_session=True,
-        env=env,
-    )
-    base_url = f"http://127.0.0.1:{port}"
-    try:
-        _wait_ready(port, proc, log=log)
-        yield Server(base_url, state_dir, proc)
-    finally:
-        proc.terminate()
+    with log.open("w", encoding="utf-8") as log_file:
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "clauster", "run", "-c", str(cfg)],
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            text=True,
+            start_new_session=True,
+            env=env,
+        )
+        base_url = f"http://127.0.0.1:{port}"
         try:
-            proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=5)
-        log_file.close()
+            _wait_ready(port, proc, log=log)
+            yield Server(base_url, state_dir, proc)
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5)
 
 
 def _build_projects_tree(root: Path) -> Path:
