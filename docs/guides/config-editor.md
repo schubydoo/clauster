@@ -608,9 +608,9 @@ In the frontmatter of `SKILL.md`, the Skills editor also masks each value that
 the MCP and Hooks tabs mask, whatever its key name, and every `args` value. In
 `mcpServers`, every `headers`, `env` and `args` value and a `headersHelper`
 command show as `********`. For example, `headers: {X-Custom: abc}` shows as
-`headers: {X-Custom: ********}`. The MCP tab shows `args` unless an item holds
-a `${...}` reference or a URL with a user name or password, but the Skills
-editor masks every `args` value. In `hooks`, every `headers` value shows as
+`headers: {X-Custom: ********}`. The MCP tab shows an `args` item unless it
+holds a `${...}` reference or is a URL with a user name or password, but the
+Skills editor masks every `args` value. In `hooks`, every `headers` value shows as
 `********`.
 The key names stay visible, and so does an empty value. If such a value covers
 more than one line, holds an escape, or has an anchor or a tag in front of it,

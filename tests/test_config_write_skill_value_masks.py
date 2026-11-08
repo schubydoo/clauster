@@ -336,8 +336,11 @@ def test_a_masked_header_line_moved_to_another_server_is_refused(tmp_path: Path)
         ("api_key:\n---\n", "api_key:\n---\n"),
         ("token:\n-foo: v\n", "token:\n-foo: v\n"),
         ("token:\n-\tqv-tab\n-\n", f"token:\n{MASK}\n{MASK}\n"),
-        # A mask that runs to the end of a line keeps a lone `\r` ending.
-        ("env: {TOKEN: [x, qv-cr]}\rnext\r", f"env: {{TOKEN: {MASK}\rnext\r"),
+        # A mask that runs to the end of a line keeps every line ending `splitlines` knows.
+        *(
+            (f"env: {{TOKEN: [x, qv-sep]}}{sep}next{sep}", f"env: {{TOKEN: {MASK}{sep}next{sep}")
+            for sep in ("\r", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", " ", " ")
+        ),
         ("a, token: 'qv-cr2\rnext\r", f"a, token: {MASK}\rnext\r"),
         ("api_key: |\n  qv-x\n- item\n", f"api_key: {MASK}\n  {MASK}\n- item\n"),
         # Flow sequences, a pair continued from the line above, nested values.
