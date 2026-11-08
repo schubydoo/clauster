@@ -881,9 +881,15 @@ def test_dashboard_hosted_view_reconnects_after_a_recovered_session(write_config
     assert re.search(
         r"this\.hosted\s*=\s*await\s+hRes\.json\(\);\s*this\._reopenRecoveredHosted\(\);", page
     )
-    # Only after a poll saw the row not live since the view ended: a stale poll computed
-    # before the `lost` frame still reads "running".
+    # Only an open view that ended, never a hidden or healthy one.
+    assert re.search(r"!v\.open\s*\|\|\s*!v\.ended\)\s*continue;", page)
+    # "running" only: a hosted row reads "starting" while a restore pass reattaches it,
+    # with no session to connect to yet.
+    assert re.search(r'const\s+live\s*=\s*!!h\s*&&\s*h\.status\s*===\s*"running";', page)
+    # Only after the row was seen not live once the view ended (a poll, or onclose): a
+    # stale poll computed before the `lost` frame still reads "running".
     assert re.search(r"if\s*\(!live\)\s*\{\s*v\.deadSeen\s*=\s*true;\s*continue;\s*\}", page)
+    assert re.search(r"self\._markHostedEnded\(id\);\s*w\.deadSeen\s*=\s*true;", page)
     assert re.search(r"if\s*\(v\.deadSeen\)\s*this\.openHosted\(id\);", page)
 
 

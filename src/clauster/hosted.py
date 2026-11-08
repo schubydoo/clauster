@@ -757,8 +757,10 @@ class HostedSession:
         """
         queue: asyncio.Queue[Mapping[str, Any]] = asyncio.Queue(maxsize=self._queue_maxsize)
         sub = _Subscriber(queue, overflow_type="gap")
-        # The numbers up to _seq_floor were never in this ring (continue_from): not a gap.
-        start = max(after_seq, self._seq_floor)
+        # The numbers up to _seq_floor were never in this ring (continue_from): not a gap
+        # for a new viewer (after_seq 0). A viewer that saw only part of the retired
+        # session's numbering did miss the rest of it, so it gets the gap marker.
+        start = after_seq if after_seq > 0 else self._seq_floor
         if self._ring and self._ring[0]["event_seq"] > start + 1:
             gap: GapRangeEvent = {
                 "type": "gap",

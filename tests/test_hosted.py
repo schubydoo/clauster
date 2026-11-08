@@ -5666,4 +5666,7 @@ async def test_an_open_view_of_a_lost_session_is_told_to_reconnect(fake_claustru
             assert all(e["type"] != "gap" for e in replayed)
             requests = [e["request_id"] for e in replayed if e["type"] == "control_request"]
             assert requests == ["perm-1"]
+            # A viewer that saw only part of the retired numbering did miss the rest.
+            partial = new.subscribe(after_seq=1).get_nowait()
+            assert (partial["type"], partial["from_seq"]) == ("gap", 1)
             await mgr.stop(pid)

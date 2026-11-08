@@ -6784,6 +6784,7 @@
           const h = self.hosted.find((x) => x.claustrum_process_id === id);
           if (!h || !["running", "starting"].includes(h.status)) {
             self._markHostedEnded(id);
+            w.deadSeen = true;  // seen not live: a later running row reopens it (_reopenRecoveredHosted)
             return;
           }
           // Cap consecutive failed reconnects: if the snapshot still reads "running" but the socket
@@ -6805,15 +6806,17 @@
       // The poll's fallback for the `reattached` frame (TASK-526): that frame reaches only
       // a socket that is still open, and after "the reconnect failed" the retry can come
       // long after a phone dropped the socket. An open view that ended reconnects once the
-      // snapshot reads its row live again. Only after a poll saw the row NOT live since
-      // the view ended: a poll computed before the `lost` frame still says "running", and
-      // reopening on it would clear the ended banner on a session that is gone.
+      // snapshot reads its row running again. Only after the row was seen NOT live once
+      // the view ended (a poll, or onclose): a poll computed before the `lost` frame still
+      // says "running", and reopening on it would clear the ended banner on a session that
+      // is gone. "starting" does not count as live here: a hosted row reads it while a
+      // restore pass still reattaches it, with no session to connect to yet.
       _reopenRecoveredHosted() {
         for (const id of Object.keys(this.hostedView)) {
           const v = this.hostedView[id];
           if (!v || !v.open || !v.ended) continue;
           const h = this.hosted.find((x) => x.claustrum_process_id === id);
-          const live = !!h && ["running", "starting"].includes(h.status);
+          const live = !!h && h.status === "running";
           if (!live) { v.deadSeen = true; continue; }
           if (v.deadSeen) this.openHosted(id);
         }
