@@ -26,6 +26,7 @@ import socket
 import subprocess
 import sys
 import time
+import urllib.request
 from collections.abc import Iterator
 from pathlib import Path
 from typing import NamedTuple
@@ -35,6 +36,7 @@ import pytest
 from _driver import AgentBrowser
 
 from clauster.auth import hash_password, make_hasher
+from clauster.procutil import is_live_process
 
 
 class Server(NamedTuple):
@@ -291,10 +293,31 @@ def bridge_server(
     bridge test gets a clean trust store, instance registry, state_dir, AND projects
     tree — a spawned/trusted bridge or an on-disk write (saved CLAUDE.md, created
     project) in one test never leaks into the next. Yields the full :class:`Server`
-    so tests can read the launch argv from ``state_dir``.
+    so tests can read the launch argv from ``state_dir``. Teardown stops every bridge the
+    test left running (:func:`_start_reaped_server`).
     """
     tmp = tmp_path_factory.mktemp("e2e-bridge")
-    yield from _start_server(tmp, mutable_projects_tree)
+    yield from _start_reaped_server(tmp, mutable_projects_tree, child_pid_file=None)
+
+
+@pytest.fixture
+def killable_server(
+    tmp_path_factory: pytest.TempPathFactory, mutable_projects_tree: Path
+) -> Iterator[Server]:
+    """A function-scoped loopback clauster that a test may kill through ``Server.proc``.
+
+    A test on this server must not start a bridge. Teardown cannot find the bridges of a
+    killed server without a name match, so this fixture has no bridge teardown, and every
+    fixture that uses :func:`_start_reaped_server` fails a test whose server exits. The
+    fake ``claude`` writes an argv sidecar for each launch, so teardown fails the test if
+    it finds one.
+    """
+    tmp = tmp_path_factory.mktemp("e2e-killable")
+    for server in _start_server(tmp, mutable_projects_tree):
+        yield server
+        launched = sorted(server.state_dir.rglob("*.argv.json"))
+        if launched:
+            pytest.fail(f"a test on killable_server started a bridge: {launched}")
 
 
 @pytest.fixture
@@ -585,7 +608,9 @@ def log_extra_bridge_server(
     ANSI and masks the session id / token (clauster's :func:`clauster.redact.sanitize_line`).
     """
     tmp = tmp_path_factory.mktemp("e2e-bridge-logx")
-    yield from _start_server(tmp, mutable_projects_tree, extra_env={"FAKE_CLAUDE_LOG_EXTRA": "1"})
+    yield from _start_reaped_server(
+        tmp, mutable_projects_tree, extra_env={"FAKE_CLAUDE_LOG_EXTRA": "1"}, child_pid_file=None
+    )
 
 
 @pytest.fixture
@@ -603,10 +628,11 @@ def multi_session_server(
     ignores this mode, so the project's standard bridge spawns normally.
     """
     tmp = tmp_path_factory.mktemp("e2e-multi-session")
-    yield from _start_server(
+    yield from _start_reaped_server(
         tmp,
         mutable_projects_tree,
         extra_env={"FAKE_CLAUDE_MODE": "pty_slow", "FAKE_CLAUDE_SLOW": "1.2"},
+        child_pid_file=None,
     )
 
 
@@ -622,7 +648,9 @@ def bridge_server_pty(
     ``--continue``). pty mode is POSIX-only; the E2E host is Linux.
     """
     tmp = tmp_path_factory.mktemp("e2e-bridge-pty")
-    yield from _start_server(tmp, mutable_projects_tree, extra="  launch_mode: pty\n")
+    yield from _start_reaped_server(
+        tmp, mutable_projects_tree, extra="  launch_mode: pty\n", child_pid_file=None
+    )
 
 
 @pytest.fixture
@@ -635,8 +663,11 @@ def bridge_server_pty_screen(
     dev extra installs ``pyte``, so the view is live rather than the greyed install hint).
     """
     tmp = tmp_path_factory.mktemp("e2e-bridge-pty-screen")
-    yield from _start_server(
-        tmp, mutable_projects_tree, extra="  launch_mode: pty\n  pty_screen_enabled: true\n"
+    yield from _start_reaped_server(
+        tmp,
+        mutable_projects_tree,
+        extra="  launch_mode: pty\n  pty_screen_enabled: true\n",
+        child_pid_file=None,
     )
 
 
@@ -720,14 +751,16 @@ def tracked_session_server(
     every call, so a test can start a bridge, learn its ``bridge_pid``, and then list a
     session owned by that pid: reconcile attributes it TRACKED to the bridge, and the
     dashboard shows it in the bridge's live-session list (backlog TASK-269). The 1s
-    poll makes it land within a poll. Function-scoped, like ``bridge_server``.
+    poll makes it land within a poll. Function-scoped, like ``bridge_server``, with the
+    same bridge teardown.
     """
     tmp = tmp_path_factory.mktemp("e2e-tracked")
-    yield from _start_server(
+    yield from _start_reaped_server(
         tmp,
         mutable_projects_tree,
         extra="  agents_json_poll_interval_seconds: 1\n",
         extra_env={"FAKE_CLAUDE_AGENTS_FILE": str(tmp / "agents.json")},
+        child_pid_file=None,
     )
 
 
@@ -743,13 +776,11 @@ def session_child_server(
     ``agents.json`` to get a session that the metrics sampler can place inside the
     bridge's process tree (backlog TASK-342). Metrics refresh every second.
 
-    Teardown stops what the test started, pass or fail. ``SessionRunner.shutdown()``
-    leaves bridges running by design, and the child keeps its bridge parent, so stopping
-    the server alone would leave both sleeping for up to ten minutes. See
-    :func:`_reap_bridge_trees`, which fails the test loudly if any of them survives.
+    Teardown stops what the test started, pass or fail (:func:`_start_reaped_server`).
+    The child keeps its bridge parent, so it is in the captured tree with the bridge.
     """
     tmp = tmp_path_factory.mktemp("e2e-session-child")
-    server_gen = _start_server(
+    yield from _start_reaped_server(
         tmp,
         mutable_projects_tree,
         extra="  agents_json_poll_interval_seconds: 1\nmetrics:\n  poll_seconds: 1\n",
@@ -757,7 +788,29 @@ def session_child_server(
             "FAKE_CLAUDE_AGENTS_FILE": str(tmp / "agents.json"),
             "FAKE_CLAUDE_SESSION_CHILD_FILE": str(tmp / "session-child.pid"),
         },
+        child_pid_file=tmp / "session-child.pid",
     )
+
+
+def _start_reaped_server(
+    tmp: Path,
+    projects_root: Path,
+    extra: str = "",
+    extra_env: dict[str, str] | None = None,
+    *,
+    child_pid_file: Path | None,
+) -> Iterator[Server]:
+    """Run :func:`_start_server`, then stop every bridge the test left running.
+
+    ``SessionRunner.shutdown()`` leaves bridges running by design, so stopping the server
+    alone would leave each fake bridge, and any session child, sleeping for up to ten
+    minutes. Teardown runs pass or fail. It captures the server's process tree while the
+    server is up, stops the server, then kills what it captured; see
+    :func:`_reap_bridge_trees`, which fails the test loudly if any of them survives.
+    ``child_pid_file`` is where the fake writes its session child's pid, which lets
+    :func:`_capture_gap` prove the capture complete; None when the fixture has no child.
+    """
+    server_gen = _start_server(tmp, projects_root, extra, extra_env)
     server = next(server_gen)
     try:
         yield server
@@ -770,7 +823,7 @@ def session_child_server(
         gap: str | None = None
         try:
             captured = _server_descendants(server)
-            gap = _capture_gap(server, captured, tmp / "session-child.pid")
+            gap = _capture_gap(server, captured, child_pid_file)
         finally:
             try:
                 server_gen.close()
@@ -797,23 +850,51 @@ def _server_descendants(server: Server) -> list[psutil.Process]:
 
 
 def _capture_gap(
-    server: Server, captured: list[psutil.Process], child_pid_file: Path
+    server: Server, captured: list[psutil.Process], child_pid_file: Path | None
 ) -> str | None:
     """Return why the capture may have missed a process, or None when it is complete.
 
-    The session child is a grandchild of the server, so it must be in the captured tree.
-    A pid file that names a live process outside it fails the test, which proves the
-    capture is complete rather than empty by accident.
+    Every live bridge and keeper that the server's own records name, and the session
+    child, which is a grandchild of the server, must be in the captured tree. A live
+    process outside it fails the test, which proves the capture is complete rather than
+    empty by accident. A recorded pid counts as live only when its start time matches the
+    record, so a recycled pid is never taken for a bridge.
     """
     assert server.proc is not None
     if server.proc.poll() is not None:
         return "the server exited during the test; its bridges could not be stopped"
-    if not child_pid_file.exists():
+    captured_pids = {p.pid for p in captured}
+    missed = [pid for pid in _recorded_live_pids(server) if pid not in captured_pids]
+    if missed:
+        return f"recorded bridge processes {missed} are running outside the server's tree"
+    if child_pid_file is None or not child_pid_file.exists():
         return None
     child = int(child_pid_file.read_text(encoding="utf-8"))
-    if child not in {p.pid for p in captured} and psutil.pid_exists(child):
+    if child not in captured_pids and psutil.pid_exists(child):
         return f"session child {child} is running outside the server's tree"
     return None
+
+
+def _recorded_live_pids(server: Server) -> list[int]:
+    """Return the bridge and keeper pids in ``/api/instances`` that are still the same process.
+
+    Each row carries the pid with its start time, the pair that ``is_live_process`` checks,
+    so a stopped row whose pid a new process now holds is not returned.
+    """
+    with urllib.request.urlopen(server.url + "/api/instances", timeout=10) as res:  # noqa: S310
+        rows = json.load(res)
+    live: list[int] = []
+    for row in rows:
+        for half in ("bridge", "keeper"):
+            pid = row.get(f"{half}_pid")
+            if pid and is_live_process(
+                pid,
+                row.get(f"{half}_proc_start"),
+                start_ticks=row.get(f"{half}_start_ticks"),
+                boot_id=row.get(f"{half}_boot_id"),
+            ):
+                live.append(pid)
+    return live
 
 
 def _reap_bridge_trees(procs: list[psutil.Process], timeout: float = 15.0) -> None:
@@ -830,7 +911,7 @@ def _reap_bridge_trees(procs: list[psutil.Process], timeout: float = 15.0) -> No
             p.kill()
     _gone, alive = psutil.wait_procs(procs, timeout=timeout)
     if alive:
-        pytest.fail(f"session_child_server teardown left processes running: {alive}")
+        pytest.fail(f"bridge teardown left processes running: {alive}")
 
 
 @pytest.fixture
