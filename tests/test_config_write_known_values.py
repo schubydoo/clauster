@@ -599,6 +599,23 @@ def test_a_known_key_edit_still_keeps_a_masked_header(tmp_path: Path, edit: str)
     assert saved["headers"] == {"Authorization": "Bearer REAL"}
 
 
+def test_a_tool_inserted_before_an_unknown_key_tool_refuses_a_kept_mask(tmp_path: Path) -> None:
+    # The tools part is keyed by index, as the real write merges: inserting a tool moves
+    # the unknown `endpoint` to another index, so the kept mask is refused.
+    stored = {
+        "type": "http",
+        "url": "https://x.example/mcp",
+        "headers": {"Authorization": "Bearer REAL"},
+        "tools": [{"name": "a", "endpoint": "https://e1.example/"}],
+    }
+    (tmp_path / ".mcp.json").write_text(json.dumps({"mcpServers": {"srv": stored}}))
+    view, file_hash = mcp.read_project_servers(tmp_path)
+    edited = json.loads(json.dumps(view))
+    edited["srv"]["tools"].insert(0, {"name": "n"})
+    with pytest.raises(cw.InvalidCandidateError, match="not on the known list changed"):
+        mcp.write_project_servers(tmp_path, edited, file_hash)
+
+
 def test_an_edit_to_an_unknown_hook_field_never_takes_another_hooks_secret() -> None:
     # Two hooks to one URL with two secrets: deleting B and editing A's unknown field to
     # B's value must not hand A B's secret. This goes through the several-secrets pairing,

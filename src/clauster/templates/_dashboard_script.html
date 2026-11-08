@@ -2920,8 +2920,9 @@
         // row with no event blocks Save (configMgmtHooksRowsWarning).
         h.rows.push({ id: ++h.rowSeq, event: "", matcher: "", type: "command",
           command: "", url: "", server: "", tool: "", prompt: "", timeout: "" });
+        // Focus the new row's event box: it is the first field and starts empty.
         this.$nextTick(() => {
-          const inputs = document.querySelectorAll('[data-test="cm-hook-command"]');
+          const inputs = document.querySelectorAll('[data-test="cm-hook-event"]');
           const last = inputs[inputs.length - 1];
           if (last && last.focus) last.focus();
         });
