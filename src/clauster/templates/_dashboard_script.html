@@ -380,6 +380,9 @@
         // post-action reload.
         plugins: {
           list: [], marketplaces: [],
+          // TASK-527: the marketplace names each scope's settings file declares, read with
+          // the marketplaces. null = not read (or the read failed): no Remove, no link.
+          declared: { user: null, project: null, local: null },
           confirm: "",                       // scope-token confirm, shared by all actions
           // TASK-522: the confirm stays typed after an Enable, Disable or Update, which
           // sets `confirmSpent`. Install, Uninstall and marketplace add/remove need it
@@ -4427,7 +4430,11 @@
         }
         // A reload for another scope or project drops the offered lists: they were read
         // from that scope's cwd, and the CLI's "installed" depends on it.
-        if (!afterOp) pl.offered = [];
+        // The declared names too: they belong to that scope and project.
+        if (!afterOp) {
+          pl.offered = [];
+          pl.declared = { user: null, project: null, local: null };
+        }
         pl.installId = ""; pl.installConfirm = ""; pl.addSource = "";
         try {
           const res = await fetch(ROOT + "/api/config-write/plugins?" + this._configMgmtQuery());
@@ -4443,6 +4450,11 @@
           if (mres.ok) {
             const md = await mres.json();
             if (c.gen !== myGen) return;
+            // Read before the rows show, and set with them, so no row shows a Remove (or a
+            // note) from another read.
+            const declared = await this._loadDeclared(myGen);
+            if (c.gen !== myGen) return;
+            pl.declared = declared;
             pl.marketplaces = md.marketplaces || [];
             // Drop the removed marketplaces' lists. After an install, an uninstall or a
             // marketplace refresh, re-read the open ones, awaited so `busy` (held by the
@@ -4719,6 +4731,7 @@
       configMgmtMarketAction(name, op) {
         const pl = this.configMgmt.plugins;
         if (!this.configMgmtPluginOp(op)) return;
+        if (op === "remove" && !this.configMgmtMarketAtScope({ name: name })) return;  // TASK-527
         return this._pluginActionPost(
           "/api/config-write/marketplaces/action",
           Object.assign(this._configMgmtTarget(), { op: op, name: name, confirm: pl.confirm }),
@@ -4731,6 +4744,73 @@
         const where = [m.repo, m.url, m.path].find((v) => typeof v === "string" && v) || "";
         const kind = typeof m.source === "string" ? m.source : "";
         return where ? (kind ? kind + " · " + where : where) : kind;
+      },
+      // --- which scope declares each marketplace (TASK-527) ---
+      // `marketplace list` is one pool for the host, but `marketplace remove --scope` refuses
+      // a name that the scope's settings file does not declare ("is not declared in project
+      // settings"). So Remove shows only where this scope declares the marketplace, and
+      // the other rows link to a scope of this project that does. User scope has no
+      // project, so it reads only its own file; the User file is read only when this
+      // editor can open User scope.
+      _configMgmtDeclaredScopes() {
+        const c = this.configMgmt;
+        if (c.scope === "user") return ["user"];
+        const scopes = ["project", "local"];
+        if ({{ config_write_allow_user_scope | tojson }}) scopes.push("user");
+        return scopes;
+      },
+      // Resolves to the next `declared` map. A failed read leaves its scope null, which
+      // offers no Remove there; the row's note says so for the current scope.
+      async _loadDeclared(myGen) {
+        const c = this.configMgmt;
+        const next = { user: null, project: null, local: null };
+        await Promise.all(this._configMgmtDeclaredScopes().map(async (s) => {
+          const q = new URLSearchParams({ scope: s });
+          if (s !== "user") q.set("project", c.project);
+          try {
+            const res = await fetch(ROOT + "/api/config-write/marketplaces/declared?" + q.toString());
+            if (c.gen !== myGen || this._authExpired(res) || !res.ok) return;
+            const d = await res.json();
+            const map = d && d.marketplaces;
+            if (map && typeof map === "object" && !Array.isArray(map)) next[s] = Object.keys(map);
+          } catch (e) { /* unread: the scope stays null, so it offers no Remove */ }
+        }));
+        return next;
+      },
+      configMgmtMarketAtScope(m) {
+        const names = this.configMgmt.plugins.declared[this.configMgmt.scope];
+        return Array.isArray(names) && names.includes(m.name);
+      },
+      // The other scopes of this project that declare `m`, in the order the link prefers.
+      _configMgmtMarketScopesElsewhere(m) {
+        const c = this.configMgmt, d = c.plugins.declared;
+        return ["project", "local", "user"].filter(
+          (s) => s !== c.scope && Array.isArray(d[s]) && d[s].includes(m.name),
+        );
+      },
+      configMgmtMarketElsewhereNote(m) {
+        const c = this.configMgmt, here = this._configMgmtScopeWord(c.scope);
+        if (!Array.isArray(c.plugins.declared[c.scope])) {
+          return "Clauster could not read which marketplaces " + here + " scope declares, so Remove is not offered.";
+        }
+        const there = this._configMgmtMarketScopesElsewhere(m).map((s) => this._configMgmtScopeWord(s));
+        if (there.length) return "Declared at " + there.join(" and ") + " scope, not at " + here + " scope. Remove it there.";
+        return "Not declared at " + here + " scope, so Remove is not offered here. Remove it where it is declared.";
+      },
+      configMgmtMarketScopeLink(m) {
+        const [s] = this._configMgmtMarketScopesElsewhere(m);
+        return s ? "Switch to " + this._configMgmtScopeWord(s) + " scope" : "";
+      },
+      // As configMgmtOpenPluginScope: the reload hides the clicked link, so focus moves to
+      // the scope confirm.
+      async configMgmtOpenMarketScope(m) {
+        const c = this.configMgmt;
+        const [s] = this._configMgmtMarketScopesElsewhere(m);
+        if (!s) return;
+        await this.configMgmtSetScope(s);
+        if (c.open && !c.loading && c.surface === "plugins") {
+          this.revealFeedback("#cm-plugin-confirm", true);
+        }
       },
       configMgmtCanAddMarket() {
         const pl = this.configMgmt.plugins;

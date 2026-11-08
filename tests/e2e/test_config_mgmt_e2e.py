@@ -2770,6 +2770,59 @@ def test_config_mgmt_plugins_symlink_alias_is_the_same_project(
     browser.expect_value('[data-test="cm-project"]', "alpha-link")  # the chosen project stays
 
 
+def test_config_mgmt_marketplaces_remove_only_where_the_scope_declares(
+    browser: AgentBrowser, config_mgmt_plugins_server: Server
+) -> None:
+    """Remove shows only on a marketplace the current scope declares (TASK-527).
+
+    ``marketplace list`` is one pool for the host, and ``marketplace remove --scope`` refuses
+    a name that scope does not declare. The fixture declares ``market`` at alpha's Project
+    scope and ``empty`` at User scope. Every other row is read-only and links to the scope
+    of this project that declares it. Update stays on every row: it takes no scope.
+    """
+    server = config_mgmt_plugins_server
+    _open_modal(browser, server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-plugins"]')
+    browser.expect_visible('[data-test="cm-market-remove-market"]')
+    assert browser.get_count('[data-test="cm-market-remove-empty"]') == 0
+    assert not browser.is_visible('[data-test="cm-market-readonly-market"]')
+    browser.expect_text(
+        '[data-test="cm-market-readonly-empty"]',
+        "Declared at User scope, not at Project scope. Remove it there.",
+    )
+    browser.expect_visible('[data-test="cm-market-update-empty"]')
+
+    # The link opens User scope, where only `empty` can be removed.
+    browser.expect_text('[data-test="cm-market-switch-scope-empty"]', "Switch to User scope")
+    browser.click('[data-test="cm-market-switch-scope-empty"]')
+    browser.expect_attr('[data-test="cm-scope-user"]', "aria-pressed", "true")
+    browser.expect_visible('[data-test="cm-market-remove-empty"]')
+    _expect_focused(browser, "cm-plugin-confirm")
+    assert browser.get_count('[data-test="cm-market-remove-market"]') == 0
+    browser.expect_text('[data-test="cm-market-readonly-market"]', "Not declared at User scope")
+    # User scope reads no project's files, so it has no link for a project's marketplace.
+    assert not browser.is_visible('[data-test="cm-market-switch-scope-market"]')
+    browser.fill('[data-test="cm-plugin-confirm"]', "USER SCOPE")
+    browser.click('[data-test="cm-market-remove-empty"]')
+    browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
+    removes = [a for a in _plugin_calls(server, "marketplace") if a[1:2] == ["remove"]]
+    assert removes == [["marketplace", "remove", "empty", "--scope", "user"]]
+
+    # Local scope of alpha declares neither: both rows link to the scope that does.
+    browser.click('[data-test="cm-scope-local"]')
+    browser.expect_attr('[data-test="cm-scope-local"]', "aria-pressed", "true")
+    browser.expect_text(
+        '[data-test="cm-market-readonly-market"]',
+        "Declared at Project scope, not at Local scope.",
+    )
+    assert browser.get_count('[data-test="cm-market-remove-market"]') == 0
+    assert browser.get_count('[data-test="cm-market-remove-empty"]') == 0
+    browser.click('[data-test="cm-market-switch-scope-market"]')
+    browser.expect_attr('[data-test="cm-scope-project"]', "aria-pressed", "true")
+    browser.expect_visible('[data-test="cm-market-remove-market"]')
+
+
 def test_config_mgmt_mcp_approvals_round_trip(
     browser: AgentBrowser, config_mgmt_server: Server
 ) -> None:

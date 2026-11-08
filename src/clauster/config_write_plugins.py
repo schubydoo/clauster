@@ -1062,23 +1062,35 @@ def _read_marketplace_plugin_names(location: Any) -> list[str] | None:
     ]
 
 
+#: The ``marketplace list --json`` source types that have no checkout of their own: the CLI
+#: reads the local directory or file in place (claude 2.1.319: ``installLocation`` is that
+#: source, and ``marketplace update`` only validates it). A read before an update of one
+#: already sees what the update reads, so it is no before-state (TASK-532).
+LIVE_MARKETPLACE_SOURCES = frozenset({"directory", "file"})
+
+
 def marketplace_plugin_names(
     binary: str, cwd: Path, name: str | None, *, run: RunFn = subprocess.run
-) -> dict[str, list[str] | None]:
+) -> tuple[dict[str, list[str] | None], frozenset[str]]:
     """Return ``{marketplace: plugin names or None}`` for ``name`` (or every marketplace).
 
     Reads ``marketplace list --json`` for each ``installLocation``, then that checkout's
-    ``marketplace.json`` (:func:`_read_marketplace_plugin_names`). A failed list raises
-    :class:`PluginCliError`, as :func:`cli_list_marketplaces` does.
+    ``marketplace.json`` (:func:`_read_marketplace_plugin_names`). The second value names
+    the marketplaces whose source the CLI reads in place
+    (:data:`LIVE_MARKETPLACE_SOURCES`). A failed list raises :class:`PluginCliError`, as
+    :func:`cli_list_marketplaces` does.
     """
     out: dict[str, list[str] | None] = {}
+    live: set[str] = set()
     for entry in _list_marketplaces_raw(binary, cwd, run=run):
         if not isinstance(entry, dict) or not isinstance(entry.get("name"), str):
             continue
         if name is not None and entry["name"] != name:
             continue
         out[entry["name"]] = _read_marketplace_plugin_names(entry.get("installLocation"))
-    return out
+        if entry.get("source") in LIVE_MARKETPLACE_SOURCES:
+            live.add(entry["name"])
+    return out, frozenset(live)
 
 
 def _plugins_text(count: int) -> str:
@@ -1104,13 +1116,18 @@ def describe_marketplace_update(
     name: str | None,
     before: dict[str, list[str] | None],
     after: dict[str, list[str] | None] | None,
+    *,
+    live: frozenset[str],
 ) -> str:
     """Return what a ``marketplace update`` did, from plugin-name reads before and after it.
 
     One sentence group per marketplace: the plugin list did not change (with its count),
     or it now offers N plugins with the names added and removed. A side that could not be
     read (``None``, or ``after`` as a whole when the read after the refresh failed) says so
-    instead of claiming a result. The message is masked line by line before it leaves.
+    instead of claiming a result. A marketplace in ``live`` (its source is read in place,
+    :data:`LIVE_MARKETPLACE_SOURCES`) has no before-state, so it gets only its current
+    count, never "did not change" (TASK-532). The message is masked line by line before it
+    leaves.
     """
     targets = [name] if name is not None else sorted(set(before) | set(after or {}))
     if not targets:
@@ -1119,7 +1136,13 @@ def describe_marketplace_update(
     for target in targets:
         old = before.get(target)
         new = after.get(target) if after is not None else None
-        if old is None or new is None:
+        if new is not None and target in live:
+            parts.append(
+                f"Refreshed marketplace {target}. It offers {_plugins_text(len(new))}. "
+                "Claude Code reads its local source in place, so Clauster has no earlier "
+                "list to compare."
+            )
+        elif old is None or new is None:
             parts.append(
                 f"Refreshed marketplace {target}. Clauster could not read its plugin list, "
                 "so it cannot tell whether the list changed."

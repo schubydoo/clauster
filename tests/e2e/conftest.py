@@ -521,6 +521,13 @@ def config_mgmt_plugins_alias_server(
     yield from _start_plugins_server(tmp, mutable_projects_tree)
 
 
+def _write_declared(settings: Path, marketplaces: dict) -> None:
+    """Write a settings file at ``settings`` that declares ``marketplaces``."""
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    doc = {"extraKnownMarketplaces": marketplaces}
+    settings.write_bytes((json.dumps(doc, indent=2) + "\n").encode())
+
+
 def _start_plugins_server(tmp: Path, mutable_projects_tree: Path) -> Iterator[Server]:
     """Start the server both plugins fixtures share (see :func:`config_mgmt_plugins_server`)."""
     alpha = (mutable_projects_tree / "alpha").resolve()  # the CLI records the real path
@@ -568,6 +575,16 @@ def _start_plugins_server(tmp: Path, mutable_projects_tree: Path) -> Iterator[Se
         {"name": "market", "source": "github", "repo": "owner/repo"},
         {"name": "empty", "source": "directory", "path": "/srv/empty"},
     ]
+    # TASK-527: `market` is declared in alpha's Project settings and `empty` in the User
+    # settings, so each scope can remove only its own.
+    _write_declared(
+        mutable_projects_tree / "alpha" / ".claude" / "settings.json",
+        {"market": {"source": {"source": "github", "repo": "owner/repo"}}},
+    )
+    _write_declared(
+        tmp / "home" / ".claude" / "settings.json",
+        {"empty": {"source": {"source": "directory", "path": "/srv/empty"}}},
+    )
     yield from _start_server(
         tmp,
         mutable_projects_tree,

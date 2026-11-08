@@ -2248,24 +2248,40 @@ def test_marketplace_plugin_names_reads_each_install_location(tmp_path: Path) ->
     # The fake binary, as the sibling tests pass: `_run` resolves it before `run` is called,
     # so a bare "claude" depends on the host PATH (it failed on the CI musl leg).
     binary = str(FAKE_CLAUDE)
-    assert plugins.marketplace_plugin_names(binary, tmp_path, None, run=run) == {
-        "one": ["a"],
-        "two": None,
-    }
-    assert plugins.marketplace_plugin_names(binary, tmp_path, "one", run=run) == {"one": ["a"]}
+    # TASK-532: the directory source is read in place, so it is named as live.
+    assert plugins.marketplace_plugin_names(binary, tmp_path, None, run=run) == (
+        {"one": ["a"], "two": None},
+        frozenset({"one"}),
+    )
+    assert plugins.marketplace_plugin_names(binary, tmp_path, "one", run=run) == (
+        {"one": ["a"]},
+        frozenset({"one"}),
+    )
+    assert plugins.marketplace_plugin_names(binary, tmp_path, "two", run=run) == (
+        {"two": None},
+        frozenset(),
+    )
     assert calls[0]["argv"][1:] == ["plugin", "marketplace", "list", "--json"]
 
 
 def test_describe_marketplace_update_unchanged_and_changed() -> None:
-    same = plugins.describe_marketplace_update("m", {"m": ["a", "b"]}, {"m": ["b", "a"]})
+    same = plugins.describe_marketplace_update(
+        "m", {"m": ["a", "b"]}, {"m": ["b", "a"]}, live=frozenset()
+    )
     assert same == "Refreshed marketplace m. Its plugin list did not change (2 plugins)."
-    one = plugins.describe_marketplace_update("m", {"m": ["a"]}, {"m": ["a"]})
+    one = plugins.describe_marketplace_update("m", {"m": ["a"]}, {"m": ["a"]}, live=frozenset())
     assert one == "Refreshed marketplace m. Its plugin list did not change (1 plugin)."
-    grew = plugins.describe_marketplace_update("m", {"m": ["a", "b"]}, {"m": ["a", "b", "c"]})
+    grew = plugins.describe_marketplace_update(
+        "m", {"m": ["a", "b"]}, {"m": ["a", "b", "c"]}, live=frozenset()
+    )
     assert grew == ("Refreshed marketplace m. It now offers 3 plugins (before: 2). Added: c.")
-    shrank = plugins.describe_marketplace_update("m", {"m": ["a", "b"]}, {"m": ["a"]})
+    shrank = plugins.describe_marketplace_update(
+        "m", {"m": ["a", "b"]}, {"m": ["a"]}, live=frozenset()
+    )
     assert shrank == "Refreshed marketplace m. It now offers 1 plugin (before: 2). Removed: b."
-    swapped = plugins.describe_marketplace_update("m", {"m": ["a", "b"]}, {"m": ["a", "z"]})
+    swapped = plugins.describe_marketplace_update(
+        "m", {"m": ["a", "b"]}, {"m": ["a", "z"]}, live=frozenset()
+    )
     assert swapped == (
         "Refreshed marketplace m. It now offers 2 plugins (before: 2). Added: z. Removed: b."
     )
@@ -2273,19 +2289,25 @@ def test_describe_marketplace_update_unchanged_and_changed() -> None:
 
 def test_describe_marketplace_update_caps_the_names_shown() -> None:
     new = [f"p{i}" for i in range(8)] + ["x" * 100]
-    msg = plugins.describe_marketplace_update("m", {"m": []}, {"m": new})
+    msg = plugins.describe_marketplace_update("m", {"m": []}, {"m": new}, live=frozenset())
     assert "Added: p0, p1, p2, p3, p4 and 4 more." in msg
-    long = plugins.describe_marketplace_update("m", {"m": []}, {"m": ["y" * 100]})
+    long = plugins.describe_marketplace_update(
+        "m", {"m": []}, {"m": ["y" * 100]}, live=frozenset()
+    )
     assert "y" * 81 not in long and "y" * 80 + "…" in long
 
 
 def test_describe_marketplace_update_masks_names_before_the_cut() -> None:
     # A short credential URL as a plugin name: the final mask of the sentence hides it.
-    short = plugins.describe_marketplace_update("m", {"m": []}, {"m": ["https://u:pw-x@h.io/"]})
+    short = plugins.describe_marketplace_update(
+        "m", {"m": []}, {"m": ["https://u:pw-x@h.io/"]}, live=frozenset()
+    )
     assert "pw-x" not in short
     # A long one: a cut inside `user:pass@` would drop the `@` the mask keys on.
     long_secret = "https://u:" + "S" * 100 + "@h.example/x"
-    long = plugins.describe_marketplace_update("m", {"m": []}, {"m": [long_secret]})
+    long = plugins.describe_marketplace_update(
+        "m", {"m": []}, {"m": [long_secret]}, live=frozenset()
+    )
     assert "SSSS" not in long
 
 
@@ -2358,13 +2380,20 @@ def test_describe_marketplace_update_never_guesses_an_unread_list() -> None:
         "Refreshed marketplace m. Clauster could not read its plugin list, so it cannot tell "
         "whether the list changed."
     )
-    assert plugins.describe_marketplace_update("m", {"m": None}, {"m": ["a"]}) == unread
-    assert plugins.describe_marketplace_update("m", {"m": ["a"]}, None) == unread
-    assert plugins.describe_marketplace_update("m", {}, {}) == unread  # not listed at all
-    every = plugins.describe_marketplace_update(None, {"a": ["x"], "b": ["y"]}, {"a": ["x"]})
+    assert (
+        plugins.describe_marketplace_update("m", {"m": None}, {"m": ["a"]}, live=frozenset())
+        == unread
+    )
+    assert plugins.describe_marketplace_update("m", {"m": ["a"]}, None, live=frozenset()) == unread
+    assert (
+        plugins.describe_marketplace_update("m", {}, {}, live=frozenset()) == unread
+    )  # not listed at all
+    every = plugins.describe_marketplace_update(
+        None, {"a": ["x"], "b": ["y"]}, {"a": ["x"]}, live=frozenset()
+    )
     assert every.startswith("Refreshed marketplace a. Its plugin list did not change (1 plugin).")
     assert "Refreshed marketplace b. Clauster could not read its plugin list" in every
-    assert plugins.describe_marketplace_update(None, {}, {}) == (
+    assert plugins.describe_marketplace_update(None, {}, {}, live=frozenset()) == (
         "Refreshed the marketplaces. No marketplace is listed."
     )
 
@@ -2600,9 +2629,10 @@ def _update_marketplace(c: TestClient) -> dict:
 def test_route_marketplace_update_reports_the_plugin_list(
     write_config, tmp_path, monkeypatch, after, expected
 ) -> None:
+    # A git checkout: the CLI's refresh rewrites it, so the read before is a real before.
     checkout = tmp_path / "mkt-checkout"
     _write_marketplace(checkout, ["a", "b"])
-    listing = [{"name": "m", "source": "directory", "installLocation": str(checkout)}]
+    listing = [{"name": "m", "source": "github", "installLocation": str(checkout)}]
     monkeypatch.setenv("FAKE_CLAUDE_PLUGIN_MARKETPLACE_LIST_STDOUT", json.dumps(listing))
     real_update = plugins.cli_marketplace_update
 
@@ -2614,6 +2644,51 @@ def test_route_marketplace_update_reports_the_plugin_list(
     with _client(write_config, tmp_path, _ON) as c:
         body = _update_marketplace(c)
     assert body["message"] == expected
+
+
+@pytest.mark.parametrize("kind", ["directory", "file"])
+def test_route_marketplace_update_of_a_live_source_that_gained_a_plugin(
+    write_config, tmp_path, monkeypatch, kind
+) -> None:
+    # TASK-532: the CLI reads a directory (or file) source in place, as claude 2.1.319
+    # lists it (`installLocation` is the source). A plugin added before the click is already
+    # in the read before the update, so a compare said "did not change (3 plugins)".
+    source = tmp_path / "local-mkt"
+    _write_marketplace(source, ["a", "b"])
+    listing = [{"name": "m", "source": kind, "path": str(source), "installLocation": str(source)}]
+    monkeypatch.setenv("FAKE_CLAUDE_PLUGIN_MARKETPLACE_LIST_STDOUT", json.dumps(listing))
+    _write_marketplace(source, ["a", "b", "c"])  # the operator adds a plugin, then clicks
+    with _client(write_config, tmp_path, _ON) as c:
+        body = _update_marketplace(c)
+    assert body["message"] == (
+        "Refreshed marketplace m. It offers 3 plugins. Claude Code reads its local source in "
+        "place, so Clauster has no earlier list to compare."
+    )
+    assert "did not change" not in body["message"]
+
+
+def test_describe_marketplace_update_never_compares_a_live_source() -> None:
+    live = frozenset({"d"})
+    same = plugins.describe_marketplace_update("d", {"d": ["a"]}, {"d": ["a"]}, live=live)
+    assert same == (
+        "Refreshed marketplace d. It offers 1 plugin. Claude Code reads its local source in "
+        "place, so Clauster has no earlier list to compare."
+    )
+    # No read before is needed for a live source; an unread list after still says so.
+    assert "It offers 2 plugins." in plugins.describe_marketplace_update(
+        "d", {}, {"d": ["a", "b"]}, live=live
+    )
+    unread = plugins.describe_marketplace_update("d", {"d": ["a"]}, None, live=live)
+    assert "could not read its plugin list" in unread
+    # Update all: a checkout next to a live source keeps its comparison.
+    every = plugins.describe_marketplace_update(
+        None, {"d": ["a"], "g": ["x"]}, {"d": ["a"], "g": ["x"]}, live=live
+    )
+    assert every == (
+        "Refreshed marketplace d. It offers 1 plugin. Claude Code reads its local source in "
+        "place, so Clauster has no earlier list to compare. Refreshed marketplace g. Its "
+        "plugin list did not change (1 plugin)."
+    )
 
 
 def test_route_marketplace_update_failed_read_before_runs_nothing(
@@ -2641,7 +2716,7 @@ def test_route_marketplace_update_failed_read_after_is_reported_not_400(
         calls["n"] += 1
         if calls["n"] == 2:
             raise plugins.PluginCliError("claude plugin marketplace list exited 1: boom")
-        return {"m": ["a"]}
+        return {"m": ["a"]}, frozenset()
 
     monkeypatch.setattr(plugins, "marketplace_plugin_names", flaky)
     with _client(write_config, tmp_path, _ON) as c:
