@@ -2579,3 +2579,25 @@ def test_the_check_wrapper_passes_a_refusal_through_unchanged() -> None:
     with pytest.raises(cw.InvalidCandidateError, match="^the original$"):
         with cw.refuse_check_failures("frontmatter"):
             raise cw.InvalidCandidateError("the original")
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        ('"a\\"b" , x', 6),
+        ("'it''s' , x", 7),
+        ('"open', None),
+        ("'open''", None),
+        ('"ends in \\', None),
+    ],
+)
+def test_quoted_end_reads_yaml_escapes(body: str, expected: int | None) -> None:
+    assert cw._quoted_end(body, 0) == expected
+
+
+def test_quoted_end_is_linear_on_many_escaped_quotes() -> None:
+    # The CodeQL polynomial-regex shape: an unclosed quote then many `\"` pairs.
+    body = '"' + '\\"' * 200_000
+    start = time.perf_counter()
+    assert cw._quoted_end(body, 0) is None
+    assert time.perf_counter() - start < 2.0

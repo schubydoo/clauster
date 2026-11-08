@@ -220,8 +220,29 @@ _FLOW_KEY_RE = re.compile(r"[{\[,][ \t]*(?P<q>[\"']?)(?P<key>[\w.\-]+)(?P=q)[ \t
 _FLOW_START_RE = re.compile(r"[{\[,]")
 #: Where a plain flow value ends: the next ``,``, ``}`` or ``]``.
 _FLOW_END_RE = re.compile(r"[,}\]]")
-#: A quoted flow value that is closed on its line.
-_FLOW_QUOTED_RE = re.compile(r"\"(?:[^\"\\]|\\.)*\"|'(?:[^']|'')*'")
+
+
+def _quoted_end(body: str, begin: int) -> int | None:
+    """Return the index after the quoted flow value at ``body[begin]``, or None if unclosed.
+
+    A double-quoted value skips each backslash escape, and a single-quoted value reads
+    ``''`` as one quote, as YAML does. One pass from ``begin``, with no regex, so the
+    cost stays linear for any input.
+    """
+    quote = body[begin]
+    i = begin + 1
+    while i < len(body):
+        char = body[i]
+        if quote == '"' and char == "\\":
+            i += 2
+            continue
+        if char == quote:
+            if quote == "'" and body[i + 1 : i + 2] == "'":
+                i += 2
+                continue
+            return i + 1
+        i += 1
+    return None
 
 
 def _mask_flow_pairs(body: str) -> str:
@@ -247,8 +268,8 @@ def _mask_flow_pairs(body: str) -> str:
         begin = match.end()
         lead = body[begin : begin + 1]
         if lead in ("'", '"'):
-            quoted = _FLOW_QUOTED_RE.match(body, begin)
-            end = len(body) if quoted is None else quoted.end()
+            quoted = _quoted_end(body, begin)
+            end = len(body) if quoted is None else quoted
         elif lead in ("{", "["):
             end = len(body)  # a nested value: masked to the end of the line
         else:
