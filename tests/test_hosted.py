@@ -5039,6 +5039,8 @@ async def test_a_fault_in_the_pump_failure_path_does_not_escape(
             if op == "stop":
                 row = await mgr.stop(pid)
                 assert row.status is InstanceStatus.ERROR
+                # The kill was accepted, so the reason is the fault alone.
+                assert row.error_detail == "internal error (RuntimeError)"
             else:
                 await session.detach()
         assert session._pump_task is None
@@ -5133,7 +5135,28 @@ async def test_resume_of_an_error_row_with_no_session_kills_by_id_first(
         {"old": {"project": "proj", "label": "hosted:proj", "claude_session_uuid": _RESUME_UUID}}
     )
     fake = await fake_claustrum()
+    answered: list[str] = []
+    answered_at_spawn: list[list[str]] = []
+    real_spawn = fake._m_process_spawn
+
+    async def _spawn_spy(request_id, params, writer):
+        answered_at_spawn.append(list(answered))
+        await real_spawn(request_id, params, writer)
+
+    monkeypatch.setattr(fake, "_m_process_spawn", _spawn_spy)
     async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        real_kill = client.kill
+
+        async def _late_kill(process_id, **kwargs):
+            # The fake handles a connection's requests in order; a real daemon does not.
+            # A reply that reaches Clauster late models that: a Resume that only wrote
+            # the kill would send its spawn before this returns.
+            result = await real_kill(process_id, **kwargs)
+            await asyncio.sleep(0.05)
+            answered.append(process_id)
+            return result
+
+        monkeypatch.setattr(client, "kill", _late_kill)
         mgr = HostedManager(store)
         with monkeypatch.context() as patch:
             patch.setattr(HostedSession, "reattach", _refuse)
@@ -5141,8 +5164,7 @@ async def test_resume_of_an_error_row_with_no_session_kills_by_id_first(
         assert mgr.get_instance("old").status is InstanceStatus.ERROR
         resumed = await mgr.resume(client, "old", cwd="/tmp/proj", claude_binary=_BIN)
         assert fake.killed == [{"id": "old", "signal": "KILL"}]
-        kill_at = fake.calls.index("process.kill")
-        assert fake.calls[kill_at + 1] == "process.spawn"  # answered before the spawn
+        assert answered_at_spawn == [["old"]]  # the answer came before the spawn
         await mgr.stop(resumed.claustrum_process_id)
         await mgr.aclose()
 
@@ -5168,18 +5190,24 @@ async def test_a_restore_pass_cut_partway_reattaches_the_rest_on_the_next_connec
     # "hang": the 2nd and 3rd reattach time out on a connection that still looks open,
     # so the pass ends and marks the store restored. "drop": the daemon ends the
     # connection on the 2nd reattach, so the pass stops early. Either way the rows the
-    # pass did not reattach come back on the next connection.
+    # pass did not reattach come back on the next connection. Only "hang" needs the
+    # retry set: for "drop" the unrestored store already makes the next hook run the
+    # pass again (TASK-518), so that case guards against a regression.
     store = HostedStateStore(tmp_path / "hosted_state.json")
     fake = await fake_claustrum()
-    pids = await _three_stored_sessions(fake, store)
+    pids = await _three_stored_sessions(fake, store)  # sends no process.reattach
     fake.fail_after["process.reattach"] = (1, how)
     async with ClaustrumClient(fake.socket_path, fake.token) as client:
-        client._request_timeout = 0.5
+        client._request_timeout = 1.0
         mgr = HostedManager(store)
         await mgr.reattach_all(client)
         rows = [mgr.get_instance(p) for p in pids]
         assert [r.status for r in rows if r is not None].count(InstanceStatus.RUNNING) == 1
         assert mgr.restored is (how == "hang")
+        # A hook over the same slow connection does not wait out the timeouts again.
+        reattaches = fake.calls.count("process.reattach")
+        await mgr.on_connected(client, history_for=None)
+        assert fake.calls.count("process.reattach") == reattaches
         fake.fail_after.clear()
         async with ClaustrumClient(fake.socket_path, fake.token) as again:
             await mgr.on_connected(again, history_for=None)
@@ -5222,9 +5250,14 @@ async def test_a_session_the_failed_reconnect_lost_comes_back_on_a_later_connect
         await client.close()
         await mgr.fail_unreachable("claustrum daemon connection lost and the reconnect failed")
         assert mgr.get_instance(pid).status is InstanceStatus.ERROR
-        # A hook handed a connection that is already closed retries nothing yet.
+        detail = mgr.get_instance(pid).error_detail
+        # A hook handed a connection that is already closed retries nothing yet, and
+        # keeps the row and its retry entry for the next one.
         await mgr.on_connected(client, history_for=None)
         assert "process.reattach" not in fake.calls
+        assert set(mgr._reattach_retry) == {pid}
+        row = mgr.get_instance(pid)
+        assert row.status is InstanceStatus.ERROR and row.error_detail == detail
         async with ClaustrumClient(fake.socket_path, fake.token) as again:
             await mgr.on_connected(again, history_for=None)
             assert mgr.get_instance(pid).status is InstanceStatus.RUNNING
@@ -5250,4 +5283,154 @@ async def test_the_retry_skips_rows_forgotten_or_killed_meanwhile(fake_claustrum
         assert "process.reattach" not in fake.calls
         assert mgr.get_instance(forgotten) is None
         assert mgr.get_instance(killed).status is InstanceStatus.STOPPED
-        assert mgr._reattach_retry == set()
+        assert mgr._reattach_retry == {}
+
+
+def _parked_prompt(request_id: str) -> bytes:
+    return _json_line(
+        {
+            "type": "control_request",
+            "request_id": request_id,
+            "request": {"subtype": "can_use_tool", "tool_name": "Bash", "input": {}},
+        }
+    )
+
+
+async def test_a_retried_session_parks_its_waiting_prompt_again(fake_claustrum):
+    # The loss resolved the prompt locally, but no answer reached the agent, which still
+    # waits on it. The replay starts past it, so the retry must park it again, or the
+    # row reads "running" with a prompt that nobody can see or answer.
+    async with _manager(fake_claustrum) as (fake, client, mgr):
+        pid = (await _spawn(mgr, client)).claustrum_process_id
+        old = mgr.session(pid)
+        queue = old.subscribe()
+        await fake.emit(pid, "stdout", _parked_prompt("perm-1"))
+        await _drain_until(queue, "control_request")
+        await client.close()
+        await mgr.fail_unreachable("claustrum daemon connection lost and the reconnect failed")
+        assert old.pending_requests == []  # resolved locally as interrupted
+        last_seen = old.event_seq
+        async with ClaustrumClient(fake.socket_path, fake.token) as again:
+            await mgr.on_connected(again, history_for=None)
+            new = mgr.session(pid)
+            assert new is not old and new.status == "running"
+            assert [r.request_id for r in new.pending_requests] == ["perm-1"]
+            seq = new.event_seq
+            new.repark(old.lost_requests)  # a prompt that is parked already stays as it is
+            assert new.event_seq == seq and len(new.pending_requests) == 1
+            # Numbered after the retired session's events, so a browser that reopens
+            # the view with ?after=<its last seq> still gets the prompt.
+            events = []
+            reopened = new.subscribe(after_seq=last_seen)
+            while not reopened.empty():
+                events.append(reopened.get_nowait())
+            assert [e["request_id"] for e in events if e["type"] == "control_request"] == [
+                "perm-1"
+            ]
+            await mgr.respond(pid, "perm-1", {"behavior": "deny", "message": "no"})
+            await wait_until(
+                lambda: [f for f in _stdin_frames(fake, pid) if f["type"] == "control_response"]
+            )
+            await mgr.stop(pid)
+
+
+async def test_a_retried_session_that_ended_meanwhile_parks_nothing(fake_claustrum):
+    async with _manager(fake_claustrum) as (fake, client, mgr):
+        pid = (await _spawn(mgr, client)).claustrum_process_id
+        queue = mgr.session(pid).subscribe()
+        await fake.emit(pid, "stdout", _parked_prompt("perm-1"))
+        await _drain_until(queue, "control_request")
+        await client.close()
+        await mgr.fail_unreachable("claustrum daemon connection lost and the reconnect failed")
+        await fake.emit_exit(pid, 0)  # the agent ended while nobody was attached
+        async with ClaustrumClient(fake.socket_path, fake.token) as again:
+            await mgr.on_connected(again, history_for=None)
+            new = mgr.session(pid)
+            await wait_until(lambda: new.status == "stopped")
+            assert new.pending_requests == []
+            assert mgr.get_instance(pid).status is InstanceStatus.STOPPED
+
+
+async def test_a_retry_that_hits_a_bug_keeps_the_row_and_goes_on(fake_claustrum, monkeypatch):
+    # Not a daemon error: the row must not be left half-updated or dropped from the
+    # retry set, and the next row is still retried.
+    async with _manager(fake_claustrum) as (fake, client, mgr):
+        bad = (await _spawn(mgr, client)).claustrum_process_id
+        good = (await _spawn(mgr, client, project="other")).claustrum_process_id
+        await client.close()
+        await mgr.fail_unreachable("claustrum daemon connection lost and the reconnect failed")
+        before = mgr.get_instance(bad).model_copy()
+        real_reattach = HostedSession.reattach
+
+        async def _reattach(self, from_seq=0, *, history_loader=None):
+            if self.process_id == bad:
+                raise RuntimeError("bug")
+            return await real_reattach(self, from_seq, history_loader=history_loader)
+
+        monkeypatch.setattr(HostedSession, "reattach", _reattach)
+        async with ClaustrumClient(fake.socket_path, fake.token) as again:
+            await mgr.on_connected(again, history_for=None)
+            row = mgr.get_instance(bad)
+            assert (row.status, row.error_detail, row.is_orphan) == (
+                before.status,
+                before.error_detail,
+                before.is_orphan,
+            )
+            assert bad in mgr._reattach_retry
+            assert mgr.get_instance(good).status is InstanceStatus.RUNNING
+            await mgr.stop(good)
+
+
+async def test_a_retry_the_daemon_refuses_keeps_the_orphan_offer(fake_claustrum, monkeypatch):
+    # The orphan state is the evidence that makes Resume use the pid-gated kill. A retry
+    # whose reattach is refused must not drop it before it knows the outcome.
+    async def _orphan(_instance):
+        return True
+
+    async def _refuse(self, *_args, **_kwargs):
+        raise RpcError(-32602, "Invalid params")
+
+    monkeypatch.setattr(HostedManager, "_is_orphan", staticmethod(_orphan))
+    async with _manager(fake_claustrum) as (fake, client, mgr):
+        pid = (await _spawn(mgr, client)).claustrum_process_id
+        await client.close()
+        await mgr.fail_unreachable("claustrum daemon connection lost and the reconnect failed")
+        assert mgr.get_instance(pid).is_orphan
+        monkeypatch.setattr(HostedSession, "reattach", _refuse)
+        async with ClaustrumClient(fake.socket_path, fake.token) as again:
+            await mgr.on_connected(again, history_for=None)
+        row = mgr.get_instance(pid)
+        assert row.is_orphan and "Invalid params" in (row.error_detail or "")
+        assert pid not in mgr._reattach_retry  # the daemon answered: not a connection loss
+
+
+async def test_a_stop_that_loses_the_daemon_says_why_on_the_row(fake_claustrum, monkeypatch):
+    async def _gone(*_args, **_kwargs):
+        raise DaemonUnreachable("daemon gone")
+
+    async with _session(fake_claustrum) as (_fake, session):
+        monkeypatch.setattr(session._client, "kill", _gone)
+        await session.stop()
+        assert session.status == "error"
+        assert session.error_detail == "stop failed: daemon gone"
+
+
+async def test_a_pump_that_dies_before_its_failure_path_latches_is_an_error(
+    fake_claustrum, monkeypatch
+):
+    async with _manager(fake_claustrum) as (fake, client, mgr):
+        pid = (await _spawn(mgr, client)).claustrum_process_id
+        session = mgr.session(pid)
+
+        async def _broken(_reason):
+            raise RuntimeError("failure path broke")
+
+        monkeypatch.setattr(session, "_fail_closed", _broken)
+        _poison_redactor(monkeypatch)
+        pump = session._pump_task
+        await fake.emit(pid, "stdout", _POISON)
+        await wait_until(pump.done)
+        assert session.status == "running"  # nothing latched it
+        await session.detach()
+        assert session.status == "error"  # no pump: never a silent "running" row
+        assert mgr.get_instance(pid).error_detail == "internal error (RuntimeError)"

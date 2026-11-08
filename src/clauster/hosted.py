@@ -229,6 +229,24 @@ class _ControlRequest:
     request: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class _LostRow:
+    """What a row lost to the connection carries to its retry (TASK-526).
+
+    ``client`` is the connection the row was lost on: a retry over that same client
+    is skipped, because it would only wait out the same timeout again. ``requests``
+    are the prompts the loss resolved locally. No control_response reached the
+    agent, so it still waits on them, and the replay does not send them again (the
+    cursor is past them). ``event_seq`` is the retired session's last event number,
+    so a browser that reopens the view with ``?after=`` that number still sees the
+    new session's events.
+    """
+
+    client: ClaustrumClient
+    requests: tuple[_ControlRequest, ...] = ()
+    event_seq: int = 0
+
+
 class HostedSession:
     """One headless stream-json ``claude`` session driven over the claustrum daemon.
 
@@ -281,6 +299,8 @@ class HostedSession:
         # Why the pump's failure path latched ERROR, for the row (TASK-461): it names a
         # kill that failed, so a row whose agent may still run says so, not only the log.
         self.error_detail: str | None = None
+        # The parked requests that _latch_lost resolved locally (TASK-526); see repark().
+        self.lost_requests: tuple[_ControlRequest, ...] = ()
         # Highest *daemon* frame seq drained — the reattach replay cursor across
         # clauster restarts (distinct from _event_seq, the clauster-side ring seq).
         self.daemon_last_seq = 0
@@ -528,10 +548,42 @@ class HostedSession:
         self._latch_lost(reason)
 
     def _latch_lost(self, reason: str) -> None:
-        """Latch ERROR first, then resolve parked requests and emit ``lost``."""
+        """Latch ERROR first, then resolve parked requests and emit ``lost``.
+
+        The resolved requests are kept in :attr:`lost_requests`: no control_response
+        was written, so the agent still waits on them, and a retry over a later
+        connection parks them again (:meth:`repark`, TASK-526).
+        """
         self.status = InstanceStatus.ERROR
+        self.lost_requests = tuple(self._pending.values())
         self._resolve_parked()
         self._emit({"type": "lost", "reason": reason})
+
+    @property
+    def event_seq(self) -> int:
+        """The number of the newest event in the ring (0 before the first one)."""
+        return self._event_seq
+
+    def continue_from(self, event_seq: int) -> None:
+        """Start this ring's numbering after ``event_seq``, a retired session's (TASK-526).
+
+        A browser that watched the retired session reopens the view with ``?after=``
+        that number, and :meth:`subscribe` sends only the events above it. Call this
+        before :meth:`reattach`, so the restored history and the replay are above it.
+        """
+        self._event_seq = max(self._event_seq, event_seq)
+
+    def repark(self, requests: Collection[_ControlRequest]) -> None:
+        """Park again the prompts a lost connection resolved locally (TASK-526).
+
+        For a session that a retry reattached while the agent still runs: the agent
+        still waits on these prompts, and the replay starts past them, so without
+        this the row would read "running" with a prompt that nobody can see. A
+        request that is parked already is left alone.
+        """
+        for parked in requests:
+            if parked.request_id not in self._pending:
+                self._park(parked)
 
     def _drop_subscription(self) -> None:
         """Release the stream subscription for a start/reattach that will never pump."""
@@ -651,6 +703,8 @@ class HostedSession:
                         pass
         except ClaustrumError as exc:  # daemon loss during stop (CL-4b)
             self.status = InstanceStatus.ERROR
+            # The agent may still run: the row says why, as _fail_closed's does.
+            self.error_detail = redact_for_disk(f"stop failed: {exc}")
             self._resolve_parked()  # a dead session must not leave a parked request stranded
             self._emit({"type": "lost", "reason": f"stop failed: {exc}"})
         finally:
@@ -960,8 +1014,8 @@ class HostedSession:
         the agent may still run.
         """
         self.status = InstanceStatus.ERROR
-        self.error_detail = redact_for_disk(reason)
         try:
+            self.error_detail = redact_for_disk(reason)
             self._resolve_parked()
             self._emit({"type": "lost", "reason": reason})
         finally:
@@ -1036,7 +1090,13 @@ class HostedSession:
             self._emit({"type": "control_ack", "request_id": request_id, "subtype": subtype})
             return
         # Never auto-answer a request that could grant a capability.
-        parked = _ControlRequest(request_id, subtype if isinstance(subtype, str) else "", request)
+        self._park(
+            _ControlRequest(request_id, subtype if isinstance(subtype, str) else "", request)
+        )
+
+    def _park(self, parked: _ControlRequest) -> None:
+        """Record a control request as pending, show it to watchers, and notify (CL-5)."""
+        request_id, request = parked.request_id, parked.request
         self._pending[request_id] = parked
         self._emit(
             {
@@ -1145,7 +1205,8 @@ class HostedSession:
         ERROR and sent its kill before the fault, so the session is already visibly
         failed. Raising it would instead end :meth:`stop`, :meth:`detach` and, through
         them, :meth:`HostedManager.aclose` early, which then skips the other sessions
-        and the final persist.
+        and the final persist. A fault that came before :meth:`_fail_closed` latched
+        anything leaves a session with no pump, so it is latched ERROR here.
         """
         if self._pump_task is not None:
             self._pump_task.cancel()
@@ -1153,11 +1214,14 @@ class HostedSession:
                 await self._pump_task
             except (asyncio.CancelledError, ClaustrumError):
                 pass
-            except Exception:
+            except Exception as exc:
                 logger.exception(
                     "hosted: pump for process %s failed in its failure path",
                     self._process_id,
                 )
+                if self.status in (InstanceStatus.RUNNING, InstanceStatus.STARTING):
+                    self.status = InstanceStatus.ERROR
+                    self.error_detail = f"internal error ({type(exc).__name__})"
             self._pump_task = None
         if self._stream is not None and self._source is not None:
             self._stream.unsubscribe(self._source)
@@ -1227,7 +1291,7 @@ class HostedManager:
         # Rows lost to the connection, not to the daemon (TASK-526): their reattach failed
         # because the connection dropped, closed or timed out, so the agent may still run on
         # the daemon. The next connection's hook reattaches them (_retry_lost_rows).
-        self._reattach_retry: set[str] = set()
+        self._reattach_retry: dict[str, _LostRow] = {}
 
     @property
     def restored(self) -> bool:
@@ -1501,7 +1565,7 @@ class HostedManager:
 
     @staticmethod
     async def _end_error_agent(client: ClaustrumClient, hosted_id: str) -> None:
-        """Make sure an ERROR row's agent is ended before Resume spawns beside it (TASK-461).
+        """End an ERROR row's agent through the daemon before Resume spawns (TASK-461).
 
         An ERROR row can still own a live agent: the pump's kill failed, a stop lost
         the daemon, or a reattach failed while the agent ran on. So Resume sends its
@@ -1515,14 +1579,18 @@ class HostedManager:
         old process runs no more code once the signal is delivered, and it cannot
         catch it. A kill that fails refuses the Resume (fail closed), and the row
         stays as it was, so the operator can try again.
+
+        This reaches only an agent that the connected daemon still manages. An agent
+        that outlived a daemon restart is an orphan row, which Resume ends with the
+        pid-gated kill instead.
         """
         try:
             await client.kill(hosted_id, signal="KILL")
         except ClaustrumError as exc:
             raise HostedSessionError(
                 redact_for_disk(
-                    "cannot resume: the old agent may still be running and could not be "
-                    f"ended ({exc}); try again when the daemon answers"
+                    "cannot resume: the old agent may still be running, and the daemon "
+                    f"refused or did not answer the kill ({exc})"
                 )
             ) from exc
 
@@ -1722,15 +1790,19 @@ class HostedManager:
         A row lands in the retry set when its reattach failed because of the
         connection, not because of the daemon: during a restore pass, during a
         rebind, or when the reconnect failed. Until this runs, the row is a visible
-        error or orphan row (fail closed). A row that the operator resumed, forgot or
-        killed since then is skipped. The caller holds the restore lock.
+        error or orphan row (fail closed), and it stays that row until a reattach
+        succeeds. A row that the operator resumed, forgot or killed since then is
+        skipped. So is a row lost on ``client`` itself: a retry over the same slow
+        connection would only wait out the same timeout again. The caller holds the
+        restore lock.
         """
-        for process_id in list(self._reattach_retry):
+        for process_id, lost in list(self._reattach_retry.items()):
             if self._closing or not client.is_open:
                 return  # the ids stay in the set for the next connection
-            instance = self._instances.get(process_id)
-            if instance is None or process_id in self._removed:
-                self._reattach_retry.discard(process_id)
+            if lost.client is client:
+                continue
+            if process_id not in self._instances or process_id in self._removed:
+                self._reattach_retry.pop(process_id, None)
                 continue
             async with self._lock_for(process_id):
                 # Checked again under the lock: a Resume, Forget or Kill of this row can
@@ -1742,12 +1814,16 @@ class HostedManager:
                     or process_id in self._sessions
                     or process_id in self._removed
                 ):
-                    self._reattach_retry.discard(process_id)
+                    self._reattach_retry.pop(process_id, None)
                     continue
-                instance.is_orphan = False
-                instance.error_detail = None
-                instance.status = InstanceStatus.STARTING
-                await self._reattach_row(client, process_id, instance, history_for=history_for)
+                try:
+                    await self._reattach_row(
+                        client, process_id, instance, history_for=history_for, lost=lost
+                    )
+                except Exception:
+                    # Not a daemon error (those are classified inside). The row keeps the
+                    # state it had, and its retry entry, and the other rows go on.
+                    logger.exception("hosted: retried reattach of %s failed", process_id)
 
     async def _reattach_all_locked(
         self,
@@ -1844,7 +1920,7 @@ class HostedManager:
         if instance.intentional_stop:
             instance.status = InstanceStatus.STOPPED
             return
-        await self._reattach_row(client, process_id, instance, history_for=history_for)
+        await self._reattach_row(client, process_id, instance, history_for=history_for, lost=None)
 
     async def _reattach_row(
         self,
@@ -1853,14 +1929,17 @@ class HostedManager:
         instance: RemoteControlInstance,
         *,
         history_for: Callable[[RemoteControlInstance], list[dict[str, Any]]] | None,
+        lost: _LostRow | None,
     ) -> None:
         """Reattach one row's agent over ``client``, or classify the row if that fails.
 
-        Shared by the restore pass and :meth:`_retry_lost_rows`; the caller holds the
-        row's per-id lock. A failure caused by the connection puts the row in the
-        retry set, so the next connection tries again (TASK-526).
+        Shared by the restore pass and :meth:`_retry_lost_rows` (which passes the
+        row's ``lost`` entry); the caller holds the row's per-id lock. A failure caused
+        by the connection puts the row in the retry set, so the next connection tries
+        again (TASK-526). Any other outcome takes it out. On a successful retry the row
+        drops its orphan and loss state, and the new session numbers its events after
+        the retired one's and parks the prompts the agent still waits on.
         """
-        self._reattach_retry.discard(process_id)
         # reattach() never builds argv (it binds by process id), so the binary is
         # unused here — a respawn path (CL-7) re-resolves it from config.
         session = HostedSession(
@@ -1869,6 +1948,8 @@ class HostedManager:
             "",
             on_permission_needed=self._on_permission_needed,
         )
+        if lost is not None:
+            session.continue_from(lost.event_seq)
         # Pre-set the live session's uuid ONLY when the persisted value is a usable
         # session id, so the `_capture_session_uuid` latch stays OPEN for anything else.
         # An empty / non-string value never reached the session (the mapper nulled it),
@@ -1909,11 +1990,18 @@ class HostedManager:
                 await self._mark_unfound(
                     instance, lost_status=InstanceStatus.ERROR, lost_detail=detail
                 )
-                self._reattach_retry.add(process_id)
+                prior = lost or self._reattach_retry.get(process_id)
+                self._reattach_retry[process_id] = _LostRow(
+                    client,
+                    prior.requests if prior else (),
+                    prior.event_seq if prior else 0,
+                )
                 return
+            self._reattach_retry.pop(process_id, None)
             instance.status = InstanceStatus.ERROR
             instance.error_detail = detail
             return
+        self._reattach_retry.pop(process_id, None)
         if not result.get("found"):
             await self._mark_unfound(
                 instance,
@@ -1926,6 +2014,12 @@ class HostedManager:
         # salvage time stays the durable record). Only that note is cleared.
         if instance.error_detail == _UNREADABLE_RECORD_DETAIL:
             instance.error_detail = None
+        if lost is not None:
+            # A retry that worked: the row is no longer an orphan or a loss.
+            instance.is_orphan = False
+            instance.error_detail = None
+            if session.status == InstanceStatus.RUNNING:
+                session.repark(lost.requests)
         self._sessions[process_id] = session
         if self._closing:
             # aclose() ran while this reattach was in flight (a hook-run pass): the
@@ -1987,6 +2081,8 @@ class HostedManager:
                 else f"{_ORPHAN_DETAIL} — Kill to clean up"
             )
         else:
+            # A retried row can have been an orphan before; it is not one now.
+            instance.is_orphan = False
             instance.status = lost_status
             instance.error_detail = lost_detail
 
@@ -2066,7 +2162,7 @@ class HostedManager:
                     if not killed and not client.is_open and not self._closing:
                         # The new connection ended under the reattach, so no kill reached
                         # the agent and it may still run: the next connection reattaches it.
-                        self._reattach_retry.add(key)
+                        self._reattach_retry[key] = self._lost_row(client, session)
                     continue
                 if not result.get("found"):
                     logger.warning("hosted: the daemon no longer has %s after a reconnect", key)
@@ -2113,9 +2209,14 @@ class HostedManager:
                 await self._retire_lost(key, session, instance, detail, probe_orphan=True)
                 # No kill reached the agent. If a later connect succeeds, its hook runs
                 # after this one and reattaches the row (TASK-526).
-                self._reattach_retry.add(key)
+                self._reattach_retry[key] = self._lost_row(session.client, session)
         if not self._closing:
             await self._persist()
+
+    @staticmethod
+    def _lost_row(client: ClaustrumClient, session: HostedSession) -> _LostRow:
+        """Build the retry entry of a retired ``session`` lost on ``client`` (TASK-526)."""
+        return _LostRow(client, session.lost_requests, session.event_seq)
 
     async def _retire_lost(
         self,
