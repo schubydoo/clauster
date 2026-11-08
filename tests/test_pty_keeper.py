@@ -1888,6 +1888,30 @@ def test_keeper_raw_scrape_waits_while_only_escapes_follow_the_id() -> None:
     assert pty_keeper._scan_connect_url(data + b"\r\n", None) == _SPLIT_ID
 
 
+@pytest.mark.parametrize(
+    "tail",
+    [b"\x1b", b"\x1b[", b"\x1b[?", b"\x1b[?2", b"\x1b[;", b"\x1b[1", b"\x1b(", b"\x1b]8;;"]
+    + [b"\x1b]8;;\x1b", b"\x1b[0m\x1b"],
+)
+def test_keeper_raw_scrape_waits_on_an_escape_a_read_cut_short(tail: bytes) -> None:
+    """A read that ends inside an escape after the id cannot say whether the id goes on."""
+    from clauster import pty_keeper
+
+    data = b"at https://claude.ai/code/session_01COL" + tail
+    assert pty_keeper._scan_connect_url(data, None) is None
+    screen = _fresh_screen()
+    screen.feed(data)
+    assert pty_keeper._scan_connect_url(data, screen) is None
+
+
+def test_keeper_raw_scrape_reads_no_further_than_the_escape_limit() -> None:
+    from clauster import pty_keeper
+
+    # The byte at the limit is inside the OSC, and it is not an id byte: it must not count.
+    osc = b"\x1b]" + b"/" * pty_keeper._ESCAPE_RUN_LIMIT + b"\x07"
+    assert pty_keeper._scan_connect_url(b"at " + _SPLIT_URL.encode() + osc + b"\r\n", None) is None
+
+
 def test_keeper_raw_scrape_reads_a_later_clean_copy() -> None:
     from clauster import pty_keeper
 
