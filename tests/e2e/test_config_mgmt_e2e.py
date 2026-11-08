@@ -2872,9 +2872,13 @@ def test_mcp_gate_stays_closed_when_the_reload_after_a_save_fails(
 
 
 def _wait_for_failed_reload(browser: AgentBrowser) -> None:
-    """Wait until the save's own readiness reload has failed and been applied."""
+    """Wait until the save's own readiness reload has failed and been applied.
+
+    The stub's counter rises only when this save fetches, so an older preflightError
+    cannot satisfy the wait.
+    """
     deadline = time.monotonic() + 10
-    while not browser.eval_json("(()=>!!" + _ROOT + ".preflightError['alpha'])()"):
+    while not browser.eval_json("(()=>window.__pf>=1&&!!" + _ROOT + ".preflightError['alpha'])()"):
         assert time.monotonic() < deadline, "the save's readiness reload never failed"
         time.sleep(0.2)
 
@@ -2909,7 +2913,7 @@ def test_mcp_gate_ignores_a_pre_write_answer_that_lands_during_the_save(
     browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
     _wait_for_failed_reload(browser)
     state = browser.eval_json(
-        "(()=>({entered:window.__mcpEntered===true,stale:window.__staleApplied,"
+        "(()=>({entered:window.__mcpEntered===true,stale:window.__staleApplied??null,"
         "calls:window.__pf}))()"
     )
     # The wrapper ran, the held answer was dropped (true would mean it landed), and the
