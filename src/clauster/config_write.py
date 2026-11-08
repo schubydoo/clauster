@@ -1590,8 +1590,10 @@ def refuse_deep_flow(header: str, *, what: str, line_offset: int) -> None:
     """Refuse (422) a header whose flow collections nest past :data:`MAX_NESTING_DEPTH`.
 
     One forward pass of the scanner (:class:`_FlowDepthLoader`), before anything parses the
-    header. A syntax error ends the pass, as it ends every parse of the same text at the
-    same place, so the parse reports that error itself. Positions only in the message.
+    header. A scanner error ends the pass, as it ends every parse of the same text at the
+    same place, so the parse reports that error itself. A parser error does not end it, so
+    the pass also refuses a deep part after one, which a parse would never reach. That
+    refuses more, never less. Positions only in the message.
     """
     try:
         for _token in yaml.scan(header, Loader=_FlowDepthLoader):
@@ -2599,8 +2601,10 @@ def load_frontmatter_yaml(header: str, *, what: str, line_offset: int = 0) -> An
     # header is not valid YAML (TASK-449.6). Every check below reads that same text. Line
     # numbers do not move, so a mark still names the line in the file; a column after a
     # re-quoted value or a replaced tab can be off by the characters the retry added.
-    header = cli_frontmatter_text(header)
     try:
+        # In the try: a header nested past the cap raises a YAMLError here. The scan at the
+        # top refuses it first, and this keeps it a 422 if that order ever changes.
+        header = cli_frontmatter_text(header)
         # A merge key flattens at *construction* time, so — unlike the alias pyramid #1393
         # whose blow-up is post-parse — a merge-key pyramid detonates inside ``safe_load``
         # itself, before any post-parse guard can run (#1417). Compose the node graph first

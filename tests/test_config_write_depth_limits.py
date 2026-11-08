@@ -156,10 +156,11 @@ def test_the_cli_text_raises_for_a_too_deep_header() -> None:
 def test_a_retry_that_would_nest_past_the_cap_keeps_the_header(deep_line: str) -> None:
     # The header is not valid YAML (`[x] [y]`), so the CLI reads the retry text. Its deep
     # value, or the deep retry text, is never composed: the header comes back, and every
-    # parse of it stops at the syntax error on line 1, before the deep part.
+    # parse of it stops at the parser error on line 1, before the deep part. The seam's own
+    # scan does not stop at a parser error, so it reads on and refuses line 2 by name.
     header = f"argument-hint: [x] [y]\n{deep_line}"
     assert cw.cli_frontmatter_text(header) == header
-    with pytest.raises(cw.InvalidCandidateError, match="nested too deeply"):
+    with pytest.raises(cw.InvalidCandidateError, match=r"nested too deeply.*\(line [34]\)"):
         cw.load_frontmatter_yaml(header, what="frontmatter", line_offset=1)
 
 
@@ -173,7 +174,7 @@ def test_a_too_deep_skill_header_on_disk_is_shown_masked_whole(tmp_path: Path) -
         + _flow(MAX + 1, "visible-TEXT")
         + "\nmcpServers:\n  s:\n    url: https://u:pw-SECRET@h.example/x\n---\nbody\n"
     )
-    (skill / sk.SKILL_FILENAME).write_text(text, encoding="utf-8")
+    (skill / sk.SKILL_FILENAME).write_bytes(text.encode("utf-8"))
     view, _hash, _exists, _note = sk.read_skill_file_for_edit(tmp_path, "s")
     assert "pw-SECRET" not in view and "visible-TEXT" not in view
     assert view.endswith("---\nbody\n")
@@ -188,7 +189,7 @@ def test_a_too_deep_subagent_on_disk_reads_degraded_with_bounded_work(
     agents.mkdir(parents=True)
     deep = "[" * 400 + ", ".join(["a"] * 500) + "]" * 400
     text = f"---\nname: my-agent\ndescription: d\napi_token: fake-TOKEN\nk: {deep}\n---\nbody\n"
-    (agents / "my-agent.md").write_text(text, encoding="utf-8")
+    (agents / "my-agent.md").write_bytes(text.encode("utf-8"))
     work = _simple_key_work(monkeypatch)
     doc = sub.read_project_agent(tmp_path, "my-agent")
     assert doc["frontmatter"] == {}
@@ -210,12 +211,12 @@ def _masked_save_work(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, depth: in
     deep = "[" * depth + ", ".join(["a"] * 200) + "]" * depth
     text = _STDIO + f"x: {deep}\n---\nbody\n"
     path = agents / "my-agent.md"
-    path.write_text(text, encoding="utf-8")
+    path.write_bytes(text.encode("utf-8"))
     doc = sub.read_project_agent(tmp_path, "my-agent")
     assert MASK in doc["content"] and "fake-pat-SECRET" not in doc["content"]
     work = _simple_key_work(monkeypatch)
     sub.write_project_agent(tmp_path, "my-agent", doc["content"], doc["hash"])
-    assert path.read_text(encoding="utf-8") == text  # the masked value was kept
+    assert path.read_bytes() == text.encode("utf-8")  # the masked value was kept
     return work
 
 
