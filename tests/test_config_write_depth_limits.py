@@ -147,21 +147,35 @@ def test_the_cli_text_raises_for_a_too_deep_header() -> None:
 
 
 @pytest.mark.parametrize(
-    "deep_line",
+    ("deep_line", "file_line"),
     [
-        pytest.param("b: " + _flow(MAX + 1), id="a-top-level-list-value"),
-        pytest.param("m:\n  b: " + _flow(MAX + 1), id="a-line-the-retry-keeps"),
+        pytest.param("b: " + _flow(MAX + 1), 3, id="a-top-level-list-value"),
+        pytest.param("m:\n  b: " + _flow(MAX + 1), 4, id="a-line-the-retry-keeps"),
     ],
 )
-def test_a_retry_that_would_nest_past_the_cap_keeps_the_header(deep_line: str) -> None:
+def test_a_retry_that_would_nest_past_the_cap_keeps_the_header(
+    deep_line: str, file_line: int
+) -> None:
     # The header is not valid YAML (`[x] [y]`), so the CLI reads the retry text. Its deep
     # value, or the deep retry text, is never composed: the header comes back, and every
     # parse of it stops at the parser error on line 1, before the deep part. The seam's own
-    # scan does not stop at a parser error, so it reads on and refuses line 2 by name.
+    # scan does not stop at a parser error, so it reads on and names the deep line.
     header = f"argument-hint: [x] [y]\n{deep_line}"
     assert cw.cli_frontmatter_text(header) == header
-    with pytest.raises(cw.InvalidCandidateError, match=r"nested too deeply.*\(line [34]\)"):
+    with pytest.raises(
+        cw.InvalidCandidateError, match=rf"nested too deeply.*\(line {file_line}\)"
+    ):
         cw.load_frontmatter_yaml(header, what="frontmatter", line_offset=1)
+
+
+def test_the_seam_keeps_a_depth_error_a_refusal_without_its_first_scan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Defence in depth: the CLI-text call runs inside the seam's try, so a header past the
+    # cap is a refusal even if the scan at the top is skipped (never a raw YAMLError, a 500).
+    monkeypatch.setattr(cw, "refuse_deep_flow", lambda *_a, **_k: None)
+    with pytest.raises(cw.InvalidCandidateError, match="FlowNestingTooDeepError"):
+        cw.load_frontmatter_yaml("k: " + _flow(MAX + 1), what="frontmatter", line_offset=1)
 
 
 def test_a_too_deep_skill_header_on_disk_is_shown_masked_whole(tmp_path: Path) -> None:
