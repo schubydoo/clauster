@@ -76,7 +76,7 @@ CLI, with the reason.
 
 When a Clauster server already listens on the configured `port`, a CLI run on its
 own does not see what the server sees. It runs in a different environment (for
-example without the service unit's `CLAUSTER_PYTE_PATH`), and it cannot check the
+example without a `CLAUSTER_PYTE_PATH` that you set in the service unit), and it cannot check the
 server's unpacked program files. Give the CLI an [API token](public-api.md#named-api-tokens-clauster-api-token)
 to show the server's own results instead:
 
@@ -95,14 +95,18 @@ code follows the server's result.
 The CLI shows its local checks, and names the reason on its first line, in each
 of these cases:
 
+- The config did not load. The `config` row then names the error.
+
 - No server listens on `127.0.0.1:<port>`.
 - A server listens, but you gave no token.
 - The server refused the token (`HTTP 401` or `HTTP 403`), or answered with
-  another status. A server with `ui.enabled: false` answers `HTTP 404`.
+  another status.
 - The server did not answer, sent results that the CLI cannot read, or (with
   `tls` set) presented a different certificate than the configured one.
 - Without `tls`, the CLI could not prove that the listener is this deployment's
   server (see the limits below). The CLI then does not send the token.
+- The token holds characters that an HTTP header cannot carry, or (with `tls`
+  set) the certificate file is unreadable. The CLI then does not send the token.
 
 The CLI never mixes the two sets of rows.
 
@@ -152,7 +156,7 @@ Checks:
 | `bundle-env` | (Linux) whether a running bridge, background agent or the claustrum daemon still has an older standalone binary's runtime environment (`_PYI_*` variables, or a `_MEI…` directory in `LD_LIBRARY_PATH`). It reads `/proc` for processes of the same user only, and it names only the process and its pid, never a value. | **WARN** naming each such process: restart it (see [troubleshooting](troubleshooting.md#in-a-session-node-fails-with-glibc_238-not-found-or-clauster-cannot-load-libpython)). **WARN** naming each process whose environment could not be read (another user's process, a read error, or an empty environment), because an unread process is not a clean one: `N clean, M could not be read: …`, or `check not completed: …` when none could be read. A process that exited during the check is left out. **WARN** `could not check: <error type>` if the probe itself failed. Never FAIL. On macOS and Windows the row says that it was not checked. |
 | `version` | For a from-source checkout, whether `HEAD` is behind its last-fetched upstream. | **WARN** if behind; absent for PyPI/Docker installs. |
 | `node-toolchain` | On an nvm host, whether nvm's default `node` is reachable on a spawned bridge's `PATH`. | **WARN** if missing or not on the bridge `PATH` — advisory; only present on POSIX nvm hosts. |
-| `port` | (CLI local checks only) whether the listen port is free to bind. | **OK** if free. **OK** if the `server` row is OK and the holder is provably this deployment's server: with `tls` through the pinned certificate, without `tls` because every listener on the port belongs to the user who runs the CLI. **WARN** if any other process holds it, or if the owner cannot be checked. |
+| `port` | (CLI local checks only) whether the listen port is free to bind. | **OK** if free. **OK** if the `server` row is OK and the holder is provably this deployment's server: with `tls` through the pinned certificate, without `tls` because every listener on the port belongs to the user who runs the CLI. **WARN** in every other case: another process holds the port, the `server` row is not OK, or the owner cannot be checked. |
 | `server` | (CLI local checks only) when the listen port is in use, the `/healthz` verdict of the server that holds it. | **FAIL** if it answers anything but `200` — for example the `503` above. **WARN** if, with `tls` set, the listener presents a different certificate than the configured one (the probe trusts only that certificate) or the certificate file is unreadable. Absent when the port is free or the listener does not answer HTTP. |
 | `systemd` | The loaded `clauster.service` uses a non-reaping `KillMode` (see below). | **WARN** if it would reap live pty bridges. |
 | `bundle` | (Server results only, standalone binary only) the running server's unpacked program files are all present. The dashboard panel shows it, and so does the CLI when it [shows the running server's results](#show-the-running-servers-results). The local checks of the CLI report this through the `server` check instead, because a CLI run unpacks its own fresh copy. | **FAIL** if any file is missing — restart Clauster. |
