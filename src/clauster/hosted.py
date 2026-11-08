@@ -2055,6 +2055,11 @@ class HostedManager:
                 ):
                     self._reattach_retry.pop(process_id, None)
                     continue
+                if self._reattach_retry.get(process_id) is not lost:
+                    # The entry changed while this loop waited: a confirmed kill dropped
+                    # it (a Resume whose spawn then failed), or a newer loss replaced it.
+                    # Its stale prompts must not come back (async review catch).
+                    continue
                 try:
                     await self._reattach_row(
                         client,
@@ -2469,6 +2474,8 @@ class HostedManager:
                     await self._retire_lost(
                         key, session, instance, reason, probe_orphan=not killed
                     )
+                    # Named on the row, as every other loss path names them (TASK-537).
+                    self._name_unrestored(instance, session.lost_requests)
                     if not killed and not client.is_open and not self._closing:
                         # The new connection ended under the reattach, so no kill reached
                         # the agent and it may still run: the next connection reattaches it.
@@ -2525,6 +2532,8 @@ class HostedManager:
                 # No kill reached the agent. If a later connect succeeds, its hook runs
                 # after this one and reattaches the row (TASK-526).
                 self._reattach_retry[key] = self._lost_row(session.client, session)
+                # Named meanwhile; a retry that works clears the note (TASK-537).
+                self._name_unrestored(instance, session.lost_requests)
         if not self._closing:
             await self._persist()
 

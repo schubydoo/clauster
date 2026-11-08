@@ -6284,9 +6284,100 @@ async def test_a_rebind_whose_kill_is_accepted_stores_no_prompt(fake_claustrum, 
             fresh.reattach = _refuse
             await mgr.rebind_all(fresh)
             assert {"id": pid, "signal": "KILL"} in fake.killed
-            assert mgr.get_instance(pid).status is InstanceStatus.ERROR
+            row = mgr.get_instance(pid)
+            assert row.status is InstanceStatus.ERROR
+            assert "Bash (request perm-1)" in (row.error_detail or "")  # named, not silent
             assert _stored_ids(store, pid) == []
             assert pid not in mgr._unrestored and pid not in mgr._reattach_retry
+        await mgr.aclose()
+
+
+async def _failing_spawn(*_args, **_kwargs):
+    raise RpcError(-32603, "spawn refused")
+
+
+@pytest.mark.parametrize("how", ["stop-lost-the-daemon", "reconnect-failed"])
+async def test_a_resume_whose_spawn_fails_after_the_kill_stores_no_prompt(
+    fake_claustrum, tmp_path, monkeypatch, how
+):
+    # Resume ended the ERROR row's agent, then its spawn failed: the row stays, but the
+    # ended agent's unredacted prompt must not stay in the store, nor come back later.
+    store = HostedStateStore(tmp_path / "hosted_state.json")
+    fake = await fake_claustrum()
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        mgr, pid = await _parked_on_a_live_session(fake, store, client)
+        await _with_uuid(fake, mgr, pid)
+        if how == "stop-lost-the-daemon":
+            real_kill = client.kill
+
+            async def _no_kill(*_args, **_kwargs):
+                raise RpcError(-32603, "operation not permitted")
+
+            monkeypatch.setattr(client, "kill", _no_kill)
+            await mgr.stop(pid, connect=None)
+            monkeypatch.setattr(client, "kill", real_kill)
+            resume_client = client
+        else:
+            await client.close()
+            await mgr.fail_unreachable("claustrum daemon connection lost and the reconnect failed")
+            assert pid in mgr._unrestored and pid in mgr._reattach_retry
+            resume_client = ClaustrumClient(fake.socket_path, fake.token)
+            await resume_client.connect()
+        assert _stored_ids(store, pid) == ["perm-1"]
+        monkeypatch.setattr(mgr, "_spawn_session", _failing_spawn)
+        with pytest.raises(ClaustrumError, match="spawn refused"):
+            await mgr.resume(resume_client, pid, cwd="/tmp/proj", claude_binary=_BIN)
+        assert mgr.get_instance(pid).status is InstanceStatus.ERROR
+        assert pid not in mgr._unrestored and pid not in mgr._reattach_retry
+        await mgr.persist()
+        assert _stored_ids(store, pid) == []
+        if how == "reconnect-failed":
+            await mgr.on_connected(resume_client, history_for=None)  # no stale retry runs
+            assert _stored_ids(store, pid) == []
+            await resume_client.close()
+        await mgr.aclose()
+
+
+async def test_a_retry_skips_a_row_whose_entry_a_kill_dropped_meanwhile(fake_claustrum, tmp_path):
+    # Async review catch: the retry loop walks a snapshot of the retry set. A Resume of a
+    # later row ended its agent and failed to spawn while an earlier row reattached; the
+    # stale entry must not reattach that row or put its prompt back in the store.
+    store = HostedStateStore(tmp_path / "hosted_state.json")
+    fake = await fake_claustrum()
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        mgr = HostedManager(store)
+        await mgr.reattach_all(client)
+        first = (await _spawn(mgr, client)).claustrum_process_id
+        second = (await _spawn(mgr, client, project="other")).claustrum_process_id
+        queue = mgr.session(second).subscribe()
+        await fake.emit(second, "stdout", _parked_prompt("perm-2"))
+        await _drain_until(queue, "control_request")
+        await _with_uuid(fake, mgr, second)
+        await client.close()
+        await mgr.fail_unreachable("claustrum daemon connection lost and the reconnect failed")
+        assert list(mgr._reattach_retry) == [first, second]
+        real_reattach = HostedSession.reattach
+        reattached: list[str] = []
+
+        async with ClaustrumClient(fake.socket_path, fake.token) as again:
+
+            async def _reattach(self, from_seq=0, *, history_loader=None):
+                reattached.append(self.process_id)
+                if self.process_id == first:  # the operator resumes `second` meanwhile
+                    with pytest.MonkeyPatch.context() as patch:
+                        patch.setattr(mgr, "_spawn_session", _failing_spawn)
+                        with pytest.raises(ClaustrumError, match="spawn refused"):
+                            await mgr.resume(again, second, cwd="/tmp/other", claude_binary=_BIN)
+                return await real_reattach(self, from_seq, history_loader=history_loader)
+
+            with pytest.MonkeyPatch.context() as patch:
+                patch.setattr(HostedSession, "reattach", _reattach)
+                await mgr.on_connected(again, history_for=None)
+            assert reattached == [first]  # the dropped entry did not run
+            await mgr.persist()
+            assert _stored_ids(store, second) == []
+            assert second not in mgr._unrestored and second not in mgr._reattach_retry
+            await mgr.stop(first, connect=None)
         await mgr.aclose()
 
 

@@ -167,10 +167,12 @@ request id is redacted when it has the shape of a UUID.
 A prompt is saved with each dashboard poll, when you answer it, and when Clauster
 shuts down. If Clauster is killed before the next poll, a prompt that opened
 after the last save is not saved. While the agent can still wait on a saved
-prompt (an `Error` card or an `orphan` card), the prompt stays saved, and the
-text comes back after each restart until you Resume, Kill or Forget the card. If
-the daemon no longer has the agent, the card names the prompt once and Clauster
-deletes the saved copy. If the agent ended while Clauster was down, it waits on
+prompt (an `Error` card whose agent may still run, or an `orphan` card), the
+prompt stays saved, and the text comes back after each restart until you Resume,
+Kill or Forget the card. If the daemon no longer has the agent, the card names
+the prompt once and Clauster deletes the saved copy. That is also the case for a
+card that reads `claustrum connection dropped and the daemon no longer has this
+session` with no `orphan` badge. If the agent ended while Clauster was down, it waits on
 nothing, and Clauster deletes the saved copy without a note.
 
 ### When the daemon connection drops

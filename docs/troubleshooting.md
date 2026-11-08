@@ -772,10 +772,12 @@ stopped, and the reattach did not find the agent running. The daemon no longer
 had the process, it refused the reattach, or the connection dropped. If the card
 offers **Kill**, the `claude` process may still run and wait on the prompt: kill
 it, then Resume the conversation. After a dropped connection, the next daemon
-connection reattaches the session and opens the prompt again. On an `Error` or
-`orphan` card the text comes back after each restart until you Resume, Kill or
-Forget the card. On a `Crashed` card with no `orphan` badge the agent is gone,
-so the text shows once. See
+connection reattaches the session and opens the prompt again. On an `Error`
+card whose agent may still run, or an `orphan` card, the text comes back after
+each restart until you Resume, Kill or Forget the card. The same text can show
+after a reconnect, with no restart. On a `Crashed` card with no `orphan` badge,
+or a card that reads `claustrum connection dropped and the daemon no longer has
+this session` with no `orphan` badge, the agent is gone, so the text shows once. See
 [A Direct Session's view after a restart](concepts/how-it-works.md#a-direct-sessions-view-after-a-restart).
 
 ## Getting more detail
