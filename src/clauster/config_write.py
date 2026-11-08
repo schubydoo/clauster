@@ -270,8 +270,10 @@ def _mask_flow_pairs(body: str) -> str:
         if lead in ("'", '"'):
             quoted = _quoted_end(body, begin)
             end = len(body) if quoted is None else quoted
-        elif lead in ("{", "["):
-            end = len(body)  # a nested value: masked to the end of the line
+        elif lead in ("{", "[", "&", "!"):
+            # A nested value, or one behind an anchor or a tag whose shape is not read
+            # here: masked to the end of the line.
+            end = len(body)
         else:
             stop = _FLOW_END_RE.search(body, begin)
             end = len(body) if stop is None else stop.start()
@@ -717,8 +719,11 @@ def redact_secret_lines(text: str) -> str:
             if not content.strip() or (indent <= column and content[indent] == "#"):
                 # A blank line stays blank. A comment that is not indented into the value
                 # (a deeper `#` line is text of a literal value, masked below) is not part of
-                # it, but the value can go on after it, so it does not end the value.
-                out.append(line)
+                # it, but the value can go on after it, so it does not end the value. The
+                # comment still gets the `${...}` and credential-URL masks every line gets.
+                comment = _mask_interps(content, REDACTION_SENTINEL)
+                comment = _mask_url_creds(comment, f"{REDACTION_SENTINEL}@")
+                out.append(comment + line[len(content) :])
                 continue
             item = content[indent] == "-" and content[indent + 1 : indent + 2] in ("", " ", "\t")
             if indent > column or (indent == column and items and item):

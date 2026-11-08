@@ -2601,3 +2601,33 @@ def test_quoted_end_is_linear_on_many_escaped_quotes() -> None:
     start = time.perf_counter()
     assert cw._quoted_end(body, 0) is None
     assert time.perf_counter() - start < 2.0
+
+
+def test_a_comment_inside_a_secret_block_still_masks_a_credential_url() -> None:
+    text = "token:\n# deploy https://user:password@example.com\n  value\n"
+    shown = cw.redact_secret_lines(text)
+    assert "password" not in shown
+    assert "value" not in shown
+    assert shown.count("\n") == text.count("\n")
+    restored, _lines = cw.restore_masked_lines(
+        shown, text, what="SKILL.md", view=cw.redact_secret_lines
+    )
+    assert restored == text
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        'env: {token: &a "first, secret-tail"}\n',
+        "env: {token: !!str first, secret-tail}\n",
+        "env: {token: &a [first, secret-tail]}\n",
+    ],
+)
+def test_a_flow_value_behind_an_anchor_or_tag_is_masked_to_the_end(line: str) -> None:
+    shown = cw.redact_secret_lines(line)
+    assert "secret-tail" not in shown
+    assert "first" not in shown
+    restored, _lines = cw.restore_masked_lines(
+        shown, line, what="SKILL.md", view=cw.redact_secret_lines
+    )
+    assert restored == line
