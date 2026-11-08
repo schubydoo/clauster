@@ -2056,9 +2056,11 @@ class HostedManager:
                     self._reattach_retry.pop(process_id, None)
                     continue
                 if self._reattach_retry.get(process_id) is not lost:
-                    # The entry changed while this loop waited: a confirmed kill dropped
-                    # it (a Resume whose spawn then failed), or a newer loss replaced it.
-                    # Its stale prompts must not come back (async review catch).
+                    # A confirmed kill dropped the entry while this loop waited (a Resume
+                    # whose spawn then failed), so its stale prompts must not come back
+                    # (async review catch). Only a removal can happen here today: every
+                    # writer of the retry set runs under the restore lock or in the hook
+                    # chain. A replaced entry would wait for the next connection.
                     continue
                 try:
                     await self._reattach_row(

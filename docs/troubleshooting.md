@@ -763,8 +763,8 @@ that outlived a daemon restart ends too.
 
 ### A Direct Session names a lost permission prompt
 
-**What you see:** after a Clauster restart, a Direct Session card shows an error
-that ends with `the agent was waiting on a permission prompt that Clauster could
+**What you see:** after a Clauster restart or a dropped daemon connection, a
+Direct Session card shows an error that ends with `the agent was waiting on a permission prompt that Clauster could
 not restore, so it cannot be answered here: Bash (request ...)`.
 
 **Most likely cause:** the agent was waiting on that prompt when Clauster

@@ -6321,6 +6321,7 @@ async def test_a_resume_whose_spawn_fails_after_the_kill_stores_no_prompt(
             await client.close()
             await mgr.fail_unreachable("claustrum daemon connection lost and the reconnect failed")
             assert pid in mgr._unrestored and pid in mgr._reattach_retry
+            assert "Bash (request perm-1)" in (mgr.get_instance(pid).error_detail or "")
             resume_client = ClaustrumClient(fake.socket_path, fake.token)
             await resume_client.connect()
         assert _stored_ids(store, pid) == ["perm-1"]
