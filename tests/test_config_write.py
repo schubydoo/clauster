@@ -1769,36 +1769,67 @@ def test_redact_secret_lines_is_linear_on_every_hostile_shape():
     ``${`` flood needed a crafted payload; the other two did not — an ordinary long
     alphanumeric run (a minified blob, a long base64 value, a one-line JSON file) cost
     0.18s at 8 KB and 11.25s at 64 KB, and ``key: value`` with a long internal whitespace
-    run cost 8.6s at 64 KB. Bounds are loose because each shape now runs in milliseconds.
+    run cost 8.6s at 64 KB.
+
+    The check is a growth ratio, not a wall-clock bound: each shape runs at size ``n`` and
+    ``4n``, and a linear pass costs about 4x where a quadratic one costs about 16x. A fixed
+    bound failed on a slow CI runner under coverage (2.24s for a shape that takes 0.11s
+    locally), while the ratio does not depend on the speed of the machine. The ceiling of
+    30s per shape still catches a catastrophic regression at the full size.
     """
     import time
 
     shapes = {
-        "interpolation flood": "${" * 500_000,
-        "alphanumeric run": "a" * 256_000,
-        "internal whitespace run": "token: a" + " " * 64_000 + "b",
-        "minified blob": "a." * 500_000,
+        "interpolation flood": (500_000, lambda n: "${" * n),
+        "alphanumeric run": (256_000, lambda n: "a" * n),
+        "internal whitespace run": (64_000, lambda n: "token: a" + " " * n + "b"),
+        "minified blob": (500_000, lambda n: "a." * n),
         # TASK-497: list markers, flow-mapping pairs, and a block value under a secret key.
-        "list marker run": "- " * 200_000 + "token: x",
-        "flow pair flood": "{" + ", token: a" * 50_000,
-        "unclosed flow quotes": "{" + ', token: "a' * 50_000,
-        "flow key run": "{," + "a" * 256_000,
-        "block opener spaces": "token: |" + " " * 128_000 + "x",
-        "block value lines": "token: |\n" + "  x\n" * 200_000,
+        "list marker run": (200_000, lambda n: "- " * n + "token: x"),
+        "flow pair flood": (50_000, lambda n: "{" + ", token: a" * n),
+        "unclosed flow quotes": (50_000, lambda n: "{" + ', token: "a' * n),
+        "flow key run": (256_000, lambda n: "{," + "a" * n),
+        "block opener spaces": (128_000, lambda n: "token: |" + " " * n + "x"),
+        "block value lines": (200_000, lambda n: "token: |\n" + "  x\n" * n),
         # TASK-536: a secret value that goes on past its line.
-        "flow value run-on lines": "env: {token:\n" + "  x\n" * 200_000,
-        "quoted value run-on lines": 'token: "x\n' + "  x\n" * 200_000,
-        "run-on openers": "env: {token:\n" * 50_000,
-        "node property run": "token: " + "& " * 128_000 + '"x',
+        "flow value run-on lines": (200_000, lambda n: "env: {token:\n" + "  x\n" * n),
+        "quoted value run-on lines": (200_000, lambda n: 'token: "x\n' + "  x\n" * n),
+        "run-on openers": (50_000, lambda n: "env: {token:\n" * n),
+        "node property run": (128_000, lambda n: "token: " + "& " * n + '"x'),
         # A secret flow pair after a closed or plain secret value on the same line.
-        "closed quote then pairs": 'token: "x"' + ", password: 'y'" * 40_000,
-        "plain value then pairs": "token: x" + ", password: y" * 40_000,
+        "closed quote then pairs": (40_000, lambda n: 'token: "x"' + ", password: 'y'" * n),
+        "plain value then pairs": (40_000, lambda n: "token: x" + ", password: y" * n),
     }
-    for label, payload in shapes.items():
+
+    def timed(payload: str) -> float:
         start = time.perf_counter()
         cw.redact_secret_lines(payload)
-        elapsed = time.perf_counter() - start
-        assert elapsed < 2.0, f"{label} took {elapsed:.2f}s — quadratic behaviour is back"
+        return time.perf_counter() - start
+
+    def ratio_of(small_payload: str, large_payload: str) -> tuple[float, float]:
+        # Small and large runs alternate, so a load change on a shared CI runner hits both.
+        small = timed(small_payload)
+        large = timed(large_payload)
+        assert large < 30.0, f"{label} took {large:.2f}s — quadratic behaviour is back"
+        # The 2 ms floor keeps a near-zero denominator from inflating the ratio.
+        return large / max(small, 0.002), large
+
+    for label, (full, make) in shapes.items():
+        small_payload, large_payload = make(full // 4), make(full)
+        # A real quadratic fails every attempt; a load spike does not. One interleaved pair
+        # decides a passing shape, so a green run costs about what the old single run did.
+        # A full-size run under 50 ms passes whatever its ratio: three shapes run their
+        # small size under the 2 ms floor ("internal whitespace run", "block opener spaces",
+        # "flow key run"), so on a loaded runner their ratio only measures the large run.
+        # Every quadratic this test records cost seconds at these sizes.
+        ratios = []
+        for _ in range(3):
+            ratio, large = ratio_of(small_payload, large_payload)
+            ratios.append(ratio)
+            if ratio < 9.0 or large < 0.05:
+                break
+        else:
+            pytest.fail(f"{label}: 4x the input cost {min(ratios):.1f}x on 3 tries — not linear")
 
 
 # --- TASK-449.6: the YAML 1.1 (PyYAML) vs YAML 1.2 (CLI) differences, at the shared seam ----
