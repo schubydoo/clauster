@@ -591,6 +591,8 @@ it does not try to inspect the files. Instead, it refuses `inherit` itself:
   own ceiling too. Clauster compares the resolved paths, so a `..` cannot borrow
   another project's ceiling, and a run in no project is refused. A deeper link, or a
   link outside `projects_root`, counts as the directory that it resolves to.
+  Clauster resolves the run's directory once and starts the resume in that resolved
+  directory, so a link that changes after the check does not move the resume.
 
 Claude Code ignores `bypassPermissions` in a project's `.claude/settings.json` and
 `.claude/settings.local.json` (the session starts in the default mode), so a value

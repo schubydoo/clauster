@@ -21,7 +21,8 @@ running ones (:func:`stop_background_job`). Conventions applied on the way in:
   the equivalent fields on ``/api/instances`` — the API is auth-gated and they
   are this job's own resume/cloud handles, not foreign secrets.
 * **PID-reuse defense** — a roster worker counts as alive only when the pid's
-  create-time matches the roster's ``procStart`` (jiffies), the same posture as
+  start time matches the roster's ``procStart`` (boot-relative jiffies, compared
+  exactly where ``/proc`` is readable), the same posture as
   :class:`~clauster.models.BridgePointer` liveness. Fail-closed: an unparsable
   ``procStart`` reads as not-alive rather than trusting a bare pid.
 """
@@ -46,7 +47,7 @@ from .claude_cli import resolve_binary
 from .claude_json import ClaudeJsonUnparseable
 from .config import INHERIT_PERMISSION_MODE
 from .models import BackgroundJob
-from .procutil import child_env, jiffies_to_epoch, proc_create_time
+from .procutil import child_env, is_live_process, jiffies_to_epoch, proc_start_ticks
 from .redact import redact_for_disk
 from .trust import trust_directory
 
@@ -123,24 +124,29 @@ def worker_alive(
 ) -> bool:
     """Whether a roster worker's pid is alive AND matches its recorded start time.
 
-    Fail-closed: a recycled pid (create-time mismatch), a dead/zombie pid, or an
+    Fail-closed: a recycled pid (start-time mismatch), a dead/zombie pid, or an
     unparsable ``procStart`` all read as not-alive — never trust a bare pid.
     (Unlike ``procutil.is_live_bridge`` there is no cmdline shape to fall back
     on for these workers, so the start-time match is the only trust signal.)
+
+    ``procStart`` is the boot-relative tick count (``/proc/<pid>/stat`` field 22), so it is
+    handed to :func:`~clauster.procutil.is_live_process` as ``start_ticks``: where the live
+    ticks are readable (Linux) they must match **exactly**, with the epoch demoted to the
+    coarse "same boot?" bound. Comparing epochs instead let an NTP correction read a live
+    worker as gone, which also made the stop path refuse to signal it (TASK-504, the
+    ``#1399`` shape). Elsewhere the epoch keeps the ``tolerance`` bound.
     """
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
-        return False
-    created = proc_create_time(pid)
-    if created is None:
         return False
     try:
         jiffies = int(str(proc_start))
     except (TypeError, ValueError):
         return False
-    expected = jiffies_to_epoch(jiffies)
-    if expected is None:
+    if proc_start_ticks(pid) is None and jiffies_to_epoch(jiffies) is None:
+        # Neither half is comparable: is_live_process would answer on alive alone.
         return False
-    return abs(created - expected) <= tolerance
+    # str(): an int proc_start would read as an epoch in is_live_process, not as ticks.
+    return is_live_process(pid, str(jiffies), tolerance=tolerance, start_ticks=jiffies)
 
 
 def _job_from_state(job_id: str, data: dict, workers: dict[str, dict]) -> BackgroundJob:
@@ -273,7 +279,7 @@ def build_dispatch_argv(
     *,
     rc_name: str | None = None,
     model: str | None = None,
-    permission_mode: str | None = None,
+    permission_mode: str,
     prompt: str | None = None,
     resume: str | None = None,
 ) -> list[str]:
@@ -289,6 +295,10 @@ def build_dispatch_argv(
     ``--permission-mode`` (#1231): the dashboard's per-project picker feeds both the
     bridge launch and this background dispatch, so the sentinel has to be honored here
     too rather than handed to ``claude`` as a bogus mode string.
+
+    ``permission_mode`` is keyword-required with no default (TASK-481): the sentinel is the
+    only way to get the no-flag argv, so a caller that forgets the mode is a type error
+    rather than a silent ``inherit`` that skipped the caller's ceiling check.
     """
     argv = [binary, "--bg"]
     if resume:
@@ -297,7 +307,7 @@ def build_dispatch_argv(
         argv += ["--rc", rc_name]
     if model:
         argv += ["--model", model]
-    if permission_mode and permission_mode != INHERIT_PERMISSION_MODE:
+    if permission_mode != INHERIT_PERMISSION_MODE:
         argv += ["--permission-mode", permission_mode]
     if prompt:
         # `--` end-of-options separator (verified honored by `claude --bg`): a
@@ -313,7 +323,7 @@ def dispatch_background_job(
     prompt: str | None = None,
     rc_name: str | None = None,
     model: str | None = None,
-    permission_mode: str | None = None,
+    permission_mode: str,
     binary: str = "claude",
     claude_json: Path | None = None,
     timeout: float = _DISPATCH_TIMEOUT,
@@ -346,10 +356,13 @@ def dispatch_background_job(
         raise DispatchError(f"dispatch cwd is not a directory: {cwd}")
     if prompt is not None and not isinstance(prompt, str):
         raise DispatchError(f"invalid prompt: {prompt!r}")
-    flag_values = (("rc name", rc_name), ("model", model), ("permission mode", permission_mode))
-    for label, value in flag_values:
+    for label, value in (("rc name", rc_name), ("model", model)):
         if value is not None and not _flag_value_ok(value):
             raise DispatchError(f"invalid {label}: {value!r}")
+    # No `is not None` escape for the mode (TASK-481): a None at runtime would build the
+    # no-flag argv, which is `inherit` without the caller's ceiling check. Fail closed.
+    if not _flag_value_ok(permission_mode):
+        raise DispatchError(f"invalid permission mode: {permission_mode!r}")
     # The resume arg is a session UUID, not a flag value: validate it to the RFC-4122
     # shape (the 8-hex job-id guard would reject it) so it can't smuggle an argv flag.
     if resume is not None and not valid_session_id(resume):
@@ -465,10 +478,11 @@ def resume_background_job(
     because a resume with no mode would pass no ``--permission-mode`` flag, which is
     the ``inherit`` argv: a ``bypassPermissions`` default in user or managed settings
     would take effect (TASK-335). ``refuse_cwd`` is the caller's ceiling check for the
-    job's recorded cwd: it returns a refusal detail, or ``None`` to allow.
+    job's recorded cwd, resolved once and then also the directory the dispatch runs in
+    (TASK-481): it returns a refusal detail, or ``None`` to allow.
 
     Fail-closed: a job that is still live, no longer exists, has no recorded session
-    UUID, or has no cwd raises :class:`ResumeError` rather than dispatching a duplicate
+    UUID, or has no resolvable cwd raises :class:`ResumeError` rather than dispatching a duplicate
     or malformed resume, and a refused mode raises :class:`ResumeNotAllowed`.
     """
     job = next((j for j in list_background_jobs(jobs_dir, roster_json) if j.id == job_id), None)
@@ -482,11 +496,22 @@ def resume_background_job(
         raise ResumeError(f"job {job_id!r} has no resumable session id")
     if job.cwd is None:
         raise ResumeError(f"job {job_id!r} has no recorded working directory")
-    refusal = refuse_cwd(job.cwd)
+    # Resolve ONCE and use that one path for the ceiling check and the dispatch (TASK-481).
+    # Checking the resolved cwd but dispatching the recorded one let a symlink swapped in
+    # between move the job into a directory the check never saw. A NUL byte is refused up
+    # front because Windows' non-strict resolve() returns it unresolved instead of raising.
+    if "\x00" in str(job.cwd):
+        raise ResumeError(f"job {job_id!r} has an invalid working directory")
+    try:
+        cwd = job.cwd.resolve()
+    except (OSError, RuntimeError, ValueError) as exc:
+        # RuntimeError: a symlink loop on 3.11/3.12. ValueError: a path the OS rejects.
+        raise ResumeError(f"job {job_id!r} working directory cannot be resolved: {exc}") from exc
+    refusal = refuse_cwd(cwd)
     if refusal is not None:
         raise ResumeNotAllowed(refusal)
     return dispatch_background_job(
-        job.cwd,
+        cwd,
         resume=job.session_id,
         permission_mode=permission_mode,
         binary=binary,
