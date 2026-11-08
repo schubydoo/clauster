@@ -141,6 +141,12 @@ any, and shows `N checks passed` when every check passes. If the checks did not 
 That state is not a pass. Select the pill to see each check row and to run the checks
 again.
 
+Each project row has its own readiness pill for the checks of that project: trust,
+git, and MCP server approvals. The row shows no pill when every check passes, and
+`N checks` when a check warns. If the checks for the project did not run (an HTTP
+error, a failed or timed-out request, or an empty result), the row shows
+`Checks not run`. That state is not a pass. Select the pill to run the checks again.
+
 Checks:
 
 | Check | What it verifies | Failure vs warning |

@@ -2802,6 +2802,10 @@ def test_config_mgmt_mcp_approvals_round_trip(
     # The approvals panel now lists the committed server — approve it and save.
     browser.expect_visible('[data-test="cm-mcp-approvals"]')
     browser.expect_visible('[data-test="cm-mcp-approve-gizmo"]')
+    # TASK-493: the save row is hidden while nothing is dirty. Its x-show once sat on a
+    # .d-flex element, whose display:flex !important beat x-show's display:none.
+    browser.expect_hidden('[data-test="cm-mcp-approvals-confirm"]')
+    browser.expect_hidden('[data-test="cm-mcp-approvals-save"]')
     browser.click('[data-test="cm-mcp-approve-gizmo"]')
     # The confirm input + Save appear only once the toggle makes the panel dirty.
     browser.expect_visible('[data-test="cm-mcp-approvals-confirm"]')
@@ -2809,6 +2813,8 @@ def test_config_mgmt_mcp_approvals_round_trip(
     browser.expect_visible('[data-test="cm-mcp-approvals-save"]:not([disabled])')
     browser.click('[data-test="cm-mcp-approvals-save"]')
     browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
+    # A saved panel is clean again, so the row hides.
+    browser.expect_hidden('[data-test="cm-mcp-approvals-save"]')
 
     alpha_key = str(projects_root / "alpha")
     stored = json.loads(claude_json.read_text(encoding="utf-8"))
