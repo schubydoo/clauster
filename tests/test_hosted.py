@@ -6176,6 +6176,120 @@ async def test_a_shutdown_inside_the_reconnect_failure_hook_keeps_the_prompt_sto
     assert [e["request_id"] for e in store.load()[pid]["parked_requests"]] == ["perm-1"]
 
 
+def _stored_ids(store, pid):
+    return [e["request_id"] for e in (store.load()[pid].get("parked_requests") or [])]
+
+
+async def _parked_on_a_live_session(fake, store, client):
+    """A restored manager with one running session that waits on prompt perm-1."""
+    mgr = HostedManager(store)
+    await mgr.reattach_all(client)
+    pid = (await _spawn(mgr, client)).claustrum_process_id
+    queue = mgr.session(pid).subscribe()
+    await fake.emit(pid, "stdout", _parked_prompt("perm-1"))
+    await _drain_until(queue, "control_request")
+    return mgr, pid
+
+
+@pytest.mark.parametrize("then", ["stop", "forget", "kill"])
+async def test_a_stop_that_loses_the_daemon_keeps_the_prompt_until_a_kill(
+    fake_claustrum, tmp_path, monkeypatch, then
+):
+    # The stop's kill failed, so the agent may still wait on the prompt: it stays stored.
+    # A later Stop, Kill or Forget whose kill the daemon takes ends the agent and the copy.
+    store = HostedStateStore(tmp_path / "hosted_state.json")
+    fake = await fake_claustrum()
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        mgr, pid = await _parked_on_a_live_session(fake, store, client)
+        real_kill = client.kill
+
+        async def _no_kill(*_args, **_kwargs):
+            raise RpcError(-32603, "operation not permitted")
+
+        monkeypatch.setattr(client, "kill", _no_kill)
+        await mgr.stop(pid, connect=None)
+        assert mgr.session(pid).status == "error"
+        assert _stored_ids(store, pid) == ["perm-1"]
+        monkeypatch.setattr(client, "kill", real_kill)
+        if then == "stop":
+            await mgr.stop(pid, connect=_connect_to(client))
+        elif then == "kill":
+            await mgr.kill_orphan(pid, connect=_connect_to(client))
+        else:
+            await mgr.forget(pid, connect=_connect_to(client))
+        await mgr.persist()
+        assert pid not in store.load() or _stored_ids(store, pid) == []
+        await mgr.aclose()
+
+
+@pytest.mark.parametrize("kill_ok", [True, False])
+async def test_a_pump_failure_keeps_the_prompt_only_when_its_kill_fails(
+    fake_claustrum, tmp_path, monkeypatch, kill_ok
+):
+    store = HostedStateStore(tmp_path / "hosted_state.json")
+    fake = await fake_claustrum()
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        mgr, pid = await _parked_on_a_live_session(fake, store, client)
+        if not kill_ok:
+
+            async def _no_kill(*_args, **_kwargs):
+                raise RpcError(-32603, "operation not permitted")
+
+            monkeypatch.setattr(client, "kill", _no_kill)
+        _poison_redactor(monkeypatch)
+        await fake.emit(pid, "stdout", _POISON)
+        await wait_until(lambda: mgr.session(pid).status == "error")
+        await wait_until(mgr.session(pid)._pump_task.done)
+        await mgr.persist()
+        assert _stored_ids(store, pid) == ([] if kill_ok else ["perm-1"])
+        await mgr.aclose()
+
+
+@pytest.mark.parametrize("orphan", [False, True])
+async def test_a_rebind_that_finds_the_process_gone_names_the_prompt(
+    fake_claustrum, tmp_path, monkeypatch, orphan
+):
+    # Backend review catch: a reconnect whose daemon no longer has the process. The prompt
+    # is named on the row; it stays stored only when the agent survives as an orphan.
+    async def _is_orphan(_instance):
+        return orphan
+
+    monkeypatch.setattr(HostedManager, "_is_orphan", staticmethod(_is_orphan))
+    store = HostedStateStore(tmp_path / "hosted_state.json")
+    fake = await fake_claustrum()
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        mgr, pid = await _parked_on_a_live_session(fake, store, client)
+        await mgr.persist()
+        async with _dropped(fake, client) as fresh:
+            fake.forget(pid)
+            await mgr.rebind_all(fresh)
+            row = mgr.get_instance(pid)
+            assert "Bash (request perm-1)" in (row.error_detail or "")
+            assert _stored_ids(store, pid) == (["perm-1"] if orphan else [])
+        await mgr.aclose()
+
+
+async def test_a_rebind_whose_kill_is_accepted_stores_no_prompt(fake_claustrum, tmp_path):
+    # The reattach over the new connection fails, and the daemon takes the kill: the agent
+    # is ended, so its prompt is not kept.
+    async def _refuse(*_args, **_kwargs):
+        raise RpcError(-32602, "Invalid params")
+
+    store = HostedStateStore(tmp_path / "hosted_state.json")
+    fake = await fake_claustrum()
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        mgr, pid = await _parked_on_a_live_session(fake, store, client)
+        await mgr.persist()
+        async with _dropped(fake, client) as fresh:
+            fresh.reattach = _refuse
+            await mgr.rebind_all(fresh)
+            assert {"id": pid, "signal": "KILL"} in fake.killed
+            assert mgr.get_instance(pid).status is InstanceStatus.ERROR
+            assert _stored_ids(store, pid) == []
+            assert pid not in mgr._unrestored and pid not in mgr._reattach_retry
+        await mgr.aclose()
+
+
 @pytest.mark.parametrize("seed", ["starting", "running"])
 async def test_kill_of_a_starting_or_running_row_without_a_session_is_refused(
     fake_claustrum, monkeypatch, seed

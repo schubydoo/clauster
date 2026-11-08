@@ -1665,6 +1665,7 @@ class HostedManager:
         if old.status == InstanceStatus.ERROR:
             await self._end_error_agent(client, hosted_id, action="resume")
             await self._kill_agent_by_pid(old)  # an agent the connected daemon lost
+            self._drop_stored_prompts(hosted_id)  # also if the spawn below fails
         # Spawn the fresh process FIRST, without persisting — a spawn failure then
         # leaves the dead row untouched and retryable.
         instance = await self._spawn_session(
@@ -1774,11 +1775,19 @@ class HostedManager:
             ) from exc
         await self._end_error_agent(client, key, action=action)
         await self._kill_agent_by_pid(instance)
-        # The agent is ended, so it waits on nothing: its stored prompts go too.
+        self._drop_stored_prompts(key)
+
+    def _drop_stored_prompts(self, key: str) -> None:
+        """Forget the prompts an ended agent waited on, so no persist stores them again.
+
+        Called right after a confirmed kill of an ERROR row's agent (TASK-537, 539): it
+        waits on nothing now, and its unredacted input must not stay in the store.
+        """
         session = self._sessions.get(key)
         if session is not None:
             session.lost_requests = ()
         self._unrestored.pop(key, None)
+        self._reattach_retry.pop(key, None)  # ended: nothing left to reattach either
 
     @staticmethod
     async def _kill_agent_by_pid(instance: RemoteControlInstance) -> None:
@@ -2053,9 +2062,8 @@ class HostedManager:
                         instance,
                         history_for=history_for,
                         lost=lost,
-                        # Empty today: a row in the retry set carries its prompts on
-                        # ``lost``. Passed anyway, so a later change that leaves both
-                        # set merges them rather than dropping one.
+                        # A retired row can hold the same prompts here and on ``lost``
+                        # (_retire_lost keeps both); the merge removes the duplicates.
                         stored=self._unrestored.get(process_id, ()),
                     )
                 except Exception:
@@ -2471,6 +2479,11 @@ class HostedManager:
                     await self._retire_lost(
                         key, session, instance, _RECONNECT_LOST_DETAIL, probe_orphan=True
                     )
+                    # As a restart's not-found row does (TASK-537): name the prompts, and
+                    # keep them stored only for an orphan, whose agent may still wait.
+                    self._name_unrestored(instance, session.lost_requests)
+                    if not instance.is_orphan:
+                        self._unrestored.pop(key, None)
                 elif self._closing:
                     # aclose() detached the sessions while this reattach was in flight; the
                     # pump rebind() just started must not outlive the shutdown.
