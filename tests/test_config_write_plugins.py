@@ -2758,7 +2758,8 @@ def test_cli_list_offered_plugins_masks_marketplace_text(tmp_path: Path) -> None
 
 def test_cli_list_offered_plugins_cuts_long_description_after_masking(tmp_path: Path) -> None:
     # The secret straddles the cut: masked first, so no part of it survives.
-    text = "x" * (plugins.OFFERED_TEXT_MAX - 10) + " https://u:sk-live-cut@h/r.git" + "y" * 5000
+    # The cut falls inside `sk-live-cut`, before the `@` the line redaction keys on.
+    text = "x" * (plugins.OFFERED_TEXT_MAX - 20) + " https://u:sk-live-cut@h/r.git" + "y" * 5000
     payload = {
         "available": [{"pluginId": "long@probe", "description": text, "marketplaceName": "probe"}]
     }
@@ -2767,6 +2768,39 @@ def test_cli_list_offered_plugins_cuts_long_description_after_masking(tmp_path: 
     assert len(entry["description"]) == plugins.OFFERED_TEXT_MAX + 1
     assert entry["description"].endswith("…")
     assert "sk-live" not in entry["description"]
+
+
+def test_cli_list_offered_plugins_empty_available_is_a_real_answer(tmp_path: Path) -> None:
+    # Every plugin of the marketplace is installed for this cwd: `available` is empty.
+    payload = {"available": [], "installed": [{"id": "a@probe", "version": "1"}]}
+    run, _calls = _fake_run(rc=0, stdout=json.dumps(payload))
+    out = plugins.cli_list_offered_plugins(str(FAKE_CLAUDE), tmp_path, "probe", run=run)
+    assert out == [_offered("a@probe", "1", installed=True)]
+
+
+def test_cli_list_offered_plugins_lone_surrogate_cannot_500(
+    write_config, tmp_path, projects_root, monkeypatch
+) -> None:
+    # `\udc00` is valid JSON text, but the response cannot encode it (backend review).
+    raw = '{"available": [{"pluginId": "s@probe", "marketplaceName": "probe", '
+    raw += '"description": "a\\udc00b", "version": "\\ud800"}]}'
+    monkeypatch.setenv("FAKE_CLAUDE_PLUGIN_AVAILABLE_STDOUT", raw)
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.get(
+            "/api/config-write/marketplaces/offered?scope=project&project=alpha&marketplace=probe"
+        )
+    assert resp.status_code == 200
+    [entry] = resp.json()["plugins"]
+    assert entry["description"] == "a?b"
+    assert entry["version"] == "?"
+
+
+def test_cli_list_offered_plugins_sorts_by_shown_name(tmp_path: Path) -> None:
+    ids = ["ab@probe", "a_b@probe", "a@probe", "a0@probe", "a.b@probe", "a-b@probe"]
+    payload = {"available": [{"pluginId": i, "marketplaceName": "probe"} for i in ids]}
+    run, _calls = _fake_run(rc=0, stdout=json.dumps(payload))
+    out = plugins.cli_list_offered_plugins(str(FAKE_CLAUDE), tmp_path, "probe", run=run)
+    assert [p["name"] for p in out] == sorted(i.split("@")[0] for i in ids)
 
 
 def test_cli_list_offered_plugins_row_names_the_id_it_installs(tmp_path: Path) -> None:

@@ -732,11 +732,12 @@ def _offered_text(value: Any) -> str:
     """Return ``value`` masked line by line and then cut, when it is a string, else ``""``.
 
     Masked BEFORE the cut, as in :func:`_names_text`: a cut inside a credential URL would
-    drop the part the line redaction keys on.
+    drop the part the line redaction keys on. A lone surrogate (a ``udc00`` escape in the
+    JSON) becomes ``?``: the JSON response cannot encode it, so it raised a 500.
     """
     if not isinstance(value, str):
         return ""
-    masked = cw.redact_secret_lines(value)
+    masked = cw.redact_secret_lines(value).encode("utf-8", "replace").decode("utf-8")
     return masked if len(masked) <= OFFERED_TEXT_MAX else masked[:OFFERED_TEXT_MAX] + "…"
 
 
@@ -820,7 +821,10 @@ def cli_list_offered_plugins(
             "version": _offered_text(e["version"]),
             "installed": e["installed"],
         }
-        for plugin_id, e in sorted(out.items(), key=lambda item: item[0].lower())
+        # By the shown name, then the id as a fixed tie-break for names that differ in case.
+        for plugin_id, e in sorted(
+            out.items(), key=lambda item: (item[0][: -len(suffix)].lower(), item[0])
+        )
     ]
     return redact_plugin_display(shown)
 

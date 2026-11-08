@@ -169,7 +169,8 @@ Common mechanics across the modal:
   skills folder.
 - **Typed confirmation** — every document save asks you to type the scope
   name; destructive list actions (delete, reset, plugin install) have their
-  own typed confirms.
+  own typed confirms. An install from a marketplace's list is the exception, see
+  [Plugins and marketplaces](#plugins-and-marketplaces).
 - **Secret masking** — the Settings, MCP, Hooks, Subagents, and Skills
   surfaces, and the `autoMode` box and read-only view on the Permissions tab,
   mask secret-shaped values on read. The MCP surface also masks every `env`
@@ -961,30 +962,33 @@ The scope rules and the update results below were checked against Claude Code
   scope. A plugin that the project enables cannot be disabled at user scope. To
   turn it off for yourself only, disable it at the Local scope.
 - **One typed confirm covers a series of Enable, Disable and Update clicks.**
-  After an Enable, Disable or Update (of a plugin or a marketplace), the scope
+  The confirm is the scope name that you type at the top of the tab to arm its
+  actions. After an Enable, Disable or Update (of a plugin or a marketplace), the
   confirm stays typed, so you can change several plugins in a row. Install,
   Uninstall, and marketplace Add and Remove need the confirm typed again. After
-  one of them, the confirm box is empty. A change of scope, project or tab, or
-  closing the editor, also clears the confirm. The server checks the confirm on
-  every request.
+  one of them, the confirm box is empty.
+- **A change of scope, project or tab clears the confirm.** Closing the editor
+  clears it too. The server checks the confirm on every request.
 - **Each marketplace row shows the source type and its location**, for example
   `github · owner/repo`. A URL that carries a user name or password, such as
   `https://user:token@host/repo.git`, shows as `********`.
 - **Show plugins lists the plugins that a marketplace offers.** Clauster runs
   `claude plugin list --available --json` from the directory of the scope that
-  you chose, and shows the plugins of that one marketplace. Each plugin shows its
-  version and description when the marketplace gives them. A plugin that is
-  installed for that directory is marked `installed`. A plugin that is installed
-  only in another project shows an Install button, because Claude Code offers it
-  again here. A marketplace with no plugins, or a failed read, shows a message.
-  The descriptions and versions are marketplace text. Clauster masks them as it
-  masks other CLI output, cuts a description after 500 characters, and shows
-  them as text, never as HTML. Each row shows the name part of the plugin id
-  that its Install button installs. Clauster leaves out an entry whose id is not
-  a valid plugin id of that marketplace. This list was checked against Claude
-  Code 2.1.319.
+  you chose. At User scope, that is the home directory of the user that runs
+  Clauster. The list shows the plugins of that one marketplace, with the version
+  and description that the marketplace gives. A plugin that is installed for that
+  directory is marked `installed`. It shows the installed version and no
+  description. A plugin that is installed only in another project shows an
+  Install button, because Claude Code offers it again here. A marketplace with no
+  plugins, or a failed read, shows a message.
+- **The list masks marketplace text.** Clauster masks each description and
+  version as it masks other CLI output. It cuts a description or a version after
+  500 characters, and shows the text as text, never as HTML. Each row shows the
+  name part of the plugin id that its Install button installs. Clauster leaves
+  out an entry whose id is not a valid plugin id of that marketplace. This list
+  was checked against Claude Code 2.1.319.
 - **Install from that list does not ask you to retype the plugin id.** The id
-  comes from the CLI's own list. The install still needs the scope confirm typed
+  comes from the CLI's own list. The install still needs the confirm typed
   again, and it runs the same `claude plugin install <id> --scope <scope>`
   command as the install form. The install form, where you type the id, still
   asks you to retype it.

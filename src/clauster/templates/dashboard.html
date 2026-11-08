@@ -3721,7 +3721,7 @@
                                 <template x-if="!p.installed">
                                   <button type="button" class="btn btn-sm btn-primary flex-shrink-0" :data-test="'cm-offered-install-' + p.id"
                                           :aria-label="'Install ' + p.id"
-                                          :disabled="!configMgmtCanPluginActFresh()" @click="configMgmtInstallOffered(p, m.name)">Install</button>
+                                          :disabled="!configMgmtCanPluginActFresh() || configMgmtOffered(m.name).loading" @click="configMgmtInstallOffered(p, m.name)">Install</button>
                                 </template>
                               </div>
                             </li>

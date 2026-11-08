@@ -4588,7 +4588,8 @@
       configMgmtOfferedStatus(name) {
         const o = this._offeredFor(name);
         if (!o || !o.open) return "";
-        if (o.loading) return "Reading the plugins " + name + " offers.";
+        // A refresh keeps its rows on screen, so it says nothing until it has a result.
+        if (o.loading && !o.plugins.length) return "Reading the plugins " + name + " offers.";
         if (o.error) return o.error;
         const n = o.plugins.length;
         if (!n) return "This marketplace offers no plugins.";
@@ -4637,6 +4638,11 @@
       async configMgmtInstallOffered(p, market) {
         const c = this.configMgmt, pl = c.plugins;
         if (!this.configMgmtCanPluginActFresh() || p.installed) return;
+        if (this.configMgmtOffered(market).loading) return;  // its rows may be stale
+        // Safari and macOS Firefox do not focus a clicked button: move focus later only
+        // when this button held it.
+        const origin = document.activeElement;
+        const held = !!(origin && origin.dataset && origin.dataset.test === "cm-offered-install-" + p.id);
         await this._pluginActionPost(
           "/api/config-write/plugins/action",
           Object.assign(this._configMgmtTarget(), {
@@ -4645,14 +4651,15 @@
         );
         // The clicked button turns into the "installed" badge, which drops focus to <body>
         // and lets the next Tab leave the dialog: move it to this marketplace's toggle.
-        if (!c.open || c.surface !== "plugins" || !c.saved) return;
+        if (!held || !c.open || c.surface !== "plugins" || !c.saved) return;
         this.$nextTick(() => {
           const a = document.activeElement;
           if (a && a !== document.body) return;
           const t = document.querySelector(
             '[data-test="cm-market-offered-toggle-' + CSS.escape(market) + '"]',
           );
-          if (t) t.focus();
+          // No scroll: the "Saved." reveal (revealFeedback) must stay in view.
+          if (t) t.focus({ preventScroll: true });
         });
       },
       configMgmtInstallPlugin() {
