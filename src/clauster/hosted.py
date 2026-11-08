@@ -57,7 +57,7 @@ from .claustrum_client import (
     _Subscriber,
 )
 from .config import INHERIT_PERMISSION_MODE, PermissionMode
-from .hosted_events import GapRangeEvent, HostedEvent, StdinFrame
+from .hosted_events import GapRangeEvent, HostedEvent, ReattachedEvent, StdinFrame
 from .models import (
     InstanceStatus,
     RemoteControlInstance,
@@ -239,12 +239,14 @@ class _LostRow:
     agent, so it still waits on them, and the replay does not send them again (the
     cursor is past them). ``event_seq`` is the retired session's last event number,
     so a browser that reopens the view with ``?after=`` that number still sees the
-    new session's events.
+    new session's events. ``retired`` is that session itself, whose open viewers a
+    successful retry tells to reconnect (:meth:`HostedSession.notify_replaced`).
     """
 
     client: ClaustrumClient
     requests: tuple[_ControlRequest, ...] = ()
     event_seq: int = 0
+    retired: HostedSession | None = None
 
 
 class HostedSession:
@@ -596,6 +598,19 @@ class HostedSession:
         for parked in requests:
             if parked.request_id not in self._pending:
                 self._park(parked)
+
+    def notify_replaced(self) -> None:
+        """Tell this retired session's open viewers to reconnect (TASK-526).
+
+        A retry reattached the agent under a new session, but an open view still
+        reads this session's queue, and its ``lost`` event marked the view as ended.
+        The ``reattached`` event goes to each queue directly, not through
+        :meth:`_emit`: it has no ``event_seq``, so the viewer reconnects from this
+        session's last event, which is where the new session's numbering continues.
+        """
+        event: ReattachedEvent = {"type": "reattached"}
+        for sub in self._subscribers:
+            sub.offer(event)
 
     def _drop_subscription(self) -> None:
         """Release the stream subscription for a start/reattach that will never pump."""
@@ -2034,6 +2049,7 @@ class HostedManager:
                     client,
                     lost.requests if lost else (),
                     lost.event_seq if lost else 0,
+                    lost.retired if lost else None,
                 )
                 return
             self._reattach_retry.pop(process_id, None)
@@ -2062,6 +2078,10 @@ class HostedManager:
             instance.error_detail = None
             if session.status == InstanceStatus.RUNNING:
                 session.repark(lost.requests)
+            if lost.retired is not None:
+                # Last, once the new session holds its prompts: an open view of the
+                # retired session reconnects to this one (Greptile on PR 1854).
+                lost.retired.notify_replaced()
         if self._closing:
             # aclose() ran while this reattach was in flight (a hook-run pass): the
             # pump it just started must not outlive the shutdown.
@@ -2257,7 +2277,7 @@ class HostedManager:
     @staticmethod
     def _lost_row(client: ClaustrumClient, session: HostedSession) -> _LostRow:
         """Build the retry entry of a retired ``session`` lost on ``client`` (TASK-526)."""
-        return _LostRow(client, session.lost_requests, session.event_seq)
+        return _LostRow(client, session.lost_requests, session.event_seq, session)
 
     async def _retire_lost(
         self,

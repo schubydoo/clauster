@@ -5624,3 +5624,43 @@ async def test_a_retried_orphan_that_reattaches_reads_running_again(fake_claustr
             assert row.status is InstanceStatus.RUNNING
             assert not row.is_orphan and row.error_detail is None
             await mgr.stop(pid)
+
+
+async def test_an_open_view_of_a_lost_session_is_told_to_reconnect(fake_claustrum):
+    # The browser's socket reads the retired session's queue, and the `lost` event ended
+    # the view (Greptile on PR 1854). When a retry brings the agent back, that queue gets
+    # one `reattached` event so the view reconnects to the new session. Here the row is
+    # lost twice: the first retry times out on a slow connection, and the entry must
+    # still carry the prompt, the numbering and the viewers to the third connection.
+    async with _manager(fake_claustrum) as (fake, client, mgr):
+        pid = (await _spawn(mgr, client)).claustrum_process_id
+        old = mgr.session(pid)
+        view = old.subscribe()  # what ws_hosted holds for an open View
+        await fake.emit(pid, "stdout", _parked_prompt("perm-1"))
+        await _drain_until(view, "control_request")
+        await client.close()
+        await mgr.fail_unreachable("claustrum daemon connection lost and the reconnect failed")
+        await _drain_until(view, "lost")
+        last_seen = old.event_seq
+        fake.fail_after["process.reattach"] = (0, "hang")
+        async with ClaustrumClient(fake.socket_path, fake.token) as slow:
+            slow._request_timeout = 0.3
+            await mgr.on_connected(slow, history_for=None)
+        assert view.empty()  # nothing came back yet, so no reconnect is asked for
+        assert mgr.get_instance(pid).status is not InstanceStatus.RUNNING
+        fake.fail_after.clear()
+        async with ClaustrumClient(fake.socket_path, fake.token) as again:
+            await mgr.on_connected(again, history_for=None)
+            event = await asyncio.wait_for(view.get(), timeout=1.0)
+            assert event == {"type": "reattached"}  # no event_seq: the cursor stays put
+            new = mgr.session(pid)
+            assert new is not old and new.status == "running"
+            # The view reconnects with ?after=<its last seq> and finds the prompt.
+            reopened = new.subscribe(after_seq=last_seen)
+            requests = []
+            while not reopened.empty():
+                e = reopened.get_nowait()
+                if e["type"] == "control_request":
+                    requests.append(e["request_id"])
+            assert requests == ["perm-1"]
+            await mgr.stop(pid)

@@ -6884,6 +6884,14 @@
       _renderHostedEvent(id, e) {
         const v = this.hostedView[id];
         if (!v) return;
+        // A lost session's agent runs again under a new session (TASK-526). This socket
+        // still streams the retired one, whose `lost` frame ended the view: reconnect.
+        // openHosted clears `ended` and resumes from lastSeq, where the new session's
+        // numbering continues, so the event carries no event_seq on purpose.
+        if (e.type === "reattached") {
+          if (v.open) this.openHosted(id);
+          return;
+        }
         if (typeof e.event_seq === "number") { v.lastSeq = e.event_seq; v.connLost = false; }
         // A terminal frame means the session is over: gate the composer and stop the
         // reconnect loop (its renderable marker/error item still gets pushed below).

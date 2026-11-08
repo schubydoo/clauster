@@ -140,6 +140,18 @@ class ExitEvent(TypedDict):
     exit_code: int | None
 
 
+class ReattachedEvent(TypedDict):
+    """A lost session's agent runs again under a new session (TASK-526).
+
+    Sent to the open viewers of the retired session, whose stream ended with a
+    ``lost`` event, so that they reconnect to the new one. It carries no
+    ``event_seq`` and is not in the ring: the viewer's ``?after=`` cursor stays at
+    the retired session's last event, where the new session's numbering continues.
+    """
+
+    type: Literal["reattached"]
+
+
 #: Payloads accepted by ``HostedSession._emit`` (before it stamps ``event_seq``).
 #: ``GapRangeEvent`` is in the union because ``reattach`` emits one for an evicted
 #: daemon replay range (#1175); ``subscribe`` still offers its own directly to the
