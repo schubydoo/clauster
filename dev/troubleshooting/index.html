@@ -3074,12 +3074,22 @@ restarted and lost it. In the other two cases the daemon did not answer, or
 Clauster could not reach or start a daemon. Read <code>daemon.log</code> in the <code>claustrum/</code>
 directory under <code>state_dir</code> for the reason that the daemon gives.</p>
 <p>A card with the orange <code>orphan</code> badge instead means that the <code>claude</code> process
-still runs without a daemon session. Its text says <code>survived a daemon restart</code>,
-also when only the connection was lost.</p>
+still runs, but Clauster could not reattach it. Its text says
+<code>still running, but Clauster could not reattach it</code>. The cause can be a daemon
+restart, a dropped connection or a request that timed out.</p>
+<p>If only the connection was lost, Clauster reattaches the session again over the
+next daemon connection. If the daemon still has the process, the card shows
+<code>Running</code> again. After <code>the reconnect failed</code>, that next connection comes only
+when you start a new Direct Session, or use Resume or Restart on a Direct
+Session. See
+<a href="../concepts/how-it-works/#when-the-daemon-connection-drops">When the daemon connection drops</a>
+for each case.</p>
 <p>The transcript is not lost. If the card offers <strong>Resume</strong>, use it to continue the
 conversation in a new agent. If it offers <strong>Kill</strong>, the old <code>claude</code> process is
-still running: kill it first. Before you resume after <code>the reconnect failed</code>,
-make sure that the old <code>claude</code> process is not still running on the host.</p>
+still running: kill it first. Resume on an <code>Error</code> card first ends the old agent
+through the daemon. If the daemon refuses or does not answer that kill, Resume
+refuses with <code>cannot resume: the old agent may still be running</code>. Read
+<code>daemon.log</code> for the reason, and try again.</p>
 <h2 id="getting-more-detail">Getting more detail<a class="headerlink" href="#getting-more-detail" title="Permanent link">&para;</a></h2>
 <h3 id="raising-the-log-level">Raising the log level<a class="headerlink" href="#raising-the-log-level" title="Permanent link">&para;</a></h3>
 <blockquote>
