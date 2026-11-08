@@ -2722,9 +2722,10 @@ def test_cli_list_offered_plugins_marketplace_with_none_is_empty(tmp_path: Path)
     assert plugins.cli_list_offered_plugins(str(FAKE_CLAUDE), tmp_path, "nothing", run=run) == []
 
 
-def test_cli_list_offered_plugins_empty_stdout_is_empty(tmp_path: Path) -> None:
-    run, _calls = _fake_run(rc=0, stdout="")
-    assert plugins.cli_list_offered_plugins(str(FAKE_CLAUDE), tmp_path, "probe", run=run) == []
+def test_cli_list_offered_plugins_without_installed_key_is_ok(tmp_path: Path) -> None:
+    run, _calls = _fake_run(rc=0, stdout=json.dumps({"available": _AVAILABLE["available"]}))
+    out = plugins.cli_list_offered_plugins(str(FAKE_CLAUDE), tmp_path, "probe", run=run)
+    assert [p["id"] for p in out] == ["beta@probe", "elsewhere@probe", "zeta@probe"]
 
 
 def test_cli_list_offered_plugins_masks_marketplace_text(tmp_path: Path) -> None:
@@ -2733,20 +2734,56 @@ def test_cli_list_offered_plugins_masks_marketplace_text(tmp_path: Path) -> None
         "available": [
             {
                 "pluginId": "leaky@probe",
-                "name": "leaky ${SECRET_NAME}",
+                "name": "leaky",
                 "description": "clone https://user:sk-live-123@host/repo.git\ntoken: sk-live-456",
+                "version": "1.0\ntoken: sk-live-999",
+                "marketplaceName": "probe",
+            },
+            {
+                "pluginId": "interp@probe",
+                "description": "${DESC_TOKEN}",
                 "version": "${VERSION_TOKEN}",
                 "marketplaceName": "probe",
-            }
+            },
         ],
     }
     run, _calls = _fake_run(rc=0, stdout=json.dumps(payload))
-    [entry] = plugins.cli_list_offered_plugins(str(FAKE_CLAUDE), tmp_path, "probe", run=run)
-    shown = json.dumps(entry)
-    for secret in ("sk-live-123", "sk-live-456", "SECRET_NAME", "VERSION_TOKEN"):
+    out = plugins.cli_list_offered_plugins(str(FAKE_CLAUDE), tmp_path, "probe", run=run)
+    shown = json.dumps(out)
+    for secret in ("sk-live-123", "sk-live-456", "sk-live-999", "DESC_TOKEN", "VERSION_TOKEN"):
         assert secret not in shown
-    assert cw.REDACTION_SENTINEL in entry["description"]
-    assert entry["id"] == "leaky@probe"
+    assert all(cw.REDACTION_SENTINEL in p["description"] for p in out)
+    assert [p["id"] for p in out] == ["interp@probe", "leaky@probe"]
+
+
+def test_cli_list_offered_plugins_cuts_long_description_after_masking(tmp_path: Path) -> None:
+    # The secret straddles the cut: masked first, so no part of it survives.
+    text = "x" * (plugins.OFFERED_TEXT_MAX - 10) + " https://u:sk-live-cut@h/r.git" + "y" * 5000
+    payload = {
+        "available": [{"pluginId": "long@probe", "description": text, "marketplaceName": "probe"}]
+    }
+    run, _calls = _fake_run(rc=0, stdout=json.dumps(payload))
+    [entry] = plugins.cli_list_offered_plugins(str(FAKE_CLAUDE), tmp_path, "probe", run=run)
+    assert len(entry["description"]) == plugins.OFFERED_TEXT_MAX + 1
+    assert entry["description"].endswith("…")
+    assert "sk-live" not in entry["description"]
+
+
+def test_cli_list_offered_plugins_row_names_the_id_it_installs(tmp_path: Path) -> None:
+    # The list installs without a retype, so a row's label is its own id's name part, and
+    # an id that is not a valid id of this marketplace is never offered (backend review).
+    payload = {
+        "installed": [{"id": "${TOK}@probe"}, {"id": "-evil@probe"}],
+        "available": [
+            {"pluginId": "evil@other", "name": "trusted", "marketplaceName": "probe"},
+            {"pluginId": "real@probe", "name": "trusted", "marketplaceName": "probe"},
+            {"pluginId": "${TOK}@probe", "name": "masked", "marketplaceName": "probe"},
+            {"pluginId": "a@b@probe", "marketplaceName": "probe"},
+        ],
+    }
+    run, _calls = _fake_run(rc=0, stdout=json.dumps(payload))
+    out = plugins.cli_list_offered_plugins(str(FAKE_CLAUDE), tmp_path, "probe", run=run)
+    assert out == [_offered("real@probe", installed=False)]
 
 
 def test_cli_list_offered_plugins_skips_malformed_entries(tmp_path: Path) -> None:
@@ -2762,7 +2799,7 @@ def test_cli_list_offered_plugins_skips_malformed_entries(tmp_path: Path) -> Non
     }
     run, _calls = _fake_run(rc=0, stdout=json.dumps(payload))
     out = plugins.cli_list_offered_plugins(str(FAKE_CLAUDE), tmp_path, "probe", run=run)
-    assert out == [{**_offered("x@probe", installed=False), "name": "x@probe"}]
+    assert out == [_offered("x@probe", installed=False)]
 
 
 def test_cli_list_offered_plugins_rejects_bad_marketplace_before_spawn(tmp_path: Path) -> None:
@@ -2775,6 +2812,12 @@ def test_cli_list_offered_plugins_rejects_bad_marketplace_before_spawn(tmp_path:
 @pytest.mark.parametrize(
     "stdout",
     [
+        # Fail closed: no output, or no `available` list, is a CLI contract change, never
+        # "this marketplace offers no plugins" (backend review).
+        pytest.param("", id="empty"),
+        pytest.param("  \n", id="blank"),
+        pytest.param("{}", id="no-available"),
+        pytest.param('{"plugins": []}', id="renamed-key"),
         pytest.param("not json{{", id="invalid"),
         pytest.param("[]", id="list-not-object"),
         pytest.param('{"available": {}, "installed": []}', id="available-not-list"),

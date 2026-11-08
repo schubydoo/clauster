@@ -977,9 +977,12 @@ The scope rules and the update results below were checked against Claude Code
   installed for that directory is marked `installed`. A plugin that is installed
   only in another project shows an Install button, because Claude Code offers it
   again here. A marketplace with no plugins, or a failed read, shows a message.
-  The names and descriptions are marketplace text. Clauster masks them as it
-  masks other CLI output, and shows them as text, never as HTML. This list was
-  checked against Claude Code 2.1.319.
+  The descriptions and versions are marketplace text. Clauster masks them as it
+  masks other CLI output, cuts a description after 500 characters, and shows
+  them as text, never as HTML. Each row shows the name part of the plugin id
+  that its Install button installs. Clauster leaves out an entry whose id is not
+  a valid plugin id of that marketplace. This list was checked against Claude
+  Code 2.1.319.
 - **Install from that list does not ask you to retype the plugin id.** The id
   comes from the CLI's own list. The install still needs the scope confirm typed
   again, and it runs the same `claude plugin install <id> --scope <scope>`

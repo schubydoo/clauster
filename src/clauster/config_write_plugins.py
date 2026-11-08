@@ -723,9 +723,36 @@ def _list_marketplaces_raw(binary: str, cwd: Path, *, run: RunFn) -> list[Any]:
 # ---------------------------------------------------------------------------
 
 
+#: An offered plugin's description is cut after this many characters (after masking), so
+#: one marketplace cannot send megabytes of text to the browser.
+OFFERED_TEXT_MAX = 500
+
+
 def _offered_text(value: Any) -> str:
-    """Return ``value`` masked line by line when it is a string, else ``""``."""
-    return cw.redact_secret_lines(value) if isinstance(value, str) else ""
+    """Return ``value`` masked line by line and then cut, when it is a string, else ``""``.
+
+    Masked BEFORE the cut, as in :func:`_names_text`: a cut inside a credential URL would
+    drop the part the line redaction keys on.
+    """
+    if not isinstance(value, str):
+        return ""
+    masked = cw.redact_secret_lines(value)
+    return masked if len(masked) <= OFFERED_TEXT_MAX else masked[:OFFERED_TEXT_MAX] + "…"
+
+
+def _offered_id(value: Any, suffix: str) -> str | None:
+    """Return ``value`` when it is a valid plugin id of the marketplace ``suffix``, else None.
+
+    The id is what an install from the list sends, so it must be the id the row names: a
+    valid id (:func:`validate_plugin_id`) whose marketplace part is this marketplace.
+    """
+    if not isinstance(value, str) or not value.endswith(suffix):
+        return None
+    try:
+        validate_plugin_id(value)
+    except cw.InvalidCandidateError:
+        return None
+    return value
 
 
 def cli_list_offered_plugins(
@@ -735,66 +762,65 @@ def cli_list_offered_plugins(
 
     Reads ``claude plugin list --available --json`` from ``cwd`` (see the module
     docstring for its shape). The CLI leaves a plugin that is installed for ``cwd`` out of
-    ``available``, so such a plugin comes from ``installed`` instead (an id ending in
-    ``@<marketplace>``) and is marked ``installed``. A plugin installed only in another
-    project stays in ``available``, so it is offered as not installed, as the CLI sees it.
+    ``available``, so such a plugin comes from ``installed`` instead and is marked
+    ``installed``. A plugin installed only in another project stays in ``available``, so
+    it is offered as not installed, as the CLI sees it.
 
-    Each entry keeps only ``id``, ``name``, ``description``, ``version`` and
-    ``installed``: the ``source`` (a git url) is never needed to show or install the
-    plugin. Every text field is marketplace text, so it is masked line by line and then
-    structurally (:func:`redact_plugin_display`). A masked id fails
-    :func:`validate_plugin_id`, so an install from it fails closed. A failed or malformed
-    read raises :class:`PluginCliError`.
+    The dashboard installs from this list without a retype of the id, so the row's id and
+    label must be the plugin that installs. An entry is kept only when its id is a valid
+    plugin id that ends in ``@<marketplace>`` (:func:`_offered_id`), and its ``name`` is
+    the name part of that id, never the marketplace's own ``name`` text. Each entry keeps
+    only ``id``, ``name``, ``description``, ``version`` and ``installed``: the ``source``
+    (a git url) is not needed to show or install the plugin. The description and version
+    are marketplace text: masked line by line, cut (:data:`OFFERED_TEXT_MAX`), and then
+    masked structurally (:func:`redact_plugin_display`).
+
+    Fails closed: a failed run, empty output, output that is not an object with an
+    ``available`` list, or an ``installed`` that is not a list raises
+    :class:`PluginCliError`, never an empty list that reads as "offers no plugins".
     """
     validate_marketplace_name(marketplace)
     proc = _run(binary, ["list", "--available", "--json"], cwd=cwd, run=run)
     _raise_for_failure("list", "", proc)
     try:
-        data = json.loads(proc.stdout or "{}")
+        # No `or "{}"` fallback: empty output is a failure here, not an empty list.
+        data = json.loads(proc.stdout or "")
     except (ValueError, RecursionError) as exc:  # the same pair as cli_list_plugins
         raise PluginCliError(
             f"claude plugin list --available returned invalid JSON: {exc}"
         ) from exc
-    if not isinstance(data, dict):
-        raise PluginCliError("claude plugin list --available returned a non-object JSON value")
-    available, installed = data.get("available", []), data.get("installed", [])
-    if not isinstance(available, list) or not isinstance(installed, list):
-        raise PluginCliError("claude plugin list --available returned a non-list field")
+    if not isinstance(data, dict) or not isinstance(data.get("available"), list):
+        raise PluginCliError("claude plugin list --available returned no 'available' list")
+    installed = data.get("installed", [])
+    if not isinstance(installed, list):
+        raise PluginCliError("claude plugin list --available returned a non-list 'installed'")
+    suffix = "@" + marketplace
     out: dict[str, dict[str, Any]] = {}
-    for entry in available:
+    for entry in data["available"]:
         if not isinstance(entry, dict) or entry.get("marketplaceName") != marketplace:
             continue
-        plugin_id = entry.get("pluginId")
-        if not isinstance(plugin_id, str) or not plugin_id or plugin_id in out:
+        plugin_id = _offered_id(entry.get("pluginId"), suffix)
+        if plugin_id is None or plugin_id in out:
             continue
         out[plugin_id] = {
-            "id": plugin_id,
-            "name": entry.get("name") if isinstance(entry.get("name"), str) else plugin_id,
             "description": entry.get("description"),
             "version": entry.get("version"),
             "installed": False,
         }
-    suffix = "@" + marketplace
     for entry in installed:
-        plugin_id = entry.get("id") if isinstance(entry, dict) else None
-        if not isinstance(plugin_id, str) or not plugin_id.endswith(suffix) or plugin_id in out:
+        plugin_id = _offered_id(entry.get("id") if isinstance(entry, dict) else None, suffix)
+        if plugin_id is None or plugin_id in out:
             continue
-        out[plugin_id] = {
-            "id": plugin_id,
-            "name": plugin_id[: -len(suffix)] or plugin_id,
-            "description": None,
-            "version": entry.get("version"),
-            "installed": True,
-        }
+        out[plugin_id] = {"description": None, "version": entry.get("version"), "installed": True}
     shown = [
         {
-            "id": cw.redact_secret_lines(e["id"]),
-            "name": _offered_text(e["name"]),
+            "id": plugin_id,
+            "name": plugin_id[: -len(suffix)],
             "description": _offered_text(e["description"]),
             "version": _offered_text(e["version"]),
             "installed": e["installed"],
         }
-        for e in sorted(out.values(), key=lambda e: (str(e["name"]).lower(), e["id"]))
+        for plugin_id, e in sorted(out.items(), key=lambda item: item[0].lower())
     ]
     return redact_plugin_display(shown)
 
@@ -1189,7 +1215,12 @@ def require_install_confirm(plugin_id: str, supplied: object) -> None:
     must retype the **plugin id being installed**, not just the project/scope
     name. This makes the confirm specific to *what* is being introduced, not just
     *where*: a confirm typed for installing ``a@market`` can never be replayed to
-    silently install ``b@market`` instead. Raises :class:`fastapi.HTTPException`
+    silently install ``b@market`` instead. The dashboard's install form asks the
+    operator to retype the id. Its install from a marketplace's list (TASK-516, by the
+    maintainer's decision of 2026-11-07) sends the listed id here instead, so that the
+    row the operator clicked names the id: :func:`cli_list_offered_plugins` keeps only
+    rows whose label is the name part of their own valid id. This check is the same for
+    both. Raises :class:`fastapi.HTTPException`
     directly (400) — mirroring :func:`clauster.config_write.require_confirm`'s own
     contract exactly, so the route calls it unwrapped: after the base scope confirm
     and the op/plugin-id shape + candidate checks, and before any CLI dispatch.

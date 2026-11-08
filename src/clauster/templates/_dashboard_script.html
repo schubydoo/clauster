@@ -4373,8 +4373,9 @@
       // (open, scope, project, surface) passes none and clears the confirm. TASK-522:
       // after Enable, Disable or Update (of a plugin or a marketplace) the confirm stays
       // typed so a series of them needs one confirm; after any other action it clears.
-      // The server still checks the token on every request.
-      async _loadPlugins(myGen, afterOp) {
+      // The server still checks the token on every request. `refreshOffered` re-reads the
+      // open offered lists (TASK-516) after an action that can change them.
+      async _loadPlugins(myGen, afterOp, refreshOffered) {
         const c = this.configMgmt, pl = c.plugins;
         if (afterOp && this.configMgmtPluginArmedOps.includes(afterOp)) {
           pl.confirmSpent = true;
@@ -4400,11 +4401,14 @@
             const md = await mres.json();
             if (c.gen !== myGen) return;
             pl.marketplaces = md.marketplaces || [];
-            // After an action, re-read each open offered list (an install or uninstall
-            // changes what is marked installed) and drop the removed marketplaces' lists.
+            // Drop the removed marketplaces' lists. After an install, an uninstall or a
+            // marketplace refresh, re-read the open ones, awaited so `busy` (held by the
+            // action) keeps their buttons disabled until the rows are current.
             const names = pl.marketplaces.map((m) => m.name);
             pl.offered = pl.offered.filter((o) => names.includes(o.name));
-            pl.offered.forEach((o) => { if (o.open) this._loadOffered(o); });
+            if (refreshOffered) {
+              await Promise.all(pl.offered.filter((o) => o.open).map((o) => this._loadOffered(o)));
+            }
           } else {
             // Surface the failure rather than showing a misleading empty "No
             // marketplaces" — the plugins list may have loaded fine while this
@@ -4454,7 +4458,10 @@
             const d = await res.json().catch(() => ({}));
             if (c.gen !== gen) return;
             pl.result = d && typeof d.message === "string" ? d.message : "";
-            c.saved = true; await this._loadPlugins(gen, body.op);
+            // Enable, Disable and a plugin Update cannot change what a marketplace offers.
+            const refresh = url.includes("/marketplaces/")
+              ? body.op === "update" : body.op === "install" || body.op === "uninstall";
+            c.saved = true; await this._loadPlugins(gen, body.op, refresh);
           }
           else await this._configMgmtWriteErr(res);
         } catch (e) { this._configMgmtWriteFailed(e, gen, "Action failed."); }
@@ -4577,6 +4584,16 @@
       configMgmtOffered(name) {
         return this._offeredFor(name) || { loading: false, error: "", plugins: [] };
       },
+      // The text of the row's always-mounted live region: the open list's state.
+      configMgmtOfferedStatus(name) {
+        const o = this._offeredFor(name);
+        if (!o || !o.open) return "";
+        if (o.loading) return "Reading the plugins " + name + " offers.";
+        if (o.error) return o.error;
+        const n = o.plugins.length;
+        if (!n) return "This marketplace offers no plugins.";
+        return name + " offers " + n + (n === 1 ? " plugin." : " plugins.");
+      },
       configMgmtToggleOffered(name) {
         const pl = this.configMgmt.plugins;
         const o = this._offeredFor(name);
@@ -4617,15 +4634,26 @@
       // Install from the list: the scope confirm, typed fresh, but no retype of the id. The
       // id comes from the CLI's own list, so it is sent as the server's `confirm_plugin`,
       // which the server still checks against `plugin`.
-      configMgmtInstallOffered(p) {
-        const pl = this.configMgmt.plugins;
+      async configMgmtInstallOffered(p, market) {
+        const c = this.configMgmt, pl = c.plugins;
         if (!this.configMgmtCanPluginActFresh() || p.installed) return;
-        return this._pluginActionPost(
+        await this._pluginActionPost(
           "/api/config-write/plugins/action",
           Object.assign(this._configMgmtTarget(), {
             op: "install", plugin: p.id, confirm: pl.confirm, confirm_plugin: p.id,
           }),
         );
+        // The clicked button turns into the "installed" badge, which drops focus to <body>
+        // and lets the next Tab leave the dialog: move it to this marketplace's toggle.
+        if (!c.open || c.surface !== "plugins" || !c.saved) return;
+        this.$nextTick(() => {
+          const a = document.activeElement;
+          if (a && a !== document.body) return;
+          const t = document.querySelector(
+            '[data-test="cm-market-offered-toggle-' + CSS.escape(market) + '"]',
+          );
+          if (t) t.focus();
+        });
       },
       configMgmtInstallPlugin() {
         const c = this.configMgmt, pl = c.plugins;
