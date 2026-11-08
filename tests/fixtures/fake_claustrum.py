@@ -93,6 +93,9 @@ class FakeClaustrum:
         self.calls: list[str] = []
         # Methods that receive no reply (to exercise client request timeouts).
         self.hang_methods: set[str] = set()
+        # Method -> how many calls of it are answered. The next call instead drops every
+        # connection ("drop") or gets no reply ("hang"): a drop partway through a pass.
+        self.fail_after: dict[str, tuple[int, str]] = {}
         self._processes: dict[str, _Process] = {}
         self._writers: set[asyncio.StreamWriter] = set()
         self._server: asyncio.AbstractServer | None = None
@@ -260,6 +263,12 @@ class FakeClaustrum:
             self.calls.append(method)
         if method in self.hang_methods:
             return  # deliberately no reply
+        if isinstance(method, str) and method in self.fail_after:
+            answered, how = self.fail_after[method]
+            if self.calls.count(method) > answered:
+                if how == "drop":
+                    self.disconnect_all()
+                return  # no reply
         params = req.get("params") or {}
         handler = (
             getattr(self, f"_m_{method.replace('.', '_')}", None)

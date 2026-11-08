@@ -722,13 +722,24 @@ Clauster could not reach or start a daemon. Read `daemon.log` in the `claustrum/
 directory under `state_dir` for the reason that the daemon gives.
 
 A card with the orange `orphan` badge instead means that the `claude` process
-still runs without a daemon session. Its text says `survived a daemon restart`,
-also when only the connection was lost.
+still runs, but Clauster could not reattach it. Its text says
+`still running, but Clauster could not reattach it`. The cause can be a daemon
+restart, a dropped connection or a request that timed out.
+
+If only the connection was lost, Clauster reattaches the session again over the
+next daemon connection. If the daemon still has the process, the card shows
+`Running` again. After `the reconnect failed`, that next connection comes only
+when you start a new Direct Session, or use Resume or Restart on a Direct
+Session. See
+[When the daemon connection drops](concepts/how-it-works.md#when-the-daemon-connection-drops)
+for each case.
 
 The transcript is not lost. If the card offers **Resume**, use it to continue the
 conversation in a new agent. If it offers **Kill**, the old `claude` process is
-still running: kill it first. Before you resume after `the reconnect failed`,
-make sure that the old `claude` process is not still running on the host.
+still running: kill it first. Resume on an `Error` card first ends the old agent
+through the daemon. If the daemon refuses or does not answer that kill, Resume
+refuses with `cannot resume: the old agent may still be running`. Read
+`daemon.log` for the reason, and try again.
 
 ## Getting more detail
 
