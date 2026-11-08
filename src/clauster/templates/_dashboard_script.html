@@ -86,9 +86,9 @@
   // ({mode: {short, long, effect}}) shared with the launch <select> and the config editor.
   // permLabel()/permissionEffect() read from THIS map — no second hand-maintained copy.
   const PERMISSION_LABELS = {{ permission_labels | tojson }};
-  // Recognized hook lifecycle events (#958 Part 5): server-injected from the backend
-  // validator (config_write_hooks.RECOGNIZED_EVENTS), sorted, so the Hooks rows editor's
-  // event <select> never drifts from what the write surface accepts.
+  // Known hook lifecycle events (#958 Part 5): server-injected from the backend
+  // validator (config_write_hooks.RECOGNIZED_EVENTS), sorted. Since TASK-524 they are the
+  // suggestions of the Hooks rows editor's event box: any other name saves with a warning.
   const HOOK_EVENTS = {{ hook_events | tojson }};
   // Hook handler types the write surface accepts (config_write_hooks.HOOK_TYPES), also
   // server-injected so the rows editor's type <select> never drifts from the validator.
@@ -241,6 +241,9 @@
       // project, or surface changes under it (the configEditor single-flight idiom).
       configMgmt: {
         open: false, loading: false, saving: false, error: "", saved: false,
+        // TASK-524: the `warnings` of the last save that succeeded (a value outside a list
+        // of known values saves as typed). Shown under the Saved banner while it shows.
+        warnings: [],
         scope: "project", project: "", surface: "claude-md",
         confirm: "", trigger: null, gen: 0,
         claudeMd: { content: "", orig: "", hash: null, exists: false },
@@ -2750,16 +2753,17 @@
         if (!this._hooksRowsFromText()) c.hooks.mode = "raw";
       },
       // Flatten a hooks object to [{event, matcher, type, <fields>, timeout}] rows, or
-      // return null if ANY part isn't representable as flat rows (unknown event, non-list
+      // return null if ANY part isn't representable as flat rows (an empty event, non-list
       // groups, unknown group keys, a type or field outside HOOK_ROW_FIELDS, an empty
       // field, a multi-line value, or a timeout that is not a whole number ≥ 1). Never coerces — an odd
       // shape goes to raw.
       _flattenHooks(obj) {
         if (obj === null || typeof obj !== "object" || Array.isArray(obj)) return null;
-        const events = new Set(HOOK_EVENTS);
         const rows = [];
         for (const event of Object.keys(obj)) {
-          if (!events.has(event)) return null;
+          // Any event name is a row (TASK-524); one outside HOOK_EVENTS shows a warning.
+          // A multi-line name cannot sit in a text box, so it stays in raw.
+          if (!event || /[\r\n]/.test(event)) return null;
           const groups = obj[event];
           if (!Array.isArray(groups)) return null;
           // Two groups sharing a matcher would MERGE into one on re-serialize (rows
@@ -2854,24 +2858,27 @@
       // Rows whose type fields are all blank are dropped; every value and matcher is kept
       // verbatim (opaque).
       _serializeHookRows(rows) {
-        const out = {};
+        // No prototype: an event is any name since TASK-524, so `__proto__` must be an
+        // own key here, never the object's prototype.
+        const out = Object.create(null);
         // event -> Map(matcher -> group). A Map (not a plain object) so a matcher named
         // `__proto__`/`constructor`/`toString` — all backend-valid opaque strings — keys
         // by value instead of hitting Object.prototype and corrupting the grouping.
-        const idx = {};
+        const idx = new Map();
         for (const r of rows) {
           const values = this._hookRowValues(r);
           // An untouched/cleared row isn't a hook. A half-filled one (an mcp_tool with no
           // tool) is kept so the backend refuses it; configMgmtHooksRowsWarning blocks Save.
           if (values === null || values.every((v) => !v)) continue;
           const event = r.event;
-          if (!event || !HOOK_EVENTS.includes(event)) continue;
+          // A filled row with no event is blocked by configMgmtHooksRowsWarning.
+          if (!event) continue;
           const matcher = r.matcher || "";
-          if (!out[event]) { out[event] = []; idx[event] = new Map(); }
-          let group = idx[event].get(matcher);
+          if (!idx.has(event)) { out[event] = []; idx.set(event, new Map()); }
+          let group = idx.get(event).get(matcher);
           if (!group) {
             group = matcher ? { matcher: matcher, hooks: [] } : { hooks: [] };
-            idx[event].set(matcher, group);
+            idx.get(event).set(matcher, group);
             out[event].push(group);
           }
           const hook = { type: r.type };
@@ -2920,10 +2927,16 @@
       configMgmtRemoveHookRow(idx) {
         this.configMgmt.hooks.rows.splice(idx, 1);
       },
-      // The recognized lifecycle events for the row event <select> (server-injected,
+      // The known lifecycle events, the suggestions of the row event box (server-injected,
       // never a hand-listed copy). A method so the CSP-build x-for can iterate it.
       configMgmtHookEvents() {
         return HOOK_EVENTS;
+      },
+      // TASK-524: an event outside the known list saves as typed, with this warning under
+      // its box (the same rule as the Settings rows' known values).
+      configMgmtHookEventWarning(row) {
+        if (!row || !row.event || HOOK_EVENTS.includes(row.event)) return "";
+        return "Not one of the known events. It saves as typed.";
       },
       // The hook types a row can edit: the server-injected HOOK_TYPES the rows can show.
       configMgmtHookTypes() {
@@ -2938,6 +2951,7 @@
         const rows = this.configMgmt.hooks.rows;
         const bad = [];
         const partial = [];
+        const noEvent = [];
         for (let i = 0; i < rows.length; i++) {
           const r = rows[i];
           const values = this._hookRowValues(r);
@@ -2949,6 +2963,8 @@
             continue;
           }
           if (values.some((v) => !v)) partial.push(i + 1);
+          // The event box is free text (TASK-524): a cleared one would drop the row on save.
+          if (!r.event) noEvent.push(i + 1);
           const t = (r.timeout || "").trim();
           if (t !== "" && this._hookTimeoutInt(t) === null) bad.push(i + 1);
         }
@@ -2961,6 +2977,9 @@
           msgs.push("Fill in every field of row" +
             (partial.length > 1 ? "s " : " ") + partial.join(", ") +
             (partial.length > 1 ? ", or remove them" : ", or remove it"));
+        }
+        if (noEvent.length) {
+          msgs.push("Type an event for row" + (noEvent.length > 1 ? "s " : " ") + noEvent.join(", "));
         }
         return msgs.join(". ");
       },
@@ -3052,7 +3071,7 @@
         });
         if (c.gen !== myGen) return;
         if (this._authExpired(res)) return;
-        if (res.ok) { c.saved = true; c.confirm = ""; await this._loadClaudeMd(myGen); }
+        if (res.ok) { c.saved = true; c.warnings = []; c.confirm = ""; await this._loadClaudeMd(myGen); }
         else await this._configMgmtWriteErr(res);
       },
       // Shared JSON-surface saver: parse + validate the editor as a JSON object, PUT it
@@ -3107,8 +3126,23 @@
         });
         if (c.gen !== myGen) return;
         if (this._authExpired(res)) return;
-        if (res.ok) { c.saved = true; c.confirm = ""; await this._reloadSurface(surface, myGen); }
+        if (res.ok) {
+          c.saved = true; c.confirm = "";
+          await this._configMgmtTakeWarnings(res, () => c.gen === myGen);
+          await this._reloadSurface(surface, myGen);
+        }
         else await this._configMgmtWriteErr(res);
+      },
+      // TASK-524: keep the `warnings` a successful save response carries. Call it right
+      // after setting `saved`; `stillMine` says whether the panel still shows this write
+      // once the body is read (a scope or surface switch means it does not).
+      async _configMgmtTakeWarnings(res, stillMine) {
+        const c = this.configMgmt;
+        c.warnings = [];
+        const d = await res.json().catch(() => null);
+        if (!stillMine() || !c.saved) return;
+        const list = d && Array.isArray(d.warnings) ? d.warnings : [];
+        c.warnings = list.filter((w) => typeof w === "string" && w);
       },
       async _configMgmtWriteErr(res) {
         const c = this.configMgmt;
@@ -3272,6 +3306,7 @@
           if (this._authExpired(res)) return;
           if (res.ok) {
             c.saved = true; s.editing = false; s.confirm = ""; s.converted = "";
+            await this._configMgmtTakeWarnings(res, () => c.gen === gen);
             await this._loadSubagents(gen);
           }
           else await this._configMgmtWriteErr(res);
@@ -3308,7 +3343,7 @@
           );
           if (c.gen !== gen) return;
           if (this._authExpired(res)) return;
-          if (res.ok) { c.saved = true; s.deletingName = ""; s.confirm = ""; await this._loadSubagents(gen); }
+          if (res.ok) { c.saved = true; c.warnings = []; s.deletingName = ""; s.confirm = ""; await this._loadSubagents(gen); }
           else await this._configMgmtWriteErr(res);
         } catch (e) { this._configMgmtWriteFailed(e, gen, "Delete failed."); }
         finally {
@@ -3843,7 +3878,11 @@
           });
           if (c.gen !== gen) return;
           if (this._authExpired(res)) return;
-          if (res.ok) { c.saved = true; m.editing = false; m.confirm = ""; await this._loadMcp(gen); }
+          if (res.ok) {
+            c.saved = true; m.editing = false; m.confirm = "";
+            await this._configMgmtTakeWarnings(res, () => c.gen === gen);
+            await this._loadMcp(gen);
+          }
           else await this._configMgmtWriteErr(res);
         } catch (e) { this._configMgmtWriteFailed(e, gen, "Save failed."); }
         finally {
@@ -3882,7 +3921,7 @@
           });
           if (c.gen !== gen) return;
           if (this._authExpired(res)) return;
-          if (res.ok) { c.saved = true; m.deletingName = ""; m.confirm = ""; await this._loadMcp(gen); }
+          if (res.ok) { c.saved = true; c.warnings = []; m.deletingName = ""; m.confirm = ""; await this._loadMcp(gen); }
           else await this._configMgmtWriteErr(res);
         } catch (e) { this._configMgmtWriteFailed(e, gen, "Delete failed."); }
         finally {
@@ -3978,7 +4017,7 @@
           });
           if (c.gen !== gen) return;
           if (this._authExpired(res)) return;
-          if (res.ok) { c.saved = true; ap.confirm = ""; this.mcpBlockUntilReloaded[c.project] = true; this._preflightTake(c.project); await this._loadMcp(gen); await this.loadPreflight(c.project); }
+          if (res.ok) { c.saved = true; c.warnings = []; ap.confirm = ""; this.mcpBlockUntilReloaded[c.project] = true; this._preflightTake(c.project); await this._loadMcp(gen); await this.loadPreflight(c.project); }
           else await this._configMgmtWriteErr(res);
         } catch (e) { this._configMgmtWriteFailed(e, gen, "Save failed."); }
         finally {
@@ -4003,7 +4042,7 @@
           });
           if (c.gen !== gen) return;
           if (this._authExpired(res)) return;
-          if (res.ok) { c.saved = true; ap.resetConfirm = ""; this.mcpBlockUntilReloaded[c.project] = true; this._preflightTake(c.project); await this._loadMcp(gen); await this.loadPreflight(c.project); }
+          if (res.ok) { c.saved = true; c.warnings = []; ap.resetConfirm = ""; this.mcpBlockUntilReloaded[c.project] = true; this._preflightTake(c.project); await this._loadMcp(gen); await this.loadPreflight(c.project); }
           else await this._configMgmtWriteErr(res);
         } catch (e) { this._configMgmtWriteFailed(e, gen, "Reset failed."); }
         finally {
@@ -4080,8 +4119,9 @@
         await this._loadSkillOverrides(names, keepOvEdits);
       },
       // The rows: listed folder names first, in list order, then each stored key that no
-      // folder has, sorted. A stored value Claude Code does not know shows as "?" and saves
-      // unchanged, so the backend refuses it with its own message until the operator picks.
+      // folder has, sorted. A stored value outside the known four shows as "?" and saves
+      // unchanged: another string saves with a warning (TASK-524), and a value that is not
+      // text is refused by the backend with its own message until the operator picks.
       _skillOvRow(name, listed, stored) {
         const has = Object.prototype.hasOwnProperty.call(stored, name);
         const raw = has ? stored[name] : undefined;
@@ -4092,12 +4132,14 @@
           rawText: has && !known ? JSON.stringify(raw) : "",
         };
       },
-      // The "Not valid" option label: the stored value, cut so a long one cannot stretch
-      // the select. The full value is still what a save sends.
+      // The stored-value option label: the stored value, cut so a long one cannot stretch
+      // the select. The full value is still what a save sends. A string is only not a known
+      // value (it saves with a warning, TASK-524); anything else is not valid.
       configMgmtSkillOvRawLabel(row) {
         const t = row.rawText;
         const cps = Array.from(t);  // by code point, so a cut never splits a surrogate pair
-        return "Not valid: " + (cps.length > 40 ? cps.slice(0, 40).join("") + "…" : t);
+        const head = typeof row.raw === "string" ? "Not a known value: " : "Not valid: ";
+        return head + (cps.length > 40 ? cps.slice(0, 40).join("") + "…" : t);
       },
       _skillOvRows(listed, stored) {
         const rows = [], seen = new Set();
@@ -4275,6 +4317,7 @@
           live = true;
           if (res.ok) {
             c.saved = true; ov.confirm = "";
+            await this._configMgmtTakeWarnings(res, () => ov.loadId === id);
             live = (await this._loadSkillOverrides(ov.listed, false)) === true;
             // The confirm and Save hide once nothing is dirty; give focus a visible home,
             // unless the operator has moved on (for example into a Delete confirm).
@@ -4364,6 +4407,7 @@
           if (this._authExpired(res)) return;
           if (res.ok) {
             c.saved = true; s.editing = false; s.confirm = ""; s.converted = "";
+            await this._configMgmtTakeWarnings(res, () => c.gen === gen);
             await this._loadSkills(true);
           }
           else await this._configMgmtWriteErr(res);
@@ -4400,7 +4444,7 @@
           });
           if (c.gen !== gen) return;
           if (this._authExpired(res)) return;
-          if (res.ok) { c.saved = true; s.deletingName = ""; s.confirm = ""; await this._loadSkills(true); }
+          if (res.ok) { c.saved = true; c.warnings = []; s.deletingName = ""; s.confirm = ""; await this._loadSkills(true); }
           else await this._configMgmtWriteErr(res);
         } catch (e) { this._configMgmtWriteFailed(e, gen, "Delete failed."); }
         finally {
@@ -4517,7 +4561,7 @@
             // Enable, Disable and a plugin Update cannot change what a marketplace offers.
             const refresh = url.includes("/marketplaces/")
               ? body.op === "update" : body.op === "install" || body.op === "uninstall";
-            c.saved = true; await this._loadPlugins(gen, body.op, refresh);
+            c.saved = true; c.warnings = []; await this._loadPlugins(gen, body.op, refresh);
           }
           else await this._configMgmtWriteErr(res);
         } catch (e) { this._configMgmtWriteFailed(e, gen, "Action failed."); }
@@ -4527,6 +4571,11 @@
         }
       },
       // The cm-saved banner text: an update's summary on the Plugins tab, else "Saved.".
+      // TASK-524: the last save's known-value warnings, only while its Saved banner shows.
+      configMgmtSaveWarnings() {
+        const c = this.configMgmt;
+        return c.saved ? c.warnings : [];
+      },
       configMgmtSavedText() {
         const c = this.configMgmt;
         return c.surface === "plugins" && c.plugins.result ? c.plugins.result : "Saved.";

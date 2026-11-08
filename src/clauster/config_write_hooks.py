@@ -28,9 +28,11 @@ only protections, and they are absolute here:
   hook's prompt to a model.** Every handler is inert data on write; it only ever runs
   later inside a real ``claude`` process. Running it here — even to "check" it — *is*
   the RCE (or the data egress) the gate exists to prevent.
-* A bad shape, an unknown event key, an unknown hook type, or a field that the type
-  does not document rejects the *whole* write (→ 422 via
-  :func:`config_write.validate_candidate`), so a partial/garbled block never lands.
+* A bad shape rejects the *whole* write (→ 422 via
+  :func:`config_write.validate_candidate`), so a partial/garbled block never lands. An
+  event key, a hook type, a field or a ``shell``/``onFailure`` value outside the known
+  lists below saves as typed with a warning instead (TASK-524): the lists are copied by
+  hand and lag behind each new Claude Code release.
 
 **Five hook types (TASK-449.4).** Claude Code documents ``command``, ``http``,
 ``mcp_tool``, ``prompt`` and ``agent`` hooks (https://code.claude.com/docs/en/hooks,
@@ -86,9 +88,10 @@ AGENT_TYPE = "agent"
 
 #: The recognized hook **event** keys: every event the Claude Code hooks reference
 #: documents (https://code.claude.com/docs/en/hooks, "Hook lifecycle"), cross-checked
-#: against the event enum in the installed CLI (2.1.318). An unknown event key rejects
-#: the whole write (→ 422) so a typo'd or speculative event name can never land an
-#: inert-but-misfiled hook.
+#: against the event enum in the installed CLI (2.1.318). SUGGESTIONS ONLY (TASK-524): an
+#: event key outside this set saves as typed, and the save response carries a warning
+#: (:func:`~clauster.config_write.warn_unknown_value`), because Claude Code adds events
+#: faster than this copy is updated. The Hooks rows offer the set as suggestions.
 RECOGNIZED_EVENTS = frozenset(
     {
         "SessionStart",
@@ -136,11 +139,12 @@ _COMMON_FIELDS = frozenset({"type", "if", "timeout", "statusMessage", "once"})
 #: row per documented handler type. ``onFailure`` is documented for ``command`` and
 #: ``http`` only, ``async``/``asyncRewake`` for ``command`` only ("only available on
 #: ``type: "command"`` hooks"), and ``continueOnBlock`` for ``prompt`` only ("agent hooks
-#: have ... no ``continueOnBlock`` field"). A field outside its type's row rejects the
-#: whole write. Where the docs and the installed CLI (2.1.318) differ, what the CLI reads
-#: wins (maintainer decision, 2026-11-05): its hook schemas also parse the ``@internal``
-#: fields ``rewakeMessage``/``rewakeSummary`` (command) and ``cloud`` (command, http), so
-#: those are accepted too, with the CLI's types.
+#: have ... no ``continueOnBlock`` field"). A field outside its type's row, and any field of
+#: a type outside this table, saves with a warning (TASK-524), but its value must still
+#: pass :func:`~clauster.config_write.walkable_value`. Where the docs and the installed CLI
+#: (2.1.318) differ, what the CLI reads wins (maintainer decision, 2026-11-05): its hook
+#: schemas also parse the ``@internal`` fields ``rewakeMessage``/``rewakeSummary``
+#: (command) and ``cloud`` (command, http), so those are accepted too, with the CLI's types.
 _TYPE_FIELDS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
     COMMAND_TYPE: (
         frozenset({"command"}),
@@ -273,8 +277,10 @@ _FIELD_CHECKS: dict[str, tuple[Callable[[Any], bool], str]] = {
     "args": (_is_str_list, "a list of strings"),
     "async": (_is_bool, "a boolean"),
     "asyncRewake": (_is_bool, "a boolean"),
-    "shell": (lambda v: v in ("bash", "powershell"), "'bash' or 'powershell'"),
-    "onFailure": (lambda v: v in ("continue", "block"), "'continue' or 'block'"),
+    # The known values of `shell` and `onFailure` are suggestions (_KNOWN_FIELD_VALUES):
+    # any string saves, one outside the list with a warning.
+    "shell": (lambda v: isinstance(v, str), "a string ('bash' or 'powershell')"),
+    "onFailure": (lambda v: isinstance(v, str), "a string ('continue' or 'block')"),
     "url": (_is_http_url, "an http:// or https:// URL"),
     "headers": (_is_header_map, "an object mapping header names to string values"),
     "allowedEnvVars": (_is_str_list, "a list of strings"),
@@ -293,6 +299,14 @@ _FIELD_CHECKS: dict[str, tuple[Callable[[Any], bool], str]] = {
     "rewakeSummary": (_non_empty_str, "a non-empty string"),
     "cloud": (lambda v: isinstance(v, str), "a string ('device' or 'skip')"),
 }
+
+#: The known values of a string field (TASK-524). A string outside its tuple saves with a
+#: warning; a value that is not a string is refused by :data:`_FIELD_CHECKS`.
+_KNOWN_FIELD_VALUES: dict[str, tuple[str, ...]] = {
+    "shell": ("bash", "powershell"),
+    "onFailure": ("continue", "block"),
+}
+
 
 #: Marker identifying a hook as **plugin-owned**, not project/user/local content. It is
 #: checked in every string value of the entry, not only ``command``: an exec-form hook
@@ -335,40 +349,58 @@ def _string_leaves(value: Any) -> Iterator[str]:
 def _validate_hook_entry(entry: Any, where: str) -> None:
     """Reject ``entry`` unless it is a structurally valid hook handler object.
 
-    ``type`` must be one of :data:`HOOK_TYPES`. The entry may carry only the
-    :data:`_COMMON_FIELDS` plus that type's documented fields (:data:`_TYPE_FIELDS`); the
-    type's required fields must be present, and each field's value must pass its
-    :data:`_FIELD_CHECKS` row. Every value is stored verbatim and **never run**: a
-    ``command`` is never parsed, resolved or executed, a ``url`` is never fetched, a
+    ``type`` must be a string. For a type in :data:`HOOK_TYPES`, its required fields must be
+    present, and each field of :data:`_COMMON_FIELDS` and of that type's row
+    (:data:`_TYPE_FIELDS`) must pass its :data:`_FIELD_CHECKS` row. A type outside
+    :data:`HOOK_TYPES`, a field outside the type's row and a ``shell``/``onFailure`` value
+    outside :data:`_KNOWN_FIELD_VALUES` save with a warning (TASK-524); such a field's value
+    must still pass :func:`~clauster.config_write.walkable_value`, and a type outside the
+    table checks only the common fields. Every value is stored verbatim and **never run**:
+    a ``command`` is never parsed, resolved or executed, a ``url`` is never fetched, a
     ``server`` is never connected to, and a ``prompt`` is never sent to a model. Any
     string value carrying the plugin-owned ``CLAUDE_PLUGIN_ROOT`` marker (see
-    :data:`_PLUGIN_ROOT_MARKER`) rejects the whole write, as do unknown keys.
+    :data:`_PLUGIN_ROOT_MARKER`) rejects the whole write.
     """
     if not isinstance(entry, dict):
         raise cw.InvalidCandidateError(f"{where} must be an object")
 
     hook_type = entry.get("type")
-    if not isinstance(hook_type, str) or hook_type not in _TYPE_FIELDS:
-        # Fail closed: a missing or unknown type is rejected, never silently coerced.
+    if not isinstance(hook_type, str) or not hook_type:
+        # Fail closed: a missing or non-string type is rejected, never silently coerced.
         raise cw.InvalidCandidateError(
-            f"{where} 'type' must be one of {list(HOOK_TYPES)} (got {hook_type!r})"
+            f"{where} 'type' must be a non-empty string, such as one of {list(HOOK_TYPES)} "
+            f"(got {hook_type!r})"
         )
-    required, optional = _TYPE_FIELDS[hook_type]
-    unknown = set(entry) - _COMMON_FIELDS - required - optional
-    if unknown:
-        raise cw.InvalidCandidateError(
-            f"{where} has unknown keys for a {hook_type!r} hook: {sorted(unknown, key=repr)}"
-        )
+    if hook_type in _TYPE_FIELDS:
+        required, optional = _TYPE_FIELDS[hook_type]
+    else:
+        cw.warn_unknown_value(f"{where} 'type'", hook_type, HOOK_TYPES)
+        required, optional = frozenset(), frozenset()
+    known = _COMMON_FIELDS | required | optional
+    if hook_type in _TYPE_FIELDS:
+        cw.warn_unknown_keys(entry, known, f"{where} {hook_type!r} hook field")
+    else:
+        # An unknown type has one warning, on its type: each of its fields is unchecked
+        # except for its shape.
+        for field, value in entry.items():
+            if not isinstance(field, str) or not cw.walkable_value(value):
+                raise cw.InvalidCandidateError(
+                    f"{where} {field!r} must be a text key whose value is nested at most "
+                    f"{cw.MAX_UNKNOWN_VALUE_DEPTH} levels deep, with finite numbers only"
+                )
 
     for field in sorted(required):
         if field not in entry:
             raise cw.InvalidCandidateError(f"{where} {hook_type!r} hook needs {field!r}")
-    for field in sorted(set(entry) - {"type"}):
+    for field in sorted(set(entry) & (known - {"type"})):
         check, want = _FIELD_CHECKS[field]
         if not check(entry[field]):
             raise cw.InvalidCandidateError(f"{where} {field!r} must be {want}")
+        values = _KNOWN_FIELD_VALUES.get(field)
+        if values is not None and entry[field] not in values:
+            cw.warn_unknown_value(f"{where} {field!r}", entry[field], values)
 
-    for field in sorted(set(entry) - {"type"}):
+    for field in sorted(set(entry) - {"type"}, key=repr):
         if any(_PLUGIN_ROOT_MARKER in s for s in _string_leaves(entry[field])):
             # Fail closed (#770): a hook referencing the plugin-root interpolation is
             # plugin-owned content, not project/user/local content — reject the whole
@@ -411,13 +443,13 @@ def _validate_matcher_group(group: Any, where: str) -> None:
 def validate_hooks(candidate: Any) -> None:
     """Structural validator for the whole ``hooks`` object (the Foundation hook).
 
-    ``candidate`` is the desired ``hooks`` object: a ``dict`` keyed by a recognized
-    lifecycle **event** (see :data:`RECOGNIZED_EVENTS`), each mapping to a list of
-    matcher groups ``{matcher?: str, hooks: [<handler>, ...]}``, where each handler is
-    one of the :data:`HOOK_TYPES` with its documented fields (:data:`_TYPE_FIELDS`).
-    Unknown event keys, wrong types, an unknown hook type, a field the type does not
-    document, or a bad field value reject the whole write (→ 422 via
-    :func:`config_write.validate_candidate`), so a partial/garbled block never lands.
+    ``candidate`` is the desired ``hooks`` object: a ``dict`` keyed by a lifecycle
+    **event** name, each mapping to a list of matcher groups ``{matcher?: str, hooks:
+    [<handler>, ...]}``, where each handler is checked by :func:`_validate_hook_entry`.
+    An event name outside :data:`RECOGNIZED_EVENTS` saves with a warning (TASK-524), as do
+    the hook types and fields that function names. Wrong types or a bad field value reject
+    the whole write (→ 422 via :func:`config_write.validate_candidate`), so a
+    partial/garbled block never lands.
     A handler referencing ``${CLAUDE_PLUGIN_ROOT}`` in any string is likewise rejected
     (#770) — that interpolation only resolves inside a plugin's own
     ``hooks/hooks.json``, so its presence marks the entry as plugin-owned content, and
@@ -431,14 +463,12 @@ def validate_hooks(candidate: Any) -> None:
     """
     if not isinstance(candidate, dict):
         raise cw.InvalidCandidateError("hooks must be an object")
-    unknown = set(candidate) - RECOGNIZED_EVENTS
-    if unknown:
-        raise cw.InvalidCandidateError(
-            # `key=repr`: frontmatter keys can mix types (`1:` and `foo:`), and a
-            # plain sort of an int and a str raises TypeError, a 500.
-            f"hooks has unknown event(s): {sorted(unknown, key=repr)} "
-            f"(want one of {sorted(RECOGNIZED_EVENTS)})"
-        )
+    # `key=repr`: frontmatter keys can mix types (`1:` and `foo:`), and a plain sort of an
+    # int and a str raises TypeError, a 500.
+    for event in sorted(set(candidate) - RECOGNIZED_EVENTS, key=repr):
+        if not isinstance(event, str) or not event:
+            raise cw.InvalidCandidateError(f"hooks has an event name that is not text: {event!r}")
+        cw.warn_unknown_value("hooks event", event, RECOGNIZED_EVENTS)
 
     for event, groups in candidate.items():
         if not isinstance(groups, list):
@@ -906,8 +936,13 @@ def _merge_hooks(incoming: dict[str, Any], stored: Any) -> dict[str, Any]:
                 if destination is not None:
                     placed = (event, group.get("matcher"), entry, where)
                     by_destination.setdefault(destination, []).append(placed)
-                elif _carries_mask(entry):  # pragma: no cover - validate_hooks rules it out
-                    raise cw.InvalidCandidateError(f"{where} keeps masked values")
+                elif _carries_mask(entry):
+                    # A hook type outside HOOK_TYPES (TASK-524) has no destination, so a
+                    # masked url/headers/input in it can never be bound to a stored value.
+                    raise cw.InvalidCandidateError(
+                        f"{where} keeps masked values ({cw.REDACTION_SENTINEL}) in a hook "
+                        "type Clauster does not know — retype every masked value in this hook"
+                    )
                 entries.append(entry)
             merged_groups.append({**group, "hooks": entries})
         merged[event] = merged_groups

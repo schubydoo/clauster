@@ -17,8 +17,10 @@ path containment before any I/O.
 from __future__ import annotations
 
 import asyncio
+import functools
+from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ParamSpec
 
 from fastapi import HTTPException
 
@@ -36,10 +38,35 @@ from ... import (
 from ...auth import SESSION_USER
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
     from ...config import ClausterConfig
     from ...runner import SessionRunner
+
+
+_P = ParamSpec("_P")
+
+
+def reports_value_warnings(
+    handler: Callable[_P, Awaitable[dict]],
+) -> Callable[_P, Awaitable[dict]]:
+    """Wrap a save route so its response carries the save's known-value ``warnings`` (TASK-524).
+
+    The validators record a value outside one of their hand-written lists of known values
+    with :func:`~clauster.config_write.warn_unknown_value` instead of refusing it. This
+    collects those messages for one request (:data:`~clauster.config_write.value_warning_sink`,
+    which reaches the writer's worker thread) and adds them to the response as
+    ``"warnings": [...]``, an empty list when there are none. A refused save raises before
+    a response exists, so its warnings are dropped with it. ``functools.wraps`` keeps the
+    handler's signature, which FastAPI reads for its parameters.
+    """
+
+    @functools.wraps(handler)
+    async def _with_warnings(*args: _P.args, **kwargs: _P.kwargs) -> dict:
+        """Run ``handler`` with a fresh warning sink and attach what it collected."""
+        with config_write.collect_value_warnings() as warnings:
+            result = await handler(*args, **kwargs)
+        return {**result, "warnings": warnings}
+
+    return _with_warnings
 
 
 def resolve_cw_project(

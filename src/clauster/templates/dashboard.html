@@ -320,6 +320,9 @@
        .table-responsive wrapper scrolls instead of squeezing them. */
     .cm-hooks-table .form-select { width: auto; }
     .cm-hooks-table .cm-hook-matcher-input { min-width: 9rem; }
+    /* TASK-524: the event is a text box with suggestions now; give it room for the longest
+       known event ("UserPromptExpansion") plus the datalist arrow. */
+    .cm-hooks-table .cm-hook-event-input { min-width: 13rem; }
     .cm-hooks-table .cm-hook-main > td { border-bottom-width: 0; }
     .cm-value-cap { max-width: 12rem; }
     .cm-input-cap { max-width: 16rem; }
@@ -2081,10 +2084,23 @@
                  x-show="configMgmt.error" x-cloak x-text="configMgmt.error"></div>
             <div class="alert alert-success py-2" data-test="cm-saved" aria-hidden="true"
                  x-show="configMgmt.saved" x-cloak x-text="configMgmtSavedText()">Saved.</div>
+            {# TASK-524: a value outside a list of known values saves as typed, and the save
+               response names each one. text-warning-emphasis: plain .alert-warning text
+               misses AA contrast in the light theme. #}
+            <div class="alert alert-warning text-warning-emphasis py-2 small" data-test="cm-save-warnings"
+                 aria-hidden="true" x-show="configMgmtSaveWarnings().length" x-cloak>
+              <ul class="mb-0 ps-3">
+                <template x-for="(w, i) in configMgmtSaveWarnings()" :key="i">
+                  <li x-text="w"></li>
+                </template>
+              </ul>
+            </div>
             <div class="visually-hidden" role="alert" data-test="cm-error-live"
                  x-text="configMgmt.error"></div>
             <div class="visually-hidden" role="status" data-test="cm-saved-live"
                  x-text="configMgmt.saved ? configMgmtSavedText() : ''"></div>
+            <div class="visually-hidden" role="status" data-test="cm-save-warnings-live"
+                 x-text="configMgmtSaveWarnings().join(' ')"></div>
 
             <!-- Scope toggle: User (gated on allow_user_scope) / Project / Local -->
             <div class="mb-2">
@@ -2666,16 +2682,19 @@
                     <tbody :data-test="'cm-hook-row-' + idx">
                       <tr class="cm-hook-main">
                         <td>
-                          <select class="form-select form-select-sm" data-test="cm-hook-event"
-                                  :id="'cm-hook-event-' + row.id" :name="'cm-hook-event-' + row.id"
-                                  :aria-label="'Event for hook ' + (idx + 1)" x-model="row.event">
-                            <template x-for="ev in configMgmtHookEvents()" :key="ev">
-                              <!-- :selected, not x-model alone: x-model sets the value before
-                                   this inner x-for adds the options, so a loaded row would
-                                   show the first option (same fix as the project picker). -->
-                              <option :value="ev" :selected="ev === row.event" x-text="ev"></option>
-                            </template>
-                          </select>
+                          <!-- TASK-524: the known events are suggestions (the shared datalist
+                               below the table); any other name saves with a warning. -->
+                          <input type="text" class="form-control form-control-sm font-monospace cm-hook-event-input"
+                                 data-test="cm-hook-event" {{ NO_AUTOFILL }} spellcheck="false"
+                                 list="cm-hook-event-options"
+                                 :id="'cm-hook-event-' + row.id" :name="'cm-hook-event-' + row.id"
+                                 :aria-label="'Event for hook ' + (idx + 1)"
+                                 :aria-describedby="configMgmtHookEventWarning(row) ? 'cm-hook-event-warn-' + row.id : null"
+                                 x-model="row.event">
+                          <div class="small text-warning-emphasis mt-1" data-test="cm-hook-event-warning"
+                               :id="'cm-hook-event-warn-' + row.id"
+                               x-show="configMgmtHookEventWarning(row)" x-cloak
+                               x-text="configMgmtHookEventWarning(row)"></div>
                         </td>
                         <td>
                           <input type="text" class="form-control form-control-sm font-monospace cm-hook-matcher-input"
@@ -2749,6 +2768,11 @@
                   </template>
                 </table>
                 </div>
+                <datalist id="cm-hook-event-options" data-test="cm-hook-event-options">
+                  <template x-for="ev in configMgmtHookEvents()" :key="ev">
+                    <option :value="ev"></option>
+                  </template>
+                </datalist>
                 <div class="alert alert-warning py-1 small" data-test="cm-hooks-timeout-warn" role="alert"
                      x-show="configMgmtHooksRowsWarning()" x-cloak x-text="configMgmtHooksRowsWarning()"></div>
                 <button type="button" class="btn btn-sm btn-outline-primary" data-test="cm-hooks-add"

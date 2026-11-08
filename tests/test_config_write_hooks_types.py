@@ -219,8 +219,8 @@ def test_every_validator_field_is_documented_or_cli_parsed() -> None:
         ("command", "args", ["ok", 1]),
         ("command", "async", 1),
         ("command", "asyncRewake", "true"),
-        ("command", "shell", "zsh"),
-        ("command", "onFailure", "stop"),
+        ("command", "shell", 5),  # a value outside the known list warns (TASK-524)
+        ("command", "onFailure", ["stop"]),
         ("command", "rewakeMessage", ""),  # the CLI reads string().min(1)
         ("command", "rewakeSummary", ""),
         ("command", "rewakeSummary", 5),
@@ -268,9 +268,25 @@ def test_bad_field_value_is_rejected(hook_type: str, field: str, value: object) 
         ("command", "description", "x"),
     ],
 )
-def test_field_outside_its_type_is_rejected(hook_type: str, field: str, value: object) -> None:
-    with pytest.raises(cw.InvalidCandidateError, match="unknown keys"):
+def test_field_outside_its_type_saves_with_a_warning(
+    hook_type: str, field: str, value: object
+) -> None:
+    """TASK-524: a field outside its type's row is stored as typed, with one warning."""
+    with cw.collect_value_warnings() as warnings:
         hooks.validate_hooks(_block({**MINIMAL[hook_type], field: value}))
+    assert len(warnings) == 1
+    assert f"{hook_type!r} hook field {field!r} is not one of the known values" in warnings[0]
+
+
+@pytest.mark.parametrize(("field", "value"), [("shell", "zsh"), ("onFailure", "stop")])
+def test_a_string_outside_a_field_value_list_saves_with_a_warning(field: str, value: str) -> None:
+    """TASK-524: ``shell`` and ``onFailure`` take any string; an unlisted one warns."""
+    with cw.collect_value_warnings() as warnings:
+        hooks.validate_hooks(_block({**MINIMAL["command"], field: value}))
+    assert len(warnings) == 1 and f"{field!r} {value!r} is not one of" in warnings[0]
+    with cw.collect_value_warnings() as known:
+        hooks.validate_hooks(_block({**MINIMAL["command"], "shell": "bash", "onFailure": "block"}))
+    assert known == []
 
 
 @pytest.mark.parametrize(

@@ -275,7 +275,11 @@ def test_entry_needs_direct_write_finds_a_sentinel_nested_in_a_list() -> None:
     assert mcp_cli.entry_needs_direct_write(
         {"command": "x", "extra": [{"v": cw.REDACTION_SENTINEL}]}
     )
-    assert not mcp_cli.entry_needs_direct_write({"command": "x", "extra": [{"v": "plain"}]})
+    # A plain value nested in a list does not (under a known key: since TASK-524 an
+    # unknown key goes to the direct writer by itself).
+    assert not mcp_cli.entry_needs_direct_write(
+        {"type": "http", "url": "https://x.example/", "tools": [{"name": "plain"}]}
+    )
 
 
 # --- cli_add_server: argv shape, secret refusal, error classification --------------
@@ -337,6 +341,11 @@ def test_cli_add_server_refuses_entry_with_inline_env(tmp_path: Path) -> None:
 def test_cli_add_server_rejects_bad_shape_before_spawn(tmp_path: Path) -> None:
     run, calls = _fake_run()
     with pytest.raises(cw.InvalidCandidateError):
+        mcp_cli.cli_add_server(
+            str(FAKE_CLAUDE), tmp_path, "srv", {"command": 5}, "project", run=run
+        )
+    # An unknown key (TASK-524) is kept off argv: refused before any spawn too.
+    with pytest.raises(ValueError, match="must not reach the CLI argv"):
         mcp_cli.cli_add_server(str(FAKE_CLAUDE), tmp_path, "srv", {"bogus": 1}, "project", run=run)
     assert calls == []
 
@@ -859,14 +868,18 @@ def test_entry_writer_ignores_a_sibling_with_cli_only_keys(tmp_path: Path, scope
 
 
 @pytest.mark.parametrize("scope", ["project", "user", "local"])
-def test_entry_writer_still_rejects_unknown_keys_on_the_edited_entry(
+def test_entry_writer_warns_about_unknown_keys_on_the_edited_entry(
     tmp_path: Path, scope: str
 ) -> None:
-    # The allowlist still guards what the operator writes: only siblings are exempt.
+    # TASK-524: a key outside the known list saves as typed, with one warning per key.
     cj, project_dir = _seed_scope(tmp_path, scope, {"gh": {"command": "old"}})
-    with pytest.raises(cw.InvalidCandidateError, match="unknown keys"):
+    with cw.collect_value_warnings() as warnings:
         _write_entry(cj, project_dir, scope, "gh", dict(_CLI_ONLY_SIBLING), "edit")
-    assert _stored_scope(cj, project_dir, scope) == {"gh": {"command": "old"}}
+    assert _stored_scope(cj, project_dir, scope) == {"gh": _CLI_ONLY_SIBLING}
+    assert [w.split(" is not")[0] for w in warnings] == [
+        "stdio server 'gh' key 'autoApprove'",
+        "stdio server 'gh' key 'instructions'",
+    ]
 
 
 @pytest.mark.parametrize("scope", ["project", "user", "local"])
@@ -1212,6 +1225,7 @@ def test_route_server_remove_success(write_config, tmp_path, projects_root, monk
             "op": "remove",
             "project": "alpha",
             "ok": True,
+            "warnings": [],
         }
 
 

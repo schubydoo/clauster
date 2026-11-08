@@ -69,8 +69,8 @@ def test_validate_accepts_empty_map() -> None:
         {"srv": {"command": "x", "args": [1, 2]}},  # args not strings
         {"srv": {"command": "x", "env": {"K": 1}}},  # env value not a string
         {"srv": {"command": "x", "env": ["nope"]}},  # env not an object
-        {"srv": {"command": "x", "bogus": 1}},  # unknown key
-        {"srv": {"type": "ftp", "url": "x"}},  # unknown transport
+        {"srv": {"command": "x", "bogus": 1e400}},  # unknown key with a non-finite value
+        {"srv": {"type": "ftp", "url": 5}},  # unknown transport, a known key of the wrong type
         {"srv": {"type": "http"}},  # remote with no url
         {"srv": {"type": "http", "url": ""}},  # empty url
         {"srv": {"type": "http", "url": "x", "headers": {"H": 1}}},  # bad headers
@@ -212,36 +212,23 @@ def test_validate_accepts_every_documented_field(entry: dict) -> None:
         ({"command": "x", "timeout": "600000"}, "timeout"),
         ({"command": "x", "alwaysLoad": "true"}, "alwaysLoad"),
         ({"command": "x", "bareElicitationCapability": 1}, "bareElicitationCapability"),
-        # stdio takes no remote-only field
-        ({"command": "x", "headersHelper": "h"}, "unknown keys"),
-        ({"command": "x", "oauth": {}}, "unknown keys"),
-        ({"command": "x", "cwd": "/tmp"}, "unknown keys"),  # not documented, CLI drops it
         ({"type": "http", "url": "u", "headersHelper": 5}, "headersHelper"),
         ({"type": "http", "url": "u", "request_timeout_ms": 0}, "request_timeout_ms"),
         ({"type": "http", "url": "u", "oauth": "x"}, "oauth"),
-        ({"type": "http", "url": "u", "oauth": {"clientSecret": "s"}}, "unknown keys"),
         ({"type": "http", "url": "u", "oauth": {"xaa": "yes"}}, "xaa"),
         # CLI-parsed fields: wrong values, and transports where the CLI drops them
-        ({"type": "http", "url": "u", "role": "boss"}, "role"),  # CLI drops any non-"comms"
         ({"type": "http", "url": "u", "displayName": 5}, "displayName"),
         ({"type": "http", "url": "u", "discoveryCache": "on"}, "discoveryCache"),
         ({"type": "http", "url": "u", "tools": {"t": 1}}, "tools"),
         ({"type": "http", "url": "u", "tools": [{"permission_policy": "always_ask"}]}, "name"),
-        ({"type": "http", "url": "u", "tools": [{"name": "t", "extra": 1}]}, "unknown keys"),
-        (
-            {"type": "http", "url": "u", "tools": [{"name": "t", "permission_policy": "never"}]},
-            "permission_policy",
-        ),
+        ({"type": "http", "url": "u", "tools": [{"name": "t", "x": 1e400}]}, "not finite"),
+        ({"type": "http", "url": "u", "role": 5}, "role"),
         (
             {"type": "http", "url": "u", "tools": [{"name": "t", "permission_policy": ["x"]}]},
             "permission_policy",
         ),
-        ({"type": "http", "url": "u", "toolPermissions": {"t": "deny"}}, "toolPermissions"),
         ({"type": "http", "url": "u", "toolPermissions": {"t": ["ask"]}}, "toolPermissions"),
         ({"type": "http", "url": "u", "toolPermissions": ["t"]}, "toolPermissions"),
-        ({"command": "x", "displayName": "n"}, "unknown keys"),  # CLI drops it on stdio
-        ({"command": "x", "tools": [{"name": "t"}]}, "unknown keys"),
-        ({"type": "ws", "url": "wss://x", "discoveryCache": True}, "unknown keys"),
         # Claude Code ignores these, so refuse them (was accepted before TASK-449.8)
         ({"type": "sse", "url": "u", "env": {"K": "v"}}, "ignores"),
         ({"type": "sse", "transport": "sse", "url": "u"}, "transport"),
@@ -273,7 +260,6 @@ def test_validate_accepts_every_documented_field(entry: dict) -> None:
         ({"type": "http", "url": "u", "oauth": {"scopes": ""}}, "scopes"),
         ({"type": "http", "url": "u", "oauth": {"scopes": ["a"]}}, "scopes"),
         # ws: no OAuth (the docs: WebSocket supports neither OAuth nor --transport)
-        ({"type": "ws", "url": "wss://x", "oauth": {"clientId": "c"}}, "unknown keys"),
         ({"type": "ws", "url": "wss://x", "env": {"K": "v"}}, "ignores"),
         ({"type": "ws"}, "url"),
         # documented error shapes
@@ -284,6 +270,38 @@ def test_validate_accepts_every_documented_field(entry: dict) -> None:
 def test_validate_rejects_bad_documented_field_values(entry: dict, match: str) -> None:
     with pytest.raises(cw.InvalidCandidateError, match=match):
         mcp.validate_mcp_servers({"srv": entry})
+
+
+@pytest.mark.parametrize(
+    ("entry", "warned"),
+    [
+        # A key outside its transport's known keys (the CLI 2.1.318 drops these)
+        ({"command": "x", "headersHelper": "h"}, "stdio server 'srv' key 'headersHelper'"),
+        ({"command": "x", "oauth": {}}, "stdio server 'srv' key 'oauth'"),
+        ({"command": "x", "cwd": "/srv/x"}, "stdio server 'srv' key 'cwd'"),
+        ({"command": "x", "displayName": "n"}, "stdio server 'srv' key 'displayName'"),
+        ({"command": "x", "tools": [{"name": "t"}]}, "stdio server 'srv' key 'tools'"),
+        ({"type": "ws", "url": "wss://x", "discoveryCache": True}, "key 'discoveryCache'"),
+        ({"type": "ws", "url": "wss://x", "oauth": {"clientId": "c"}}, "key 'oauth'"),
+        # An oauth key, a tools item key and a value outside the known lists
+        ({"type": "http", "url": "u", "oauth": {"clientSecret": "s"}}, "key 'clientSecret'"),
+        ({"type": "http", "url": "u", "role": "boss"}, "'role' 'boss'"),
+        ({"type": "http", "url": "u", "tools": [{"name": "t", "extra": 1}]}, "key 'extra'"),
+        (
+            {"type": "http", "url": "u", "tools": [{"name": "t", "permission_policy": "never"}]},
+            "'permission_policy' 'never'",
+        ),
+        ({"type": "http", "url": "u", "toolPermissions": {"t": "deny"}}, "value 'deny'"),
+        # A transport outside the known list: one warning, on the type
+        ({"type": "carrier-pigeon", "url": "u", "loft": "north"}, "'type' 'carrier-pigeon'"),
+    ],
+)
+def test_a_value_outside_a_known_list_saves_with_a_warning(entry: dict, warned: str) -> None:
+    """TASK-524: the known keys and values are suggestions; each miss is one warning."""
+    with cw.collect_value_warnings() as warnings:
+        mcp.validate_mcp_servers({"srv": entry})
+    assert len(warnings) == 1, warnings
+    assert warned in warnings[0] and "is not one of the known values" in warnings[0]
 
 
 @pytest.mark.parametrize(
@@ -1306,7 +1324,7 @@ def test_route_bad_shape_is_422_and_writes_nothing(write_config, tmp_path, proje
                 "scope": "project",
                 "project": "alpha",
                 "confirm": "alpha",
-                "servers": {"s": {"command": "x", "bogus": 1}},  # unknown key
+                "servers": {"s": {"command": 5}},  # a command that is not text
             },
         )
         assert resp.status_code == 422
@@ -1552,7 +1570,7 @@ def test_route_user_invalid_entry_is_422(write_config, tmp_path) -> None:
             json={
                 "scope": "user",
                 "confirm": cw.USER_SCOPE_TOKEN,
-                "servers": {"s": {"command": "x", "bogus": 1}},  # unknown key
+                "servers": {"s": {"command": 5}},  # a command that is not text
             },
         )
         assert resp.status_code == 422
@@ -1699,7 +1717,7 @@ def test_route_local_write_bad_shape_is_422_and_writes_nothing(
                 "scope": "local",
                 "project": "alpha",
                 "confirm": "alpha (local)",
-                "servers": {"s": {"command": "x", "bogus": 1}},
+                "servers": {"s": {"command": 5}},
             },
         )
         assert resp.status_code == 422

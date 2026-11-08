@@ -80,6 +80,7 @@ async def api_config_write_subagent_get(
 
 
 @router.put("/api/config-write/subagents/{name}")
+@_base.reports_value_warnings
 async def api_config_write_subagent_put(
     config: ConfigDep, runner: RunnerOrNoneDep, name: str, body: dict
 ) -> dict:

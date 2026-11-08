@@ -5,7 +5,7 @@ never resolved/spawned/parsed/run, only its shape is checked; the five documente
 types and their fields are covered in ``test_config_write_hooks_types.py``), the
 project/user read+write routers (both write a real
 ``settings.json``), and the gated routes (capability/scope 404, runner-missing 404,
-type-the-name 400, bad-shape/unknown-event/unknown-type 422 writing nothing,
+type-the-name 400, bad-shape 422 writing nothing, an unknown event saved with a warning,
 stale-hash 409, path-escape 400, corrupt-file 422, sibling-key preservation).
 
 The RCE-negative test proves the invariant that makes this code-executing surface
@@ -80,7 +80,7 @@ def test_validate_accepts_every_recognized_event(event: str) -> None:
     "candidate",
     [
         ["not", "a", "dict"],
-        {"NotAnEvent": [_GROUP]},  # unknown event key
+        {"": [_GROUP]},  # empty event key (an unknown NAME saves with a warning, TASK-524)
         {"PreToolUse": _GROUP},  # event value must be a list, not a dict
         {"PreToolUse": ["not-a-group"]},  # group not an object
         {"PreToolUse": [{"hooks": []}]},  # empty hooks list
@@ -92,7 +92,8 @@ def test_validate_accepts_every_recognized_event(event: str) -> None:
         {"PreToolUse": [{"hooks": [{"type": "command"}]}]},  # missing command
         {"PreToolUse": [{"hooks": [{"type": "command", "command": ""}]}]},  # empty command
         {"PreToolUse": [{"hooks": [{"type": "command", "command": 5}]}]},  # command not a string
-        {"PreToolUse": [{"hooks": [{"type": "command", "command": "x", "extra": 1}]}]},  # unknown
+        # An unknown field saves with a warning (TASK-524), but its value must be walkable.
+        {"PreToolUse": [{"hooks": [{"type": "command", "command": "x", "extra": 1e400}]}]},
         {"PreToolUse": [{"hooks": [{"type": "command", "command": "x", "timeout": "30"}]}]},  # str
         {"PreToolUse": [{"hooks": [{"type": "command", "command": "x", "timeout": True}]}]},  # bl
     ],
@@ -102,11 +103,11 @@ def test_validate_rejects_bad_shape(candidate: object) -> None:
         hooks.validate_hooks(candidate)
 
 
-@pytest.mark.parametrize("bad_type", ["Command", "HTTP", "shell", "", 5, None])
-def test_validate_rejects_unknown_type(bad_type: object) -> None:
-    """A type outside the five documented ones (or a missing type) is rejected."""
+@pytest.mark.parametrize("bad_type", ["", 5, None])
+def test_validate_rejects_missing_or_non_string_type(bad_type: object) -> None:
+    """A missing, empty or non-string type is refused (another name warns, TASK-524)."""
     entry = {"command": "x"} if bad_type is None else {"type": bad_type, "command": "x"}
-    with pytest.raises(cw.InvalidCandidateError, match="'type' must be one of"):
+    with pytest.raises(cw.InvalidCandidateError, match="'type' must be a non-empty string"):
         hooks.validate_hooks({"PreToolUse": [{"hooks": [entry]}]})
 
 
@@ -309,7 +310,7 @@ def test_project_read_rejects_malformed_json(tmp_path: Path) -> None:
 
 def test_project_write_bad_shape_writes_nothing(tmp_path: Path) -> None:
     with pytest.raises(cw.InvalidCandidateError):
-        hooks.write_project_hooks(tmp_path, {"NotAnEvent": [_GROUP]}, expected_hash=None)
+        hooks.write_project_hooks(tmp_path, {"PreToolUse": _GROUP}, expected_hash=None)
     # Validation precedes the mkdir, so even the .claude dir is not created.
     assert not (tmp_path / ".claude").exists()
 
@@ -502,9 +503,8 @@ def test_route_bad_shape_is_422_and_writes_nothing(write_config, tmp_path, proje
     assert not (projects_root / "alpha" / ".claude" / "settings.json").exists()
 
 
-def test_route_unknown_event_is_422_and_writes_nothing(
-    write_config, tmp_path, projects_root
-) -> None:
+def test_route_unknown_event_saves_with_a_warning(write_config, tmp_path, projects_root) -> None:
+    """TASK-524: an event outside the known list saves as typed, and the response warns."""
     with _client(write_config, tmp_path, _ON) as c:
         resp = c.put(
             _URL,
@@ -512,11 +512,32 @@ def test_route_unknown_event_is_422_and_writes_nothing(
                 "scope": "project",
                 "project": "alpha",
                 "confirm": "alpha",
-                "hooks": {"NotAnEvent": [_GROUP]},
+                "hooks": {"NotAnEvent": [_GROUP], "Stop": [_GROUP]},
             },
         )
-        assert resp.status_code == 422
-    assert not (projects_root / "alpha" / ".claude" / "settings.json").exists()
+        assert resp.status_code == 200, resp.text
+        warnings = resp.json()["warnings"]
+    assert len(warnings) == 1
+    assert "hooks event 'NotAnEvent' is not one of the known values" in warnings[0]
+    assert "saves as typed" in warnings[0]
+    stored = json.loads((projects_root / "alpha" / ".claude" / "settings.json").read_text())
+    assert stored["hooks"] == {"NotAnEvent": [_GROUP], "Stop": [_GROUP]}
+
+
+def test_route_known_events_save_with_no_warning(write_config, tmp_path, projects_root) -> None:
+    """The negative control: a block of known events answers an empty warnings list."""
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.put(
+            _URL,
+            json={
+                "scope": "project",
+                "project": "alpha",
+                "confirm": "alpha",
+                "hooks": {"Stop": [_GROUP]},
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["warnings"] == []
 
 
 def test_route_non_command_type_is_422_and_writes_nothing(
@@ -803,7 +824,7 @@ def test_route_user_write_bad_shape_is_422(write_config, tmp_path) -> None:
             json={
                 "scope": "user",
                 "confirm": cw.USER_SCOPE_TOKEN,
-                "hooks": {"NotAnEvent": [_GROUP]},
+                "hooks": {"PreToolUse": _GROUP},
             },
         )
         assert resp.status_code == 422

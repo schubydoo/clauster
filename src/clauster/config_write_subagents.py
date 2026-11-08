@@ -97,6 +97,7 @@ import yaml
 
 from . import config_file_writer as fw
 from . import config_write as cw
+from .config import INHERIT_PERMISSION_MODE
 from .config_write_hooks import (
     _MAX_BLOCK_DEPTH,
     _depth_at_most,
@@ -112,7 +113,7 @@ from .config_write_mcp import (
     _validate_server_fields,
     contains_sentinel,
 )
-from .config_write_permissions import BYPASS_MODE, RECOGNIZED_MODES
+from .config_write_permissions import RECOGNIZED_MODES, is_bypass_mode
 from .config_write_settings import _orphan_sentinel_path
 
 #: The directory name holding subagent files under ``.claude/`` at either scope.
@@ -544,11 +545,21 @@ def _cli_effort(value: Any) -> str | int | None:
 
 
 def _validate_effort(value: Any, label: str) -> None:
-    """Reject ``value`` unless the CLI reads an effort level or an integer from it."""
-    if _cli_effort(value) is None:
+    """Reject ``value`` unless it is text or a number; warn when the CLI reads no level from it.
+
+    The levels are suggestions (TASK-524): a word the CLI reads no level from saves with a
+    warning, because Claude Code may add a level before this list does. A value that is not
+    a string or a number (a list, a mapping, a Boolean), and a string that starts with an
+    integer the CLI cannot hold, are refused.
+    """
+    if _cli_effort(value) is not None:
+        return
+    # A string that starts with an integer is a number the CLI could not hold (Infinity).
+    if not isinstance(value, str) or not value or _JS_PARSE_INT_RE.match(value.lower()):
         raise cw.InvalidCandidateError(
             f"{label} must be one of {list(_EFFORT_LEVELS)} (any case, or 'med') or an integer"
         )
+    cw.warn_unknown_value(label, value, _EFFORT_LEVELS)
 
 
 #: The signature every entry in :data:`_OPTIONAL_FRONTMATTER_RULES` satisfies:
@@ -557,17 +568,22 @@ _FrontmatterRule = Callable[[Any, str], None]
 
 
 def _one_of(*allowed: str) -> _FrontmatterRule:
-    """Return a rule that rejects any value other than one of the ``allowed`` strings.
+    """Return a rule that refuses a non-string value and warns about an unknown string.
 
-    Used for the frontmatter fields the CLI matches exactly against a closed list. Claude
-    Code silently ignores a value outside the list, so the write would land and do nothing;
-    refusing it here tells the operator at save time instead.
+    Used for the frontmatter fields the CLI matches exactly against a list of values.
+    The list is copied by hand and lags behind Claude Code, so a string outside it saves
+    with a warning (TASK-524) instead of a 422; the warning tells the operator at save time
+    that Claude Code may ignore it.
     """
 
     def _check(value: Any, label: str) -> None:
-        """Reject ``value`` unless it is exactly one of the closed list."""
-        if not isinstance(value, str) or value not in allowed:
-            raise cw.InvalidCandidateError(f"{label} must be one of {list(allowed)}")
+        """Refuse ``value`` unless it is a non-empty string; warn unless it is in the list."""
+        if not isinstance(value, str) or not value:
+            raise cw.InvalidCandidateError(
+                f"{label} must be a non-empty string, such as one of {list(allowed)}"
+            )
+        if value not in allowed:
+            cw.warn_unknown_value(label, value, allowed)
 
     return _check
 
@@ -611,10 +627,12 @@ def _validate_experimental(value: Any, label: str) -> None:
             "cachettl"
         ):
             continue
-        if ttl not in _CACHE_TTL_VALUES:
+        if not isinstance(ttl, str):
             raise cw.InvalidCandidateError(
-                f"{label} {key!r} must be one of {list(_CACHE_TTL_VALUES)}"
+                f"{label} {key!r} must be a string, such as one of {list(_CACHE_TTL_VALUES)}"
             )
+        if ttl not in _CACHE_TTL_VALUES:
+            cw.warn_unknown_value(f"{label} {key!r}", ttl, _CACHE_TTL_VALUES)
 
 
 #: ``manual`` is the documented frontmatter alias of ``default`` (Claude Code maps it
@@ -624,18 +642,20 @@ _MANUAL_MODE_ALIAS = "manual"
 
 
 def _validate_permission_mode(value: Any, label: str) -> None:
-    """Reject ``value`` unless it is a recognized, non-footgun-gated permission mode."""
+    """Refuse a non-string or footgun-gated mode; warn about a mode outside the known list."""
     if not isinstance(value, str):
         raise cw.InvalidCandidateError(f"{label} must be a string")
-    if value == BYPASS_MODE:
+    if is_bypass_mode(value):
         # Fail closed: bypassPermissions stays behind the existing footgun gate,
         # never settable through a subagent's frontmatter either.
         raise cw.InvalidCandidateError(f"{label} cannot be 'bypassPermissions' (footgun-gated)")
-    if value not in RECOGNIZED_MODES and value != _MANUAL_MODE_ALIAS:
+    if value == INHERIT_PERMISSION_MODE:
+        # Clauster's own launch sentinel (#1231), never a Claude Code mode.
         raise cw.InvalidCandidateError(
-            f"unknown frontmatter permissionMode {value!r} "
-            f"(want one of {sorted(RECOGNIZED_MODES | {_MANUAL_MODE_ALIAS})})"
+            f"{label} cannot be 'inherit': that is Clauster's launch setting, not a mode"
         )
+    if value not in RECOGNIZED_MODES and value != _MANUAL_MODE_ALIAS:
+        cw.warn_unknown_value(label, value, RECOGNIZED_MODES | {_MANUAL_MODE_ALIAS})
 
 
 #: Inline server names the 2.1.318 agent-file loader skips with "Skipping reserved MCP

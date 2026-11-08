@@ -163,7 +163,10 @@ def entry_needs_direct_write(entry: dict[str, Any]) -> bool:
       identifier; the docs pass it as the ``--client-id`` argv flag;
     * the redaction sentinel anywhere in the entry. A sentinel means "keep the stored
       value", which only :func:`~clauster.config_write.merge_redacted` in the direct
-      writer honors; the CLI would store the literal ``"********"``.
+      writer honors; the CLI would store the literal ``"********"``;
+    * a ``type`` or key outside the known lists (TASK-524,
+      :func:`~clauster.config_write_mcp.has_unknown_fields`). It saves with a warning, and
+      no rule says whether its value is a secret.
     """
     if _has_nonempty_value(entry.get("env")) or _has_nonempty_value(entry.get("headers")):
         return True
@@ -177,6 +180,10 @@ def entry_needs_direct_write(entry: dict[str, Any]) -> bool:
     if isinstance(args, list) and args:
         return True
     if mcp.contains_sentinel(entry):
+        return True
+    # TASK-524: a field outside the known lists saves with a warning, and nothing says
+    # whether its value is a secret, so it never reaches argv.
+    if mcp.has_unknown_fields(entry):
         return True
     oauth = entry.get("oauth")
     if isinstance(oauth, dict) and _oauth_needs_direct_write(oauth):
@@ -314,8 +321,8 @@ def cli_add_server(
     if entry_needs_direct_write(entry):
         raise ValueError(
             f"cli_add_server refuses to add {name!r}: entry carries an inline env/headers "
-            "value, a credential-bearing url, or non-empty args that must not reach the "
-            "CLI argv (route to the direct writer instead)"
+            "value, a credential-bearing url, non-empty args, or a field outside the known "
+            "list that must not reach the CLI argv (route to the direct writer instead)"
         )
     cw.validate_candidate({name: entry}, mcp.validate_mcp_servers)
     args = ["add-json", name, json.dumps(entry), "--scope", scope]

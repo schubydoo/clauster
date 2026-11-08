@@ -72,6 +72,7 @@ async def api_config_write_mcp_read(
 
 
 @router.put("/api/config-write/mcp")
+@_base.reports_value_warnings
 async def api_config_write_mcp_write(config: ConfigDep, runner: RunnerDep, body: dict) -> dict:
     """Replace the whole MCP server map for a surface."""
     return await _base.put_config_write(
@@ -91,6 +92,7 @@ async def api_config_write_mcp_write(config: ConfigDep, runner: RunnerDep, body:
 
 
 @router.post("/api/config-write/mcp/server")
+@_base.reports_value_warnings
 async def api_config_write_mcp_server(config: ConfigDep, runner: RunnerDep, body: dict) -> dict:
     """Add, edit, or remove a single MCP server entry behind the config-write gate."""
     # CLI-driven add/remove/edit (#769) over the same Foundation gate the PUT
@@ -155,7 +157,11 @@ async def api_config_write_mcp_server(config: ConfigDep, runner: RunnerDep, body
         # The docs: the OAuth client flags "only apply to HTTP and SSE transports. They
         # have no effect on stdio servers" (and WebSocket has no OAuth at all). Refuse
         # rather than accept a secret that would be silently ignored.
-        if config_write_mcp.entry_transport(entry) not in ("http", "sse"):
+        try:
+            transport: str | None = config_write_mcp.entry_transport(entry)
+        except config_write.InvalidCandidateError:
+            transport = None  # a type outside the known list saves with a warning (TASK-524)
+        if transport not in ("http", "sse"):
             raise HTTPException(
                 status_code=422,
                 detail="'client_secret' applies only to an http or sse server",
@@ -166,8 +172,9 @@ async def api_config_write_mcp_server(config: ConfigDep, runner: RunnerDep, body
                 detail=(
                     "'client_secret' cannot be stored for this entry: it carries a "
                     "value that must be kept off the CLI's argv (inline env/headers, "
-                    "a headersHelper, a masked '********' value, or a url with a query "
-                    "string, userinfo, or fragment), so it is "
+                    "a headersHelper, a masked '********' value, a field that is not on "
+                    "the known list, or a url with a query string, userinfo, or fragment), "
+                    "so it is "
                     "written directly to the config file, which has no way to deliver "
                     "the secret. Put the credential in the entry's 'env' or 'headers' "
                     "instead."

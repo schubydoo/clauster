@@ -1985,7 +1985,7 @@ def test_config_mgmt_skill_visibility_fits_a_phone_width(
 ) -> None:
     """At 320 px the visibility panel has no horizontal overflow, also with a long name.
 
-    A stored value that Claude Code does not read shows as its own "Not valid" choice.
+    A stored value outside the known four shows as its own "Not a known value" choice.
     """
     alpha = _projects_root(config_mgmt_server) / "alpha"
     _seed_skill(alpha, "a-rather-long-skill-folder-name-that-must-wrap")
@@ -1994,7 +1994,7 @@ def test_config_mgmt_skill_visibility_fits_a_phone_width(
     )
     _open_skill_visibility(browser, config_mgmt_server)
     browser.expect_value('[data-test="cm-skill-ov-odd"]', "?")
-    browser.expect_text('[data-test="cm-skill-ov-odd"]', 'Not valid: "maybe"')
+    browser.expect_text('[data-test="cm-skill-ov-odd"]', 'Not a known value: "maybe"')
     browser.set_viewport(320, 900)  # the session closes after the test, so no restore
     browser.select(
         '[data-test="cm-skill-ov-a-rather-long-skill-folder-name-that-must-wrap"]',
@@ -2009,9 +2009,12 @@ def test_config_mgmt_skill_visibility_fits_a_phone_width(
     )
     assert overflow == [0, 0], overflow
 
-    # The "Not valid" value is sent unchanged, so the backend refuses the save by its key.
+    # The stored value is sent unchanged: it saves, with a warning that names it (TASK-524).
     _save_skill_visibility(browser, "alpha")
-    browser.expect_text('[data-test="cm-error"]', "skillOverrides['odd'] must be one of")
+    browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
+    browser.expect_text(
+        '[data-test="cm-save-warnings"]', "skillOverrides['odd'] 'maybe' is not one of"
+    )
 
 
 def test_config_mgmt_hooks_save_round_trip(
@@ -2062,7 +2065,7 @@ def test_config_mgmt_hooks_rows_round_trip(
     # Rows mode default: add a hook, pick the event, type the command, save.
     browser.click('[data-test="cm-hooks-add"]')
     browser.expect_visible('[data-test="cm-hook-command"]')  # let the x-for row hydrate
-    browser.select('[data-test="cm-hook-event"]', "SessionStart")
+    browser.fill('[data-test="cm-hook-event"]', "SessionStart")
     browser.fill('[data-test="cm-hook-command"]', "echo rows-hook")
     browser.fill('[data-test="cm-confirm"]', "alpha")
     browser.click('[data-test="cm-save"]')
@@ -2073,6 +2076,40 @@ def test_config_mgmt_hooks_rows_round_trip(
     )
     assert on_disk["hooks"] == {
         "SessionStart": [{"hooks": [{"type": "command", "command": "echo rows-hook"}]}]
+    }
+
+
+def test_config_mgmt_hooks_unknown_event_saves_with_a_visible_warning(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """An event outside the known list saves as typed, with a warning (TASK-524)."""
+    cfg_path = Path(config_mgmt_server.state_dir).parent / "clauster.yml"
+    projects_root = Path(yaml.safe_load(cfg_path.read_text(encoding="utf-8"))["projects_root"])
+
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-hooks"]')
+    browser.expect_visible('[data-test="cm-view-hooks"]')
+    browser.click('[data-test="cm-hooks-add"]')
+    browser.expect_visible('[data-test="cm-hook-command"]')
+    # A known event shows no warning; the positive control for the check below.
+    browser.fill('[data-test="cm-hook-event"]', "Stop")
+    browser.expect_hidden('[data-test="cm-hook-event-warning"]')
+    browser.fill('[data-test="cm-hook-event"]', "FutureEvent")
+    browser.expect_text('[data-test="cm-hook-event-warning"]', "Not one of the known events")
+    browser.fill('[data-test="cm-hook-command"]', "echo future")
+    browser.fill('[data-test="cm-confirm"]', "alpha")
+    browser.click('[data-test="cm-save"]')
+    browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
+    browser.expect_text(
+        '[data-test="cm-save-warnings"]', "'FutureEvent' is not one of the known values"
+    )
+
+    on_disk = json.loads(
+        (projects_root / "alpha" / ".claude" / "settings.json").read_text(encoding="utf-8")
+    )
+    assert on_disk["hooks"] == {
+        "FutureEvent": [{"hooks": [{"type": "command", "command": "echo future"}]}]
     }
 
 
@@ -2089,13 +2126,13 @@ def test_config_mgmt_hooks_rows_http_and_mcp_tool_round_trip(
     browser.expect_visible('[data-test="cm-view-hooks"]')
     browser.click('[data-test="cm-hooks-add"]')
     browser.expect_visible('[data-test="cm-hook-command"]')
-    browser.select('[data-test="cm-hook-event"]', "PostToolUse")
+    browser.fill('[data-test="cm-hook-event"]', "PostToolUse")
     browser.select('[data-test="cm-hook-type"]', "http")
     browser.expect_visible('[data-test="cm-hook-url"]')
     browser.fill('[data-test="cm-hook-url"]', "https://hooks.example.com/in")
     browser.click('[data-test="cm-hooks-add"]')
     browser.expect_visible('[data-test="cm-hook-row-1"]')
-    browser.select('[data-test="cm-hook-row-1"] [data-test="cm-hook-event"]', "Stop")
+    browser.fill('[data-test="cm-hook-row-1"] [data-test="cm-hook-event"]', "Stop")
     browser.select('[data-test="cm-hook-row-1"] [data-test="cm-hook-type"]', "mcp_tool")
     browser.expect_visible('[data-test="cm-hook-row-1"] [data-test="cm-hook-server"]')
     browser.fill('[data-test="cm-hook-row-1"] [data-test="cm-hook-server"]', "scanner")
@@ -2128,17 +2165,26 @@ _ROW0 = '[data-test="cm-hook-row-0"]'
 _VISIBLE_HOOK_INPUTS = (
     "(() => [...document.querySelectorAll('[data-test=\"cm-hook-row-0\"] input')]"
     ".filter((el) => el.checkVisibility()).map((el) => el.dataset.test)"
-    ".filter((t) => !['cm-hook-matcher', 'cm-hook-timeout'].includes(t)).sort())()"
+    ".filter((t) => !['cm-hook-event', 'cm-hook-matcher', 'cm-hook-timeout'].includes(t))"
+    ".sort())()"
 )
 # For each row-0 select: [name, width it needs for its widest option, width it has]. A
 # clone with width:auto and no floor sizes itself to the widest option, with the same
-# padding and arrow.
+# padding and arrow. The event box is a text input since TASK-524: _HOOK_EVENT_FITS checks
+# that its text fits it.
 _HOOK_SELECT_WIDTHS = (
     "(() => [...document.querySelectorAll('[data-test=\"cm-hook-row-0\"] select')].map((el) => {"
     " const c = el.cloneNode(true); c.style.width = 'auto'; c.style.minWidth = '0';"
     " c.style.position = 'absolute';"
     " el.parentElement.appendChild(c); const need = c.offsetWidth; c.remove();"
     " return [el.dataset.test, need, el.offsetWidth]; }))()"
+)
+
+
+# [scrollWidth, clientWidth] of row 0's event box: the text fits when the first is not larger.
+_HOOK_EVENT_FITS = (
+    '(() => { const el = document.querySelector(\'[data-test="cm-hook-row-0"]'
+    ' [data-test="cm-hook-event"]\'); return [el.scrollWidth, el.clientWidth]; })()'
 )
 
 
@@ -2180,19 +2226,21 @@ def test_config_mgmt_hooks_row_shows_only_its_type_inputs(
 def test_config_mgmt_hooks_rows_fit_the_modal(
     browser: AgentBrowser, config_mgmt_server: Server
 ) -> None:
-    """The event and type selects fit their longest option, with no sideways scroll (TASK-513).
+    """The event box and type select fit their longest value, with no sideways scroll (TASK-513).
 
     The table had ``min-width: 42rem`` (672 px in a 670 px modal body), and the width:100%
     selects were squeezed to a few characters: "UserPromptExpansion" showed "UserProm".
     """
     _open_hooks_rows_with_one_row(browser, config_mgmt_server)
-    browser.select(f'{_ROW0} [data-test="cm-hook-event"]', "UserPromptExpansion")
+    browser.fill(f'{_ROW0} [data-test="cm-hook-event"]', "UserPromptExpansion")
     browser.select(f'{_ROW0} [data-test="cm-hook-type"]', "mcp_tool")
     browser.expect_visible(f'{_ROW0} [data-test="cm-hook-server"]')
     widths = browser.eval_json(_HOOK_SELECT_WIDTHS)
-    assert [w[0] for w in widths] == ["cm-hook-event", "cm-hook-type"], widths
+    assert [w[0] for w in widths] == ["cm-hook-type"], widths
     for name, need, have in widths:
         assert need <= have, (name, need, have)
+    event = browser.eval_json(_HOOK_EVENT_FITS)
+    assert event[0] <= event[1], event
     # The matcher input takes the width the selects leave; keep it a usable size.
     matcher = browser.eval_json(
         f"document.querySelector('{_ROW0} [data-test=\"cm-hook-matcher\"]').offsetWidth"
@@ -2215,6 +2263,8 @@ def test_config_mgmt_hooks_rows_fit_the_modal(
     assert phone[0] == 375 and phone[1] > phone[2], phone
     for name, need, have in browser.eval_json(_HOOK_SELECT_WIDTHS):
         assert need <= have, ("phone", name, need, have)
+    event = browser.eval_json(_HOOK_EVENT_FITS)
+    assert event[0] <= event[1], ("phone", event)
     matcher = browser.eval_json(
         f"document.querySelector('{_ROW0} [data-test=\"cm-hook-matcher\"]').offsetWidth"
     )
@@ -2407,7 +2457,7 @@ def test_config_mgmt_hooks_prototype_matcher_round_trip(
     browser.expect_visible('[data-test="cm-view-hooks"]')
     browser.click('[data-test="cm-hooks-add"]')
     browser.expect_visible('[data-test="cm-hook-matcher"]')
-    browser.select('[data-test="cm-hook-event"]', "PreToolUse")
+    browser.fill('[data-test="cm-hook-event"]', "PreToolUse")
     browser.fill('[data-test="cm-hook-matcher"]', "__proto__")
     browser.fill('[data-test="cm-hook-command"]', "echo proto")
     browser.fill('[data-test="cm-confirm"]', "alpha")

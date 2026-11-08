@@ -67,6 +67,7 @@ async def api_config_write_hooks_read(
 
 
 @router.put("/api/config-write/hooks")
+@_base.reports_value_warnings
 async def api_config_write_hooks_write(
     config: ConfigDep, runner: RunnerOrNoneDep, body: dict
 ) -> dict:

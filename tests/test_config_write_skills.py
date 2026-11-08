@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import time
 from pathlib import Path
@@ -826,8 +827,7 @@ def test_validate_skill_overrides_accepts_empty() -> None:
         {"": "on"},
         {"two  spaces": "on"},
         {"__proto__": "on"},
-        {"good-name": "bogus-value"},
-        {"good-name": True},
+        {"good-name": True},  # another STRING warns (TASK-524)
         {"good-name": ["off"]},  # unhashable: must not leak a bare TypeError
         {"good-name": {}},
         {5: "on"},
@@ -1318,9 +1318,10 @@ def test_route_overrides_user_round_trip(write_config, tmp_path) -> None:
     assert out["skillOverrides"] == {"greeter": "on"}
 
 
-def test_route_overrides_bad_value_is_422_and_writes_nothing(
+def test_route_overrides_unknown_value_saves_with_a_warning(
     write_config, tmp_path, projects_root
 ) -> None:
+    """TASK-524: a visibility value outside the known four saves, and the response warns."""
     with _client(write_config, tmp_path, _ON) as c:
         resp = c.put(
             _OVERRIDES_URL,
@@ -1328,11 +1329,14 @@ def test_route_overrides_bad_value_is_422_and_writes_nothing(
                 "scope": "project",
                 "project": "alpha",
                 "confirm": "alpha",
-                "overrides": {"greeter": "bogus"},
+                "overrides": {"greeter": "bogus", "other": "off"},
             },
         )
-        assert resp.status_code == 422
-    assert not (projects_root / "alpha" / ".claude" / "settings.json").exists()
+        assert resp.status_code == 200, resp.text
+        [warning] = resp.json()["warnings"]
+    assert "skillOverrides['greeter'] 'bogus' is not one of the known values" in warning
+    stored = json.loads((projects_root / "alpha" / ".claude" / "settings.json").read_text())
+    assert stored["skillOverrides"] == {"greeter": "bogus", "other": "off"}
 
 
 def test_route_overrides_missing_payload_is_422(write_config, tmp_path) -> None:
@@ -1476,7 +1480,7 @@ def test_route_overrides_non_string_value_names_the_key(
         h0 = c.get(f"{_OVERRIDES_URL}?project=alpha").json()["hash"]
         resp = _overrides_put(c, {"odd": bad}, h0)
         assert resp.status_code == 422
-        assert resp.json()["detail"].startswith("skillOverrides['odd'] must be one of ")
+        assert resp.json()["detail"].startswith("skillOverrides['odd'] must be a string")
     assert not (projects_root / "alpha" / ".claude" / "settings.json").exists()
 
 
@@ -1694,7 +1698,7 @@ def test_route_overrides_write_user_scope_bad_value_is_422(write_config, tmp_pat
             json={
                 "scope": "user",
                 "confirm": cw.USER_SCOPE_TOKEN,
-                "overrides": {"greeter": "bogus"},
+                "overrides": {"greeter": ["on"]},
             },
         )
         assert resp.status_code == 422
@@ -1710,7 +1714,7 @@ def test_route_overrides_write_local_scope_bad_value_is_422(
                 "scope": "local",
                 "project": "alpha",
                 "confirm": "alpha (local)",
-                "overrides": {"greeter": "bogus"},
+                "overrides": {"greeter": 5},
             },
         )
         assert resp.status_code == 422
@@ -1929,14 +1933,12 @@ _REFUSED = [
     pytest.param("arguments: issue 2", False, id="arguments-digit-name"),
     pytest.param("arguments: [issue, '']", False, id="arguments-blank-entry"),
     pytest.param("arguments: [issue, 5]", False, id="arguments-non-string-entry"),
-    pytest.param("effort: banana", True, id="effort-unknown"),
-    pytest.param("effort: ' high'", True, id="effort-not-trimmed"),
     pytest.param("effort: true", True, id="effort-bool"),
+    pytest.param("effort: [banana]", True, id="effort-list-of-a-word"),
+    pytest.param("context: 5", True, id="context-number"),
+    pytest.param("shell: 5", True, id="shell-number"),
     pytest.param("model: ''", True, id="model-blank"),
     pytest.param("model: 5", True, id="model-number"),
-    pytest.param("context: forked", True, id="context-other"),
-    pytest.param("context: Fork", True, id="context-case"),
-    pytest.param("shell: zsh", True, id="shell-unknown"),
     pytest.param("shell: ''", True, id="shell-blank"),
     pytest.param("metadata: [1, 2]", True, id="metadata-list"),
     pytest.param("metadata: text", True, id="metadata-string"),
@@ -1959,6 +1961,26 @@ def test_a_value_the_cli_rejects_or_ignores_is_refused(line: str, droppable: boo
     with pytest.raises(cw.InvalidCandidateError) as excinfo:
         sk.validate_skill_md_content(_fm(line))
     assert isinstance(excinfo.value, sk._IgnoredFieldError) is droppable
+
+
+@pytest.mark.parametrize(
+    ("line", "warned"),
+    [
+        pytest.param("effort: banana", "'effort' 'banana'", id="effort-unknown"),
+        pytest.param("effort: ' high'", "'effort' ' high'", id="effort-not-trimmed"),
+        pytest.param("context: forked", "'context' 'forked'", id="context-other"),
+        pytest.param("context: Fork", "'context' 'Fork'", id="context-case"),
+        pytest.param("shell: zsh", "'shell' 'zsh'", id="shell-unknown"),
+    ],
+)
+def test_a_word_outside_a_known_list_saves_with_a_warning(line: str, warned: str) -> None:
+    """TASK-524: effort, context and shell offer known values; another word warns."""
+    with cw.collect_value_warnings() as warnings:
+        sk.validate_skill_md_content(_fm(line))
+    assert warnings and all(warned in w for w in warnings), warnings
+    assert "is not one of the known values" in warnings[0]
+    # The load conversion leaves such a field in place: it is not one Claude Code ignores.
+    assert sk._ignorable_keys(_fm(line)) is None
 
 
 @pytest.mark.parametrize(
@@ -2124,7 +2146,7 @@ def _skill(tmp_path: Path, text: str, name: str = "s") -> Path:
 
 def test_load_removes_fields_the_cli_ignores_and_says_so(tmp_path: Path) -> None:
     raw = (
-        "---\ndescription: d\nshell: zsh  # my shell\neffort: banana\n"
+        "---\ndescription: d\nshell: 5  # my shell\nbackground: maybe\n"
         "metadata:\n  - not\n  - a map\nname: kept\n---\nBody.\n"
     )
     path = _skill(tmp_path, raw)
@@ -2133,7 +2155,7 @@ def test_load_removes_fields_the_cli_ignores_and_says_so(tmp_path: Path) -> None
     assert content == "---\ndescription: d\nname: kept\n---\nBody.\n"
     assert file_hash == cw.hash_bytes(path.read_bytes())  # the file ON DISK, for the 409 guard
     assert note is not None
-    for key in ("'shell'", "'effort'", "'metadata'"):
+    for key in ("'shell'", "'background'", "'metadata'"):
         assert key in note
     sk.validate_skill_md_content(content)  # the converted text saves
     # The plain read never converts: it is the file as it is on disk.
@@ -2141,14 +2163,14 @@ def test_load_removes_fields_the_cli_ignores_and_says_so(tmp_path: Path) -> None
 
 
 def test_load_keeps_a_bom_and_crlf_line_ends_when_it_converts(tmp_path: Path) -> None:
-    _skill(tmp_path, "\ufeff---\r\ndescription: d\r\ncontext: forked\r\n---\r\nBody.\r\n")
+    _skill(tmp_path, "\ufeff---\r\ndescription: d\r\ncontext: 5\r\n---\r\nBody.\r\n")
     content, _, _, note = sk.read_skill_file_for_edit(tmp_path, "s")
     assert content == "\ufeff---\r\ndescription: d\r\n---\r\nBody.\r\n"
     assert note is not None
 
 
 def test_load_converts_the_last_field_without_a_blank_line(tmp_path: Path) -> None:
-    _skill(tmp_path, "---\ndescription: d\nshell: zsh\n---\nBody.\n")
+    _skill(tmp_path, "---\ndescription: d\nshell: 5\n---\nBody.\n")
     content, _, _, _ = sk.read_skill_file_for_edit(tmp_path, "s")
     assert content == "---\ndescription: d\n---\nBody.\n"
 
@@ -2159,12 +2181,12 @@ def test_load_converts_the_last_field_without_a_blank_line(tmp_path: Path) -> No
         pytest.param("---\ndescription: d\n---\nBody.\n", id="nothing-to-convert"),
         pytest.param("---\nhooks: [x]\n---\nBody.\n", id="hooks-not-droppable"),
         pytest.param("---\nuser-invocable: maybe\n---\nb\n", id="user-invocable-not-droppable"),
-        pytest.param("---\n{shell: zsh}\n---\nb\n", id="flow-style-root"),
-        pytest.param("---\nshell: zsh\nshell: bash\n---\nb\n", id="duplicate-key"),
-        pytest.param("---\neffort: x\neffort: y\n---\nb\n", id="duplicate-ignored-key"),
-        pytest.param("---\n  description: d\n  shell: zsh\n---\nb\n", id="indented-root"),
-        pytest.param("---\nx: &x {shell: zsh}\n<<: *x\n---\nb\n", id="field-from-a-merge"),
-        pytest.param("---\nshell: zsh\neffort: 010\n---\nb\n", id="also-a-mismatch"),
+        pytest.param("---\n{shell: 5}\n---\nb\n", id="flow-style-root"),
+        pytest.param("---\nshell: 5\nshell: bash\n---\nb\n", id="duplicate-key"),
+        pytest.param("---\nbackground: x\nbackground: y\n---\nb\n", id="duplicate-ignored-key"),
+        pytest.param("---\n  description: d\n  shell: 5\n---\nb\n", id="indented-root"),
+        pytest.param("---\nx: &x {shell: 5}\n<<: *x\n---\nb\n", id="field-from-a-merge"),
+        pytest.param("---\nshell: 5\neffort: 010\n---\nb\n", id="also-a-mismatch"),
         pytest.param("---\nnever closed\n", id="unparseable"),
     ],
 )
@@ -2176,7 +2198,7 @@ def test_load_never_converts_what_it_cannot_prove_equivalent(tmp_path: Path, raw
 
 
 def test_load_redacts_after_converting(tmp_path: Path) -> None:
-    _skill(tmp_path, "---\ndescription: d\napi_key: sk-not-a-real-key-0000\nshell: zsh\n---\nb\n")
+    _skill(tmp_path, "---\ndescription: d\napi_key: sk-not-a-real-key-0000\nshell: 5\n---\nb\n")
     content, _, _, note = sk.read_skill_file_for_edit(tmp_path, "s")
     assert note is not None
     assert "sk-not-a-real-key-0000" not in content
@@ -2185,15 +2207,15 @@ def test_load_redacts_after_converting(tmp_path: Path) -> None:
 
 def test_load_does_not_convert_a_supporting_file(tmp_path: Path) -> None:
     _skill(tmp_path, "---\ndescription: d\n---\nb\n")
-    (tmp_path / "skills" / "s" / "notes.md").write_bytes(b"---\nshell: zsh\n---\n")
+    (tmp_path / "skills" / "s" / "notes.md").write_bytes(b"---\nshell: 5\n---\n")
     content, _, _, note = sk.read_skill_file_for_edit(tmp_path, "s", "notes.md")
-    assert note is None and "shell: zsh" in content
+    assert note is None and "shell: 5" in content
 
 
 def test_route_returns_the_converted_text_and_saves_it(
     write_config, tmp_path, projects_root
 ) -> None:
-    raw = "---\ndescription: d\neffort: banana\n---\nBody.\n"
+    raw = "---\ndescription: d\nbackground: maybe\n---\nBody.\n"
     path = projects_root / "alpha" / ".claude" / "skills" / "greeter" / sk.SKILL_FILENAME
     path.parent.mkdir(parents=True)
     # Byte-exact LF: text mode writes CRLF on Windows, and the route returns the file's
@@ -2201,7 +2223,7 @@ def test_route_returns_the_converted_text_and_saves_it(
     path.write_bytes(raw.encode("utf-8"))
     with _client(write_config, tmp_path, _ON) as c:
         view = c.get(f"{_FILE_URL}?project=alpha&name=greeter").json()
-        assert view["converted"] and "'effort'" in view["converted"]
+        assert view["converted"] and "'background'" in view["converted"]
         assert view["content"] == "---\ndescription: d\n---\nBody.\n"
         body = {
             "scope": "project",
@@ -2441,7 +2463,6 @@ def test_a_hooks_value_that_cancels_the_skills_hooks_is_refused(hooks: str) -> N
         "hooks: {Stop: 5}",
         "hooks: {Unknown: [x]}",
         "hooks: {PostToolUse: null}",
-        "hooks: {Unknown: [{matcher: x, hooks: [{type: command, command: y}]}]}",
         "hooks: {Stop: [5]}",
         "hooks: {Stop: [{hooks: x}]}",
     ],
@@ -2482,7 +2503,7 @@ def test_load_never_removes_a_field_the_cli_reads(tmp_path: Path, raw: str) -> N
 
 
 def test_load_converts_every_ignored_field_in_one_validation(tmp_path: Path, monkeypatch) -> None:
-    fields = ["effort: banana", "shell: zsh", "context: forked", "model: ''", "created_by: me"]
+    fields = ["background: maybe", "shell: 5", "context: 5", "model: ''", "created_by: me"]
     _skill(tmp_path, _fm("description: d", *fields, "metadata: [x]"))
     calls = []
     real = sk.validate_skill_md_content
@@ -2559,7 +2580,7 @@ def test_a_tab_indented_skill_header_saves() -> None:
 
 def test_load_does_not_convert_a_header_the_cli_reads_through_its_retry(tmp_path: Path) -> None:
     # The lines on disk are not the lines the CLI parses, so no line is removed.
-    raw = _fm("argument-hint: [a] [b]", "shell: zsh")
+    raw = _fm("argument-hint: [a] [b]", "shell: 5")
     _skill(tmp_path, raw)
     content, _, _, note = sk.read_skill_file_for_edit(tmp_path, "s")
     assert note is None and content == raw
@@ -2570,7 +2591,7 @@ def test_load_does_not_convert_a_header_the_cli_reads_through_its_retry(tmp_path
 def test_load_does_not_remove_a_field_a_nested_alias_needs(tmp_path: Path) -> None:
     # Without `shell`, the nested `*s` has no anchor and the text no longer parses at all
     # (the CLI's retry only re-quotes top-level lines), so nothing is converted.
-    raw = "---\nshell: &s zsh\nmeta:\n  a: *s\n---\nb\n"
+    raw = "---\nshell: &s 5\nmeta:\n  a: *s\n---\nb\n"
     _skill(tmp_path, raw)
     content, _, _, note = sk.read_skill_file_for_edit(tmp_path, "s")
     assert note is None and content == raw
@@ -2597,8 +2618,9 @@ def test_a_valid_skill_hook_of_every_type_saves(entry: str) -> None:
 @pytest.mark.parametrize(
     "entry",
     [
-        pytest.param("{type: shell, command: x}", id="unknown-type"),
-        pytest.param("{type: command, command: x, extra: 1}", id="unknown-field"),
+        # A type or field outside the known lists warns (TASK-524); a bad shape is refused.
+        pytest.param("{type: 5, command: x}", id="non-string-type"),
+        pytest.param("{type: command, command: x, extra: .inf}", id="unknown-field-infinite"),
         pytest.param("{type: http}", id="missing-url"),
         pytest.param("{type: command, command: x, timeout: 0}", id="timeout-not-positive"),
         pytest.param("{type: command, command: '${CLAUDE_PLUGIN_ROOT}/x'}", id="plugin-owned"),
@@ -2647,12 +2669,13 @@ def test_a_reader_that_runs_out_of_stack_is_a_422(monkeypatch) -> None:
 def test_mixed_type_hook_keys_are_a_422_on_every_path(tmp_path: Path, hooks: str) -> None:
     # The hooks validator sorts unknown keys for its message; an int and a str do not sort,
     # and that TypeError used to escape as a 500 (and a 500 for the whole Skills list).
+    # Since TASK-524 an unknown TEXT key warns, so the refusal names the key that is not text.
     content = _fm("description: d", hooks)
-    with pytest.raises(cw.InvalidCandidateError, match="unknown"):
+    with pytest.raises(cw.InvalidCandidateError, match="unknown|text"):
         sk.validate_skill_md_content(content)
     _skill(tmp_path, content)
     (item,) = sk.list_skills(tmp_path)
-    assert "unknown" in item["frontmatter_error"]
+    assert re.search("unknown|text", item["frontmatter_error"])
     assert sk.read_skill_file_for_edit(tmp_path, "s")[3] is None
 
 
