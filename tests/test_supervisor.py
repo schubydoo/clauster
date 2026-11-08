@@ -1479,7 +1479,7 @@ def test_api_resume_agent_configured_symlink_alias_with_ceiling_resumes(
 
 @_SYMLINK_SKIP
 @pytest.mark.parametrize("kind", ["loop", "dangling"])
-def test_api_resume_agent_loop_or_dangling_link_cwd_is_403(
+def test_api_resume_agent_loop_or_dangling_link_cwd_is_refused(
     write_config, tmp_path, projects_root, monkeypatch, kind
 ):
     link = projects_root / "zeta"
@@ -1487,7 +1487,10 @@ def test_api_resume_agent_loop_or_dangling_link_cwd_is_403(
     r, captured = _resume_via_route(
         write_config, tmp_path, monkeypatch, cwd=link, extra=_INHERIT_DEFAULT + _ALPHA_CEILING
     )
-    assert r.status_code == 403
+    # 3.11/3.12 raise on a loop while resolving the recorded cwd, which is the 409 "cannot
+    # be resolved" refusal; 3.13+ resolve it to a path that no ceiling covers (403).
+    loop_raises = kind == "loop" and sys.version_info < (3, 13)
+    assert r.status_code == (409 if loop_raises else 403)
     assert captured == []
 
 
