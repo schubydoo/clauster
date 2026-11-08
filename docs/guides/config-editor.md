@@ -604,14 +604,39 @@ tab, or the end of the line) is part of the value too. In the body of
 as `********`. The body of `SKILL.md` is masked too, because skills often hold
 commands.
 
+A secret value can also go on past the end of its line. The editor then masks
+the next lines too. Each of those lines shows only its indent and `********`.
+A blank line stays blank. A comment line that is
+not indented deeper stays visible and does not end the value. These values go
+on past their line:
+
+- In a flow mapping or list: a value that is empty at the end of the line
+  (`env: {token:`), a quoted value with no closing quote on the line, a value
+  behind an anchor or a tag, a `{...}` or `[...]` value, or a plain value with
+  no `,`, `}` or `]` after it. The value goes on in the lines that are indented
+  deeper than its line.
+- After a secret-shaped key: a quoted value with no closing quote on the line,
+  or a `{...}` or `[...]` value, also behind an anchor or a tag. The value goes
+  on in the lines that are indented deeper than its line. In a list item such as
+  `- token: "abc`, its line starts at the `-`.
+- After a secret-shaped key: a plain value, as in `token: abc`. The value goes
+  on in the lines that are indented deeper than the key. A line that starts with
+  a key and a `:`, with a `#`, or with a list item (a `-` and a space) is not
+  part of the value, so the value ends there.
+
+A quoted value ends with the line that closes its quote. Any other value ends at
+the first line that is not indented deeper. A line of the value that is not
+indented deeper is not detected and shows in clear.
+
 In the frontmatter of `SKILL.md`, the Skills editor also masks each value that
-the MCP and Hooks tabs mask, whatever its key name, and every `args` value. In
-`mcpServers`, every `headers`, `env` and `args` value and a `headersHelper`
-command show as `********`. For example, `headers: {X-Custom: abc}` shows as
-`headers: {X-Custom: ********}`. The MCP tab shows an `args` item unless it
-holds a `${...}` reference or is a URL with a user name or password, but the
-Skills editor masks every `args` value. In `hooks`, every `headers` value shows as
-`********`.
+the MCP and Hooks tabs mask, whatever its key name. In `mcpServers`, every
+`headers` and `env` value and a `headersHelper` command show as `********`. For
+example, `headers: {X-Custom: abc}` shows as `headers: {X-Custom: ********}`.
+An `args` item is not masked by its place in the file. It shows in clear unless
+the line masking above masks it, for example a `${...}` reference, a URL with a
+user name or password, or a list item such as `- --token=abc`. In a flow list,
+`[--token=abc]` shows in clear, as it does on the MCP tab. In `hooks`, every
+`headers` value shows as `********`.
 The key names stay visible, and so does an empty value. If such a value covers
 more than one line, holds an escape, or has an anchor or a tag in front of it,
 each line of the value shows as one `********`.

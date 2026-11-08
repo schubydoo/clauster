@@ -325,7 +325,8 @@ Clauster masks secrets in two ways. Only the first one is a guarantee.
 2. **Shapes (best effort).** Every other secret is masked by its shape: ids and
    UUIDs that Clauster did not learn, and third-party tokens that Claude prints.
    [Log redaction](#log-redaction) below describes these masks and their known
-   residue. A new gap in a shape mask goes to a later milestone. It does not
+   residue. [Config-write masking](#config-write-masking-best-effort) describes
+   the masks of the config editor. A new gap in a shape mask goes to a later milestone. It does not
    block a release.
 
 !!! warning "Limits of the exact-value guarantee"
@@ -390,6 +391,23 @@ Clauster masks secrets in two ways. Only the first one is a guarantee.
       environment as the API returns them.
     - When `logs.redact_session_url` is false (the default), the debug log on
       disk keeps every id verbatim. See [Hybrid by default](#hybrid-by-default).
+
+### Config-write masking (best effort)
+
+When `config_write.enabled` is true, the dashboard reads Claude Code settings,
+MCP servers, hooks, subagents and skills from disk and shows them in the
+browser. Clauster masks the secrets in them by shape and by their place in the
+file, so this masking is best effort under the rule above. The
+[config editor guide](guides/config-editor.md) describes what each tab masks.
+
+!!! warning "A credential used as a key shows in clear"
+    The config editor masks values, not keys (the function `redact_secrets` in
+    `src/clauster/config_write.py`). It masks a value under a
+    secret-shaped key, a `${...}` reference, a URL with a user name or
+    password, and every `env` and `headers` value of an MCP server. It does not
+    mask a key by its name. A credential that is itself a key, for example the
+    name of an entry in an `env` or `headers` map, therefore shows in clear on
+    the config-write read surfaces. Do not use a credential as a key.
 
 ## Log redaction
 

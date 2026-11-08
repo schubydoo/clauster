@@ -1,11 +1,15 @@
 """Server and hook secrets in SKILL.md frontmatter are masked as the MCP and Hooks tabs mask them.
 
 TASK-529: the Skills editor masked SKILL.md line by line and each frontmatter ``url``, so an
-``mcpServers`` ``headers``, ``env`` or ``args`` value, or a hook ``headers`` value, showed in
-clear under a key that does not look secret (``X-Custom: <token>``). The read view now
+``mcpServers`` ``headers`` or ``env`` value, or a hook ``headers`` value, showed in clear
+under a key that does not look secret (``X-Custom: <token>``). The read view now
 masks each of them by its YAML node. A resent masked line keeps the stored line only when
 it is exactly the read view of that line and ``hooks`` and ``mcpServers`` load as stored;
 any other change is refused (422) and nothing is written.
+
+TASK-535: an ``mcpServers`` ``args`` item shows as the MCP tab shows it, in clear unless the
+line masker masks it (a ``${...}`` reference, a URL with a user name or password, or a
+``--api-key=x`` list item).
 
 TASK-497: the shared line masker missed a ``- token: x`` list item, a secret-keyed pair in
 a flow mapping under a benign key (``env: {API_KEY: x}``), and the lines of a block value
@@ -33,7 +37,7 @@ FAKE_CLAUDE = Path(__file__).resolve().parent / "fixtures" / "fake_claude" / "cl
 
 _STDIO = (
     "---\ndescription: d\nmcpServers:\n  gh:\n    command: npx\n"
-    "    args: [-y, qv-arg-one]\n    env:\n      GH_PAT: qv-env-one\n---\nRun it.\n"
+    "    args: [-y, pkg-arg-one]\n    env:\n      GH_PAT: qv-env-one\n---\nRun it.\n"
 )
 _HTTP = (
     "---\ndescription: d\nmcpServers:\n  api:\n    type: http\n"
@@ -75,7 +79,7 @@ def _no_stored_digits(message: str) -> bool:
 @pytest.mark.parametrize(
     ("stored", "shown"),
     [
-        (_STDIO, [f"    args: [{MASK}, {MASK}]\n", f"      GH_PAT: {MASK}\n"]),
+        (_STDIO, ["    args: [-y, pkg-arg-one]\n", f"      GH_PAT: {MASK}\n"]),
         (_HTTP, [f"      X-Custom: {MASK}\n", f"    headersHelper: {MASK}\n"]),
         (_HOOK, [f"            X-Custom: {MASK}\n"]),
     ],
@@ -115,11 +119,12 @@ def test_the_route_masks_a_server_header(write_config, tmp_path, projects_root) 
             "qv-",
             f'{{X-A: "{MASK}", X-B: \'{MASK}\', X-C: ""}}',
         ),
-        # A flow sequence of args, with a url that the args mask wins over.
+        # A flow sequence of args: an item is masked only as the line masker masks it.
         (
-            "---\nmcpServers: {a: {args: [--url, 'https://h.example.com/?k=qv-arg']}}\n---\n",
-            "qv-arg",
-            f"args: [{MASK}, '{MASK}']",
+            "---\nmcpServers: {a: {args: [-y, '${GH_TOKEN}', 'https://u:qv-pw@h.example.com']}}"
+            "\n---\n",
+            "qv-pw",
+            f"args: [-y, '{MASK}', '{MASK}@h.example.com']",
         ),
         # A list of servers, as an `!!omap`-like list.
         (
@@ -223,7 +228,7 @@ def test_an_alias_pyramid_under_a_field_is_walked_once_per_node(tmp_path: Path) 
     # Each level holds the one below twice: without a visited set the walk would take
     # 2**40 steps. With it, each node is visited once.
     levels = ["l0: &l0 qv-leaf"] + [f"l{i}: &l{i} [*l{i - 1}, *l{i - 1}]" for i in range(1, 41)]
-    stored = "---\n" + "\n".join(levels) + "\nmcpServers:\n  a:\n    args: *l40\n---\nb\n"
+    stored = "---\n" + "\n".join(levels) + "\nmcpServers:\n  a:\n    env: {A: *l40}\n---\nb\n"
     _place(tmp_path, stored)
     content = sk.read_skill_file(tmp_path, "s")[0]
     assert "qv-leaf" not in content
@@ -248,7 +253,7 @@ def test_an_unchanged_resend_keeps_the_stored_values(tmp_path: Path, stored: str
         # The key beside the mask: the line is no longer the view of any stored line.
         (_HTTP, f"X-Custom: {MASK}", f"X-Other: {MASK}", "no stored line matches"),
         (_HOOK, f"X-Custom: {MASK}", f"Authorization: {MASK}", "no stored line matches"),
-        (_STDIO, f"[{MASK}, {MASK}]", f"[{MASK}, {MASK}, more]", "no stored line matches"),
+        (_STDIO, f"GH_PAT: {MASK}", f"GH_OTHER: {MASK}", "no stored line matches"),
         # The destination on another line: the stored header would go somewhere new.
         (_HTTP, "mcp.example.com", "evil.example.com", "'hooks' or 'mcpServers' changed"),
         (_HOOK, "hooks.example.com", "evil.example.com", "'hooks' or 'mcpServers' changed"),
@@ -386,3 +391,119 @@ def test_a_skill_with_each_line_shape_round_trips(tmp_path: Path) -> None:
     content, file_hash = _view(tmp_path)
     with pytest.raises(cw.InvalidCandidateError, match="no stored line matches"):
         _save(tmp_path, content.replace("{API_KEY:", "{OTHER_KEY:"), file_hash)
+
+
+# --- TASK-535: an args item shows as the MCP tab shows it ------------------------------------
+
+
+def test_a_secret_shaped_args_item_is_masked_and_round_trips(tmp_path: Path) -> None:
+    stored = (
+        "---\ndescription: d\nmcpServers:\n  gh:\n    command: npx\n    args:\n      - -y\n"
+        "      - pkg-arg-two\n      - --api-key=qv-key\n      - ${GH_TOKEN}\n---\nRun it.\n"
+    )
+    path = _place(tmp_path, stored)
+    content, file_hash = _view(tmp_path)
+    assert "qv-" not in content and "GH_TOKEN" not in content
+    # The plain items show as stored, the secret-shaped ones as the mask.
+    assert "      - -y\n      - pkg-arg-two\n" in content
+    assert f"      - --api-key={MASK}\n      - {MASK}\n" in content
+    _save(tmp_path, content.replace("description: d", "description: e"), file_hash)
+    assert path.read_bytes() == stored.replace("description: d", "description: e").encode()
+
+
+# --- TASK-536: a secret value that goes on past its line ------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "view"),
+    [
+        # The three shapes of the task: an empty value at the end of the line, the second
+        # half of a quoted value, and a value behind an anchor.
+        ("env: {token:\n  qv-a}\n", f"env: {{token:\n  {MASK}\n"),
+        ('env: {token: "qv-b\n  qv-c"}\n', f"env: {{token: {MASK}\n  {MASK}\n"),
+        ("env: {token: &a\n  qv-d}\n", f"env: {{token: {MASK}\n  {MASK}\n"),
+        # A single-quoted value, a plain value, a nested value and a tag that go on.
+        ("env: {token: 'qv-e\n  qv-f'}\n", f"env: {{token: {MASK}\n  {MASK}\n"),
+        ("env: {token: qv-g\n  qv-h}\n", f"env: {{token: {MASK}\n  {MASK}\n"),
+        ("env: {token: {a: qv-i,\n  b: qv-j}}\n", f"env: {{token: {MASK}\n  {MASK}\n"),
+        ("env: {token: !!str\n  qv-k}\n", f"env: {{token: {MASK}\n  {MASK}\n"),
+        # More lines, a blank line, CRLF, a list item, and the value ends at the column.
+        (
+            'env: {token: "qv-l\n\n    qv-m\n    qv-n"}\nnext: ok\n',
+            f"env: {{token: {MASK}\n\n    {MASK}\n    {MASK}\nnext: ok\n",
+        ),
+        ("env: {token:\r\n  qv-o}\r\nnext: ok\r\n", f"env: {{token:\r\n  {MASK}\r\nnext: ok\r\n"),
+        ("- env: {token:\n  qv-p}\n- b\n", f"- env: {{token:\n  {MASK}\n- b\n"),
+        ("env: {token:\n  qv-q\n}\n", f"env: {{token:\n  {MASK}\n}}\n"),
+        # A secret `key: value` whose value is an unclosed quote or a flow value.
+        ('token: "qv-r\n  qv-s"\nnext: ok\n', f"token: {MASK}\n  {MASK}\nnext: ok\n"),
+        ("token: 'qv-t\n  qv-u'\n", f"token: {MASK}\n  {MASK}\n"),
+        ("token: {a: qv-v,\n  b: qv-w}\n", f"token: {MASK}\n  {MASK}\n"),
+        ("token: [qv-x,\n  qv-y]\n", f"token: {MASK}\n  {MASK}\n"),
+        ('token: &a "qv-z\n  qv-aa"\n', f"token: {MASK}\n  {MASK}\n"),
+        # In a `- ` item the key is past the dash, so these lines are measured from the line.
+        ("- token: {a: qv-ab,\n  b: qv-ac}\n- next\n", f"- token: {MASK}\n  {MASK}\n- next\n"),
+        ("- token: [qv-ad,\n  qv-ae]\n", f"- token: {MASK}\n  {MASK}\n"),
+        # A quoted value ends with the line that closes its quote.
+        (
+            '- token: "qv-af\n  qv-ag"\n  name: x\n',
+            f"- token: {MASK}\n  {MASK}\n  name: x\n",
+        ),
+        (
+            "token: 'qv-ah\n  it''s qv-ai\n  qv-aj'\n  b: c\n",
+            f"token: {MASK}\n  {MASK}\n  {MASK}\n  b: c\n",
+        ),
+        (
+            'token: "qv-ak\n  \\" qv-al\n  qv-am"\n  b: c\n',
+            f"token: {MASK}\n  {MASK}\n  {MASK}\n  b: c\n",
+        ),
+        (
+            'env: {token: "qv-an\n  qv-ao", mode: x,\n  level: 2}\n',
+            f"env: {{token: {MASK}\n  {MASK}\n  level: 2}}\n",
+        ),
+        # A plain value goes on in the deeper lines that are not a key, a comment or an item.
+        (
+            "token: qv-ap\n  qv-aq\n  qv-ar\nnext: ok\n",
+            f"token: {MASK}\n  {MASK}\n  {MASK}\nnext: ok\n",
+        ),
+        ("api_key = qv-as\n    qv-at)\n", f"api_key = {MASK}\n    {MASK}\n"),
+    ],
+)
+def test_a_secret_value_that_goes_on_is_masked_on_each_line(text: str, view: str) -> None:
+    assert cw.redact_secret_lines(text) == view
+    restored, _lines = cw.restore_masked_lines(view, text, what="f", view=cw.redact_secret_lines)
+    assert restored == text
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # The value ends on its line: the next line is not part of it.
+        "env: {token: qv-a, mode: fast,\n  level: 2}\n",
+        'env: {token: "qv-b"\n  , level: 2}\n',
+        'token: "qv-c"\n  indented: y\n',
+        "token: qv-d\n  indented: y\n",
+        "token: qv-e\n  # a comment\n",
+        "token: qv-f\n  - an item\n",
+        "- token: qv-g\n  name: x\n",
+        "- token: qv-h\n  more text\n",
+        "env: {mode:\n  fast}\n",
+    ],
+)
+def test_a_secret_value_that_ends_on_its_line_leaves_the_next_line(text: str) -> None:
+    second = text.splitlines(keepends=True)[1]
+    view = cw.redact_secret_lines(text)
+    assert view.splitlines(keepends=True)[1] == second
+    assert "qv-" not in view
+
+
+def test_a_skill_with_a_value_that_goes_on_round_trips(tmp_path: Path) -> None:
+    stored = (
+        '---\ndescription: d\nmetadata: {token: "qv-one\n  qv-two"}\n---\nRun it.\n'
+        "env: {api_key:\n  qv-three}\n"
+    )
+    path = _place(tmp_path, stored)
+    content, file_hash = _view(tmp_path)
+    assert "qv-" not in content
+    _save(tmp_path, content.replace("Run it.", "Run it now."), file_hash)
+    assert path.read_bytes() == stored.replace("Run it.", "Run it now.").encode("utf-8")

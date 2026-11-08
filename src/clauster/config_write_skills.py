@@ -1758,9 +1758,10 @@ def _url_nodes(root: yaml.Node) -> list[yaml.ScalarNode]:
 #: The top-level fields whose values the editor masks by their place in the field, and,
 #: for each, the keys anywhere under it whose values are masked whole. The MCP tab masks
 #: every ``env`` and ``headers`` value and a ``headersHelper`` (``_redact_entry``), and the
-#: Hooks tab every hook ``headers`` value (TASK-529). ``args`` is masked here as well.
+#: Hooks tab every hook ``headers`` value (TASK-529). ``args`` is not here: an ``args`` item
+#: is masked only where the line masker masks it, as the MCP tab shows it (TASK-535).
 _MASKED_UNDER = {
-    "mcpServers": frozenset({"env", "headers", "headersHelper", "args"}),
+    "mcpServers": frozenset({"env", "headers", "headersHelper"}),
     "hooks": frozenset({"headers"}),
 }
 
@@ -1771,8 +1772,8 @@ def _masked_value_nodes(root: yaml.Node) -> list[yaml.ScalarNode]:
     """Return each non-empty scalar the editor masks whole by its place in the header.
 
     These are the scalars under a :data:`_MASKED_UNDER` key (``headers``, ``env``,
-    ``args``, ``headersHelper``) anywhere in the value of a top-level ``mcpServers`` or
-    ``hooks`` field, also one that a top-level merge key brings in. The key of a mapping
+    ``headersHelper``) anywhere in the value of a top-level ``mcpServers`` or ``hooks``
+    field, also one that a top-level merge key brings in. The key of a mapping
     (a header name, an ``env`` variable name) is not masked, and an empty value hides
     nothing. Three iterative walks, each with a visited set, so an alias or a merge key
     that reuses a node costs one visit and a cyclic node graph ends.
@@ -1848,7 +1849,7 @@ def _mask_header_values(header: str, *, readable: bool) -> str:
     """Return a frontmatter ``header`` with each ``url`` and each server or hook secret masked.
 
     A ``url`` value is shown as :func:`mask_url` shows it. A value the MCP or Hooks tab masks
-    whole (:func:`_masked_value_nodes`: an ``mcpServers`` ``headers``, ``env``, ``args`` or
+    whole (:func:`_masked_value_nodes`: an ``mcpServers`` ``headers``, ``env`` or
     ``headersHelper`` value, a hook ``headers`` value) shows as the sentinel (TASK-529);
     that wins when a value is both. Each is found by its node in the composed YAML, so a
     value in a flow mapping, behind an alias, or under a merge key is found as well as a

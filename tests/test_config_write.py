@@ -1785,6 +1785,11 @@ def test_redact_secret_lines_is_linear_on_every_hostile_shape():
         "flow key run": "{," + "a" * 256_000,
         "block opener spaces": "token: |" + " " * 128_000 + "x",
         "block value lines": "token: |\n" + "  x\n" * 200_000,
+        # TASK-536: a secret value that goes on past its line.
+        "flow value run-on lines": "env: {token:\n" + "  x\n" * 200_000,
+        "quoted value run-on lines": 'token: "x\n' + "  x\n" * 200_000,
+        "run-on openers": "env: {token:\n" * 50_000,
+        "node property run": "token: " + "& " * 128_000 + '"x',
     }
     for label, payload in shapes.items():
         start = time.perf_counter()

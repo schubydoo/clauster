@@ -23,6 +23,13 @@ written against, they are not the code under test, and they are not a restatemen
 new scanners' logic. A divergence means one of the three rewrites is not the equivalence
 it documents — a leak if the shipped side masks less, an over-mask regression if more.
 
+The line shapes PR 1852 and TASK-536 added (a ``- token: x`` list item, a secret pair in a
+flow collection, a value on the next lines, and a value that goes on past its line) are
+restated in :func:`_reference_redact` from the documented contract, with regexes where the
+module scans by hand: the list markers, where a quoted or plain flow value ends, and
+whether a ``key: value`` value goes on. The order in which those rules apply is the
+contract, so that part is a restatement, not an independent oracle.
+
 Four properties are checked per input:
 
 1. **Differential equality** — ``redact_secret_lines(text)`` equals the regex-built
@@ -100,24 +107,132 @@ _KV_LINE_RE = re.compile(r"^(?P<prefix>\s*[\w.\-]+\s*[:=]\s*)(?P<value>\S.*?)(?P
 #: Input cap — see the module docstring: the oracle's regexes are the quadratic originals.
 _MAX_CHARS = 4096
 
+# --- the line shapes of PR 1852 and TASK-536, restated from the documented contract -------
+#: Whatever ends a line for ``str.splitlines``: the masker keeps it out of the line body.
+_EOL_RE = re.compile(r"(?:\r\n|[\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029])\Z")
+#: The indent and any ``- `` list markers before the text of a line.
+_LIST_LEAD_RE = re.compile(r"[ \t]*(?:-[ \t]+)*")
+#: A secret-keyed line whose value starts on the next lines (node properties, a block
+#: indicator and a comment may follow the ``:``).
+_BLOCK_OPENER_RE = re.compile(
+    r"(?P<q>[\"']?)(?P<key>[\w.\-]+)(?P=q)[ \t]*:(?:[ \t]+[!&][^ \t]*)*"
+    r"(?:[ \t]+(?P<block>[|>][0-9+\-]*))?[ \t]*(?:#.*)?"
+)
+#: A key in a flow collection, after the ``{``, ``[`` or ``,`` that opens its pair.
+_FLOW_KEY_RE = re.compile(r"[{\[,][ \t]*(?P<q>[\"']?)(?P<key>[\w.\-]+)(?P=q)[ \t]*:[ \t]*")
+#: A closed quoted scalar: ``\`` escapes one character in double quotes, ``''`` is one
+#: quote in single quotes (so a closing quote is never followed by another).
+_CLOSED_QUOTE_RE = {
+    '"': re.compile(r'"(?:\\.|[^"\\])*"', re.DOTALL),
+    "'": re.compile(r"'(?:''|[^'])*'(?!')"),
+}
+#: A plain flow value: up to the next ``,``, ``}`` or ``]``.
+_PLAIN_FLOW_RE = re.compile(r"[^,}\]]*")
+#: Node properties (``&anchor``, ``!tag``) in front of a value.
+_PROPERTIES_RE = re.compile(r"(?:[&!][^ \t]*[ \t]*)*")
+#: A line that a plain value does not go on into: a comment, a ``- `` item, or a mapping
+#: key (``key:`` and then a space, a tab or the end).
+_NOT_PLAIN_TEXT_RE = re.compile(r"#|-(?:[ \t]|\Z)|([\"']?)[\w.\-]+\1[ \t]*:(?:[ \t]|\Z)")
+#: How a value goes on: a flow or block value, or a plain value (a quote character is a
+#: quoted value still open).
+_FLOW, _PLAIN = "", "plain"
+
+
+def _ref_flow_pairs(body: str) -> tuple[str, str | None]:
+    """Mask the value of each secret-keyed flow pair; say how the last one goes on."""
+    first = re.search(r"[{\[,]", body)
+    if first is None:
+        return body, None
+    pieces: list[str] = []
+    prev = 0
+    run: str | None = None
+    for match in _FLOW_KEY_RE.finditer(body, first.start()):
+        if match.start() < prev or not _SECRET_KEY_RE.search(match.group("key")):
+            continue
+        begin = match.end()
+        lead = body[begin : begin + 1]
+        if lead in _CLOSED_QUOTE_RE:
+            closed = _CLOSED_QUOTE_RE[lead].match(body, begin)
+            end = closed.end() if closed else len(body)
+            run = None if closed else lead
+        elif lead in ("{", "[", "&", "!"):
+            end, run = len(body), _FLOW
+        else:
+            plain = _PLAIN_FLOW_RE.match(body, begin)
+            assert plain is not None  # `*` always matches
+            run = _FLOW if plain.end() == len(body) else None
+            end = begin + len(plain.group(0).rstrip(" \t"))
+        if end == begin:
+            continue
+        pieces += (body[prev:begin], _SENTINEL)
+        prev = end
+    if not pieces:
+        return body, run
+    return "".join(pieces) + body[prev:], run
+
+
+def _ref_value_run(value: str) -> str | None:
+    """How a secret ``key: value`` value goes on: an open quote, a flow or a plain value."""
+    props = _PROPERTIES_RE.match(value)
+    assert props is not None  # `*` always matches
+    rest = value[props.end() :]
+    lead = rest[:1]
+    if lead in _CLOSED_QUOTE_RE:
+        return None if _CLOSED_QUOTE_RE[lead].match(rest) else lead
+    return _FLOW if lead in ("{", "[") else _PLAIN
+
+
+def _ref_shared_masks(body: str) -> str:
+    """Mask every ``${…}`` and every credential URL userinfo in ``body``."""
+    # Replacement FUNCTIONS, not template strings: `re.sub` reads `\g`/`\1` escapes in a
+    # template, so a future sentinel containing a backslash would silently change what the
+    # oracle produces and false-crash the harness against a correct target.
+    masked = _INTERP_RE.sub(lambda _m: _SENTINEL, body)
+    return _URL_CRED_RE.sub(lambda _m: f"{_SENTINEL}@", masked)
+
 
 def _reference_redact(text: str) -> str:
-    """Redact ``text`` per the documented contract, using only the replaced regexes."""
+    """Redact ``text`` per the documented contract, using regexes for every scan."""
     out: list[str] = []
+    # The column the value's lines are deeper than, whether a `- ` item at that column
+    # belongs to it (only after a bare `token:` or `token: &a`), and how the value goes on.
+    block: tuple[int, bool, str] | None = None
     for line in text.splitlines(keepends=True):
-        body, eol = line, ""
-        if body.endswith("\r\n"):
-            body, eol = body[:-2], "\r\n"
-        elif body.endswith("\n"):
-            body, eol = body[:-1], "\n"
-        # Replacement FUNCTIONS, not template strings: `re.sub` reads `\g`/`\1` escapes in
-        # a template, so a future sentinel containing a backslash would silently change
-        # what the oracle produces and false-crash the harness against a correct target.
-        masked = _INTERP_RE.sub(lambda _m: _SENTINEL, body)
-        masked = _URL_CRED_RE.sub(lambda _m: f"{_SENTINEL}@", masked)
-        kv = _KV_LINE_RE.match(masked)
+        ending = _EOL_RE.search(line)
+        eol = ending.group(0) if ending else ""
+        body = line[: len(line) - len(eol)]
+        if block is not None:
+            column, items, run = block
+            indent = len(body) - len(body.lstrip(" \t"))
+            if not body.strip() or (indent <= column and body[indent] == "#"):
+                out.append(_ref_flow_pairs(_ref_shared_masks(body))[0] + eol)
+                continue
+            item = re.match(r"-(?:[ \t]|\Z)", body[indent:]) is not None
+            text = run == _PLAIN and _NOT_PLAIN_TEXT_RE.match(body, indent) is not None
+            if (indent > column and not text) or (indent == column and items and item):
+                out.append(body[:indent] + _SENTINEL + eol)
+                if run in _CLOSED_QUOTE_RE and _CLOSED_QUOTE_RE[run].match(run + body):
+                    block = None  # the line that closes the quote ends the value
+                continue
+            block = None
+        masked = _ref_shared_masks(body)
+        lead_match = _LIST_LEAD_RE.match(masked)
+        assert lead_match is not None  # `*` always matches
+        lead = lead_match.end()
+        opener = _BLOCK_OPENER_RE.fullmatch(masked.rstrip(), lead)
+        if opener and _SECRET_KEY_RE.search(opener.group("key")):
+            block = (lead, opener.group("block") is None, _FLOW)
+        kv = _KV_LINE_RE.match(masked[lead:])
         if kv is not None and _SECRET_KEY_RE.search(kv.group("prefix")):
-            masked = f"{kv.group('prefix')}{_SENTINEL}{kv.group('trail')}"
+            masked = f"{masked[:lead]}{kv.group('prefix')}{_SENTINEL}{kv.group('trail')}"
+            run = _ref_value_run(kv.group("value"))
+            if block is None and run is not None:
+                line_indent = len(masked) - len(masked.lstrip(" \t"))
+                block = (lead if run == _PLAIN else line_indent, False, run)
+        else:
+            masked, run = _ref_flow_pairs(masked)
+            if run is not None and block is None:
+                block = (len(masked) - len(masked.lstrip(" \t")), False, run)
         out.append(masked + eol)
     return "".join(out)
 
@@ -153,9 +268,9 @@ def _secret_payloads(text: str) -> list[str]:
 def _eol(line: str) -> str:
     """The ``\\r\\n`` / ``\\n`` terminator of ``line``, or ``""`` for the other breaks.
 
-    ``str.splitlines`` also breaks on ``\\v \\f \\x1c-\\x1e \\x85 U+2028 U+2029``, which
-    ``redact_secret_lines`` does not treat as an EOL — it leaves them on the body, where
-    they survive unchanged. Only the two it *does* strip and re-append are compared.
+    ``str.splitlines`` also breaks on ``\\v \\f \\x1c-\\x1e \\x85 U+2028 U+2029``. The
+    masker keeps each of them out of the line body and re-appends it, and the differential
+    compares them byte for byte; this property checks only the two common ones.
     """
     if line.endswith("\r\n"):
         return "\r\n"
