@@ -1062,11 +1062,44 @@ def test_keeper_failure_detail_prefers_the_sidecar_error(tmp_path) -> None:
     from clauster.spawn_coordinator import SpawnCoordinator
 
     sidecar = tmp_path / "k.keeper.json"
-    sidecar.with_suffix(".log").write_text("from the log\n")
+    sidecar.with_suffix(".log").write_bytes(b"from the log\n")
     detail = SpawnCoordinator._keeper_failure_detail
     assert detail(sidecar, {"error": "openpty failed: boom"}) == "openpty failed: boom"
     assert detail(sidecar, {"state": "exited"}) is None  # a sidecar without an error
     assert detail(sidecar, {}) == "from the log"  # no sidecar at all: the keeper's own log
+
+
+@_POSIX_ONLY
+async def test_startup_watch_keeps_a_late_sidecar_error_while_the_launch_lingers(
+    runner_config, monkeypatch
+) -> None:
+    # A keeper writes an error sidecar after the readiness wait while its launch is still
+    # alive (a frozen bootloader deleting its unpack dir): the watch marks ERROR and must
+    # keep the reason, because it never looks at the row again.
+    def _cmd(sidecar, *a, **k):
+        code = (
+            "import json, sys, time; time.sleep(0.6); "
+            f"open({str(sidecar)!r}, 'w').write(json.dumps("
+            "{'state': 'error', 'error': 'openpty failed: boom'})); "
+            "time.sleep(1.5); sys.exit(1)"
+        )
+        return [sys.executable, "-c", code]
+
+    monkeypatch.setattr(BridgeLaunch, "_keeper_launch_cmd", staticmethod(_cmd))
+    monkeypatch.setattr("clauster.spawn_coordinator._READY_TIMEOUT", 0.2)
+    monkeypatch.setattr("clauster.spawn_coordinator._STARTUP_WATCH_INTERVAL", 0.1)
+    runner, _ = _pty_runner(runner_config)
+    inst = await runner.spawn("alpha")
+    try:
+        assert inst.status is InstanceStatus.STARTING
+        for _ in range(100):
+            if inst.status is not InstanceStatus.STARTING:
+                break
+            await asyncio.sleep(0.1)
+        assert inst.status is InstanceStatus.ERROR
+        assert inst.error_detail == "openpty failed: boom"
+    finally:
+        await runner.stop(inst.instance_id)
 
 
 @_POSIX_ONLY

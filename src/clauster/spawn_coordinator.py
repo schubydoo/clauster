@@ -1337,7 +1337,7 @@ class SpawnCoordinator:
             if proc.poll() is not None:  # exited during startup
                 self._reconcile_status(instance, False)
                 log_path = instance.bridge_debug_log_path
-                if (
+                if (  # pragma: skip-on-win — pty-mode (pywinpty-gated)
                     instance.resume_mode == "pty"
                     and log_path is not None
                     and instance.error_detail is None
@@ -1366,6 +1366,13 @@ class SpawnCoordinator:
                 # so without this the public log would stale out after _spawn_pty's
                 # one-time flush if the bridge logs more before registering.
                 await asyncio.to_thread(self._flush_redacted_mirror, instance)
+                if instance.status is InstanceStatus.ERROR and instance.error_detail is None:
+                    # A late keeper error (its sidecar says so while a frozen launch's
+                    # bootloader still runs, deleting its unpack dir): keep the reason, as
+                    # `_spawn_pty` does, because this watch never looks at the row again.
+                    instance.error_detail = await asyncio.to_thread(
+                        self._keeper_failure_detail, sidecar, info or {}
+                    )
                 if instance.status is not InstanceStatus.STARTING:
                     await self._registry._persist()
                     return
