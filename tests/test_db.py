@@ -230,6 +230,37 @@ def test_hosted_agent_boot_id_round_trips_and_stays_absent_when_unset(persistenc
     assert "agent_boot_id" not in loaded["pid-legacy"]
 
 
+def test_hosted_parked_requests_round_trip_and_stay_absent_when_none(persistence):
+    # TASK-537: the prompts a Direct Session waits on must survive the store whole (the
+    # allow-unchanged answer sends the original input back), and a row with none, or one an
+    # older build wrote, loads without the key.
+    parked = [
+        {
+            "request_id": "perm-1",
+            "subtype": "can_use_tool",
+            "request": {"tool_name": "Bash", "input": {"command": "ls -la", "n": [1, 2]}},
+        }
+    ]
+    store = persistence.hosted_state_store()
+    store.save(
+        {
+            "pid-1": {"project": "alpha", "parked_requests": parked},
+            "pid-none": {"project": "alpha", "parked_requests": None},
+            "pid-legacy": {"project": "alpha"},
+        }
+    )
+    loaded = store.load()
+    assert loaded["pid-1"]["parked_requests"] == parked
+    assert "parked_requests" not in loaded["pid-none"]
+    assert "parked_requests" not in loaded["pid-legacy"]
+    # A SQL NULL, not the JSON text "null" (none_as_null), so an IS NULL query finds it.
+    with persistence._engine.connect() as conn:
+        nulls = conn.execute(
+            text("SELECT claustrum_process_id FROM hosted_sessions WHERE parked_requests IS NULL")
+        ).scalars()
+        assert set(nulls) == {"pid-none", "pid-legacy"}
+
+
 def test_hosted_save_prunes_absent_keys(persistence):
     store = persistence.hosted_state_store()
     store.save({"pid-1": {"project": "a"}, "pid-2": {"project": "b"}})
@@ -1016,6 +1047,48 @@ def test_hosted_agent_boot_id_migration_adds_and_drops_nullable_column(tmp_path)
             assert "agent_boot_id" not in columns
             # The rest of the table survives the rebuild, including its orphan-recovery pair.
             assert {"claustrum_process_id", "agent_pid", "agent_start_ticks"} <= columns
+    finally:
+        engine.dispose()
+
+
+def test_hosted_parked_requests_migration_adds_and_drops_nullable_column(tmp_path):
+    # 0015 adds a nullable parked_requests JSON column to hosted_sessions (TASK-537). A row
+    # that predates it survives the upgrade with the column NULL, and downgrading to the
+    # parent drops the column and keeps the row (batch_alter_table rebuilds the table).
+    from alembic import command
+
+    engine = create_db_engine(tmp_path)
+    try:
+        with engine.connect() as conn:
+            cfg = Config(str(bootstrap._ALEMBIC_INI))
+            cfg.set_main_option("script_location", str(bootstrap._MIGRATIONS_DIR))
+            cfg.attributes["connection"] = conn
+            command.upgrade(cfg, "9f7e9be8c129")  # 0014 — this migration's parent
+            conn.execute(
+                text(
+                    "INSERT INTO hosted_sessions (claustrum_process_id, project, created_at, "
+                    "updated_at) VALUES ('pid-old', 'alpha', '2026-01-01', '2026-01-01')"
+                )
+            )
+            command.upgrade(cfg, "2c6e8a4f1d93")
+            columns = {
+                row[1] for row in conn.execute(text("PRAGMA table_info(hosted_sessions)")).all()
+            }
+            assert "parked_requests" in columns
+            assert conn.execute(
+                text("SELECT claustrum_process_id, parked_requests FROM hosted_sessions")
+            ).all() == [("pid-old", None)]
+
+            # Pinned by revision id, not "-1": a relative step silently re-aims at whatever
+            # ends up below this migration if the parent ever changes.
+            command.downgrade(cfg, "9f7e9be8c129")
+            columns = {
+                row[1] for row in conn.execute(text("PRAGMA table_info(hosted_sessions)")).all()
+            }
+            assert "parked_requests" not in columns
+            assert conn.execute(
+                text("SELECT claustrum_process_id, project FROM hosted_sessions")
+            ).all() == [("pid-old", "alpha")]
     finally:
         engine.dispose()
 

@@ -29,7 +29,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, String
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Index, Integer, String
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -216,6 +216,11 @@ class HostedSession(Base, TimestampMixin):
     # pre-migration row loads with it absent and the model's default_factory mints
     # one, same as today.
     instance_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    # The permission prompts the agent was waiting on at the last save (TASK-537), as a JSON
+    # list of ``{request_id, subtype, request}``, so a plain restart parks them again instead
+    # of losing them. NULL when none were waiting, and for a row an older build wrote.
+    # ``none_as_null``: a None is stored as SQL NULL, not the JSON text ``null``.
+    parked_requests: Mapped[list | None] = mapped_column(JSON(none_as_null=True), nullable=True)
 
 
 class SessionEvent(Base, TimestampMixin):

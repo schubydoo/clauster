@@ -557,8 +557,8 @@ def test_hosted_instance_from_record_round_trip_oracle_fires(
     original = hosted.HostedManager._record
     counter = iter(range(1000))
 
-    def _drifting(instance):
-        out = original(instance)
+    def _drifting(instance, *, parked):
+        out = original(instance, parked=parked)
         out["daemon_last_seq"] = next(counter)
         return out
 

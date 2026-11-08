@@ -47,7 +47,7 @@ from ..dependencies import (
     RunnerDep,
 )
 from ..engine import ambiguity_hint
-from ..hosted import NO_PROJECT_RESUME_DETAIL, HostedSessionError
+from ..hosted import NO_PROJECT_RESUME_DETAIL, HostedAgentMayBeRunning, HostedSessionError
 from ..models import InstanceStatus, RemoteControlInstance, WorkingSession
 from ..redact import redact_for_disk
 from ..runner import (
@@ -67,7 +67,7 @@ if TYPE_CHECKING:
     from ..claustrum_daemon import ClaustrumDaemon
     from ..config import ClausterConfig, PermissionMode
     from ..engine import ClausterEngine
-    from ..hosted import HostedManager
+    from ..hosted import DaemonConnect, HostedManager
     from ..runner import SessionRunner
 
 logger = logging.getLogger(__name__)
@@ -147,6 +147,16 @@ def _spawn_body(
         "reason": reason,
         "warnings": warnings or [],
     }
+
+
+def _hosted_connect(daemon: ClaustrumDaemon | None) -> DaemonConnect | None:
+    """Return how a hosted Stop, Kill or Forget reaches the daemon, or None without one.
+
+    Only an ERROR row uses it, to end its agent first (TASK-539). It is
+    :meth:`ClaustrumDaemon.ensure`, not the cached client, for the reason
+    :func:`_hosted_prereqs` gives.
+    """
+    return daemon.ensure if daemon is not None else None
 
 
 async def _hosted_prereqs(
@@ -244,7 +254,10 @@ async def _spawn_hosted(
         # so the arm is what keeps the mapping right the day either changes.
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ClaustrumError as exc:
-        raise HTTPException(status_code=502, detail=f"hosted spawn failed: {exc}") from exc
+        # Redacted: the daemon's text can echo the spawn's argv, paths or env (TASK-538).
+        raise HTTPException(
+            status_code=502, detail=redact_for_disk(f"hosted spawn failed: {exc}")
+        ) from exc
 
 
 async def _resume_hosted(
@@ -288,7 +301,10 @@ async def _resume_hosted(
     except HostedSessionError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ClaustrumError as exc:
-        raise HTTPException(status_code=502, detail=f"hosted resume failed: {exc}") from exc
+        # Redacted, as the spawn's 502 is (TASK-538).
+        raise HTTPException(
+            status_code=502, detail=redact_for_disk(f"hosted resume failed: {exc}")
+        ) from exc
 
 
 # ----- registry read surfaces: instances, hosted, widget, sessions ---------------------------
@@ -556,18 +572,33 @@ async def api_hosted_permission(
 
 @router.delete("/api/instances/{instance_id}")
 async def api_stop(
-    instance_id: str, runner: RunnerDep, hosted: HostedDep
+    instance_id: str, runner: RunnerDep, hosted: HostedDep, daemon: ClaustrumDaemonDep
 ) -> RemoteControlInstance:
-    """Stop the identified session, whether it is a hosted one or a managed bridge."""
+    """Stop the identified session, whether it is a hosted one or a managed bridge.
+
+    A hosted ERROR row's agent is ended through the daemon first; when that cannot
+    happen, or the row is still reattaching, the stop is refused with 409 (TASK-539).
+    A reconnect that retired the session while the stop waited also answers 409, since
+    the row still shows; only a row that is gone answers 404.
+    """
     if hosted.get_instance(instance_id) is not None:
         # A live hosted session stops cleanly; one with no live session (an orphan
         # that survived a daemon restart, or an already-dead row) is killed/cleaned
         # up by id — kill_orphan, not stop, since stop requires a live session.
+        connect = _hosted_connect(daemon)
         try:
             if hosted.session(instance_id) is not None:
-                return await hosted.stop(instance_id)
-            return await hosted.kill_orphan(instance_id)
+                return await hosted.stop(instance_id, connect=connect)
+            return await hosted.kill_orphan(instance_id, connect=connect)
+        except HostedAgentMayBeRunning as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except HostedSessionError as exc:
+            if hosted.get_instance(instance_id) is not None:
+                # The row stays, but a reconnect retired its session while the stop
+                # waited on the row's lock (local review of PR 1858): not a 404.
+                raise HTTPException(
+                    status_code=409, detail=f"stop refused: {_SESSION_RETIRED_MEANWHILE}"
+                ) from exc
             # The row vanished between the existence check and the awaited call
             # (concurrent stop/reattach) — treat as gone, not a 500.
             raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -654,6 +685,19 @@ _HOSTED_RESTART_POLL_SECONDS = 0.1
 # Names the replacement Direct Session on a restart that failed after the resume retired
 # the old row, so a client can attach the error to the card that still exists.
 _REPLACEMENT_HEADER = "X-Clauster-Replacement-Id"
+# The 409 of a hosted restart whose session failed while the restart prepared to stop it,
+# and whose kill the daemon confirmed: nothing runs, so Resume continues the conversation.
+_RESTART_SESSION_ENDED = (
+    "restart refused: the session failed while the restart prepared to stop it, so it is "
+    "no longer running; use Resume to continue the conversation"
+)
+# The 409 when a reconnect retired the session while a restart or stop waited (a failed
+# rebind, or a reconnect that failed). No kill may have reached the agent, so this names no
+# agent state: the card shows it, and Resume or Kill ends a surviving agent first.
+_SESSION_RETIRED_MEANWHILE = (
+    "the session lost its daemon connection while this request waited; the card shows its "
+    "state, and its agent may still run. Use Resume, or Kill for an orphan"
+)
 
 
 def _restart_failed(stage: str, exc: HTTPException) -> HTTPException:
@@ -685,7 +729,24 @@ async def _restart_hosted(
     trust, binary, daemon) runs BEFORE the stop, so a restart that cannot succeed refuses
     with the live session intact. A session still starting has no conversation id yet, so
     it is refused too: stopping it would end a conversation that nothing can resume.
+
+    Only a live, running session restarts. A row with no running session (an orphan, an
+    ended or ERROR row, or a row a restore pass is still reattaching, which reads
+    STARTING) is refused with 409 and pointed at Resume, whose own kill-first path
+    handles it. Stopping such a row by its pid would mark it stopped while its agent can
+    still run, so the resume then skips the daemon kill of an ERROR row (TASK-539,
+    review of PR 1848).
     """
+    session = hosted.session(instance_id)
+    if session is None or session.status != InstanceStatus.RUNNING:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "restart refused: this session is not running (it ended, or it is still "
+                "starting or being reattached). Restart works only on a running session; "
+                "use Resume for an ended one"
+            ),
+        )
     if not instance.project:
         raise HTTPException(status_code=409, detail=NO_PROJECT_RESUME_DETAIL)
     if not instance.claude_session_uuid_usable:
@@ -702,18 +763,30 @@ async def _restart_hosted(
         instance.project, daemon=daemon, runner=runner, config=config, engine=engine
     )
     try:
-        if hosted.session(instance_id) is not None:
-            stopped = await hosted.stop(instance_id)
-        else:
-            stopped = await hosted.kill_orphan(instance_id)
+        # The session can have failed during the awaits above: an ERROR one is ended
+        # through the daemon first, or the stop refuses (TASK-539).
+        stopped = await hosted.stop(instance_id, connect=_hosted_connect(daemon))
+    except HostedAgentMayBeRunning as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except HostedSessionError as exc:
+        if hosted.get_instance(instance_id) is not None:
+            # A reconnect retired the session during the awaits above (a failed rebind or
+            # reconnect), so the stop found no session, but the row is still on the card.
+            raise HTTPException(
+                status_code=409, detail=f"restart refused: {_SESSION_RETIRED_MEANWHILE}"
+            ) from exc
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     # `HostedSession.stop` can return without the agent having exited: its last wait after
     # the kill timed out (still RUNNING), or the daemon link dropped during the signal
     # (ERROR, the signal may never have arrived). Resuming then would run a second agent on
-    # the same conversation. Go on only from a terminal STOPPED or CRASHED. On the orphan
-    # branch that STOPPED is the manager's own mark after its identity-gated kill.
+    # the same conversation. Go on only from a terminal STOPPED or CRASHED.
     if stopped.status not in (InstanceStatus.STOPPED, InstanceStatus.CRASHED):
+        session = hosted.session(instance_id)
+        if stopped.status == InstanceStatus.ERROR and session is not None and session.agent_ended:
+            # The session failed during the awaits above, and the stop's kill-first path
+            # ended its agent (the daemon confirmed the kill). Nothing runs any more, but
+            # the row stays an ERROR row, so Resume, not this restart, continues it.
+            raise HTTPException(status_code=409, detail=_RESTART_SESSION_ENDED)
         raise HTTPException(
             status_code=502,
             detail="restart: the stop did not complete; the session may still be running",
@@ -890,20 +963,24 @@ async def api_restart(
 
 
 @router.post("/api/instances/{instance_id}/forget")
-async def api_forget(instance_id: str, runner: RunnerDep, hosted: HostedDep) -> dict:
+async def api_forget(
+    instance_id: str, runner: RunnerDep, hosted: HostedDep, daemon: ClaustrumDaemonDep
+) -> dict:
     """Drop a stopped/crashed session's record so it leaves the Recent/resumable list.
 
     Both bridges and hosted sessions persist a record that survives a Stop (so they
     stay Resumable); forget removes it to start fresh. Fail closed: a still-live
-    session is refused with 409 (Stop/Kill it first) — forget never terminates a
-    process — and an unknown id is 404.
+    session is refused with 409 (Stop/Kill it first), and an unknown id is 404. The
+    one process forget ends is a hosted ERROR row's agent, which may still run: it is
+    killed through the daemon first, or the forget is refused with 409 (TASK-539).
     """
     hosted_instance = hosted.get_instance(instance_id)
     try:
         if hosted_instance is not None:
-            # A known hosted id can only fail here as "still live" -> 409 (unknown
-            # hosted ids are None above and fall through to the bridge runner).
-            await hosted.forget(instance_id)
+            # A known hosted id can only fail here as "still live" or "the agent may
+            # still run" -> 409 (unknown hosted ids are None above and fall through to
+            # the bridge runner).
+            await hosted.forget(instance_id, connect=_hosted_connect(daemon))
         else:
             # Refuse an ambiguous prefix BEFORE the verbatim fallback below: `or
             # instance_id` would otherwise hand `forget` the raw prefix, and the

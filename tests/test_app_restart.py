@@ -19,7 +19,7 @@ import clauster.routes.instances as instances_module
 from clauster import claude_cli
 from clauster.app import create_app
 from clauster.claustrum_client import ClaustrumError
-from clauster.hosted import HostedSessionError
+from clauster.hosted import HostedAgentMayBeRunning, HostedSessionError
 from clauster.models import InstanceStatus
 from clauster.runner import PermissionModeNotAllowed, SessionRunner, SpawnError, UnknownProject
 from test_app_hosted import _HID, _app, _StubDaemon, _StubManager
@@ -170,7 +170,7 @@ def test_restart_hosted_stops_then_resumes(write_config, projects_root, monkeypa
     manager = _StubManager()
     inst = _seed(manager)
 
-    async def _stop(hosted_id: str):
+    async def _stop(hosted_id: str, *, connect):
         manager.stopped.append(hosted_id)
         inst.status = latched
         return inst
@@ -187,17 +187,27 @@ def test_restart_hosted_stops_then_resumes(write_config, projects_root, monkeypa
     assert r.json()["created"] is True
 
 
-def test_restart_hosted_orphan_is_killed_then_resumed(write_config, projects_root, monkeypatch):
+@pytest.mark.parametrize("status", [InstanceStatus.STARTING, InstanceStatus.ERROR, None])
+def test_restart_hosted_without_a_running_session_is_409(
+    write_config, projects_root, monkeypatch, status
+):
+    # TASK-539 (review of PR 1848): a row with no running session (an orphan, an ERROR row,
+    # or a row a restore pass is still reattaching) was stopped through kill_orphan, which
+    # marks it stopped although its agent may still run. Restart now refuses; Resume handles it.
     _hosted_ready(monkeypatch)
     manager = _StubManager()
-    _seed(manager)
-    manager.sessions.pop(_HID)  # no live session: an orphan that survived a daemon restart
+    inst = _seed(manager)
+    if status is None:
+        manager.sessions.pop(_HID)  # no session at all: an orphan, or a row being reattached
+        inst.status = InstanceStatus.STARTING
+    else:
+        manager.sessions[_HID].status = status
     app = _app(write_config, manager=manager, daemon=_StubDaemon())
     with TestClient(app) as client:
         r = client.post(f"/api/instances/{_HID}/restart")
-    assert r.status_code == 200, r.text
-    assert manager.killed_orphans == [_HID]
-    assert manager.stopped == []
+    assert r.status_code == 409, r.text
+    assert "use Resume" in r.json()["detail"]
+    assert manager.killed_orphans == [] and manager.stopped == [] and manager.resumed == []
 
 
 def test_restart_hosted_failing_resume_names_the_stop(write_config, projects_root, monkeypatch):
@@ -240,7 +250,8 @@ def test_restart_hosted_row_vanishing_at_stop_is_404(write_config, projects_root
     manager = _StubManager()
     _seed(manager)
 
-    async def _gone(hosted_id: str):
+    async def _gone(hosted_id: str, *, connect):
+        manager.instances.pop(hosted_id, None)  # the row itself is gone (a concurrent forget)
         raise HostedSessionError(f"no such hosted session: {hosted_id}")
 
     monkeypatch.setattr(manager, "stop", _gone)
@@ -248,6 +259,53 @@ def test_restart_hosted_row_vanishing_at_stop_is_404(write_config, projects_root
     with TestClient(app) as client:
         r = client.post(f"/api/instances/{_HID}/restart")
     assert r.status_code == 404
+    assert manager.resumed == []
+
+
+def test_restart_hosted_running_after_an_accepted_kill_is_still_502(
+    write_config, projects_root, monkeypatch
+):
+    # The stop's SIGKILL was accepted but no exit frame came: the session still reads
+    # running with its agent ended. It did not fail, so the "session failed" 409 is not
+    # the answer; the existing 502 (the stop did not complete) stays.
+    _hosted_ready(monkeypatch)
+    manager = _StubManager()
+    inst = _seed(manager)
+
+    async def _no_exit(hosted_id: str, *, connect):
+        manager.sessions[hosted_id].agent_ended = True
+        return inst  # still RUNNING
+
+    monkeypatch.setattr(manager, "stop", _no_exit)
+    app = _app(write_config, manager=manager, daemon=_StubDaemon())
+    with TestClient(app) as client:
+        r = client.post(f"/api/instances/{_HID}/restart")
+    assert r.status_code == 502, r.text
+    assert manager.resumed == []
+
+
+def test_restart_hosted_stop_refused_because_the_agent_may_run_is_409(
+    write_config, projects_root, monkeypatch
+):
+    # TASK-539: the session failed during the prerequisite awaits, so the stop's kill-first
+    # path ran and the daemon could not end the agent. That is a refusal, not a 404.
+    _hosted_ready(monkeypatch)
+    manager = _StubManager()
+    _seed(manager)
+    daemon = _StubDaemon()
+    seen: list = []
+
+    async def _refused(hosted_id: str, *, connect):
+        seen.append(connect)
+        raise HostedAgentMayBeRunning("cannot stop: the agent may still be running")
+
+    monkeypatch.setattr(manager, "stop", _refused)
+    app = _app(write_config, manager=manager, daemon=daemon)
+    with TestClient(app) as client:
+        r = client.post(f"/api/instances/{_HID}/restart")
+    assert r.status_code == 409
+    assert "may still be running" in r.json()["detail"]
+    assert seen == [daemon.ensure]  # a fresh connection, not the cached client
     assert manager.resumed == []
 
 
@@ -425,7 +483,7 @@ def test_restart_hosted_stop_that_does_not_complete_is_502(
     manager = _StubManager()
     inst = _seed(manager)
 
-    async def _stuck(hosted_id: str):
+    async def _stuck(hosted_id: str, *, connect):
         manager.stopped.append(hosted_id)
         return inst  # still RUNNING: the kill's last wait timed out
 
@@ -448,7 +506,7 @@ def test_restart_hosted_stop_without_a_latched_exit_is_502(
     manager = _StubManager()
     inst = _seed(manager)
 
-    async def _not_exited(hosted_id: str):
+    async def _not_exited(hosted_id: str, *, connect):
         manager.stopped.append(hosted_id)
         inst.status = left
         return inst

@@ -56,6 +56,8 @@ _PERSISTED_FIELDS = (
     "started_at",
     "intentional_stop",
     "instance_id",
+    # Kept in lockstep with ``db.stores._HOSTED_FIELDS`` for the mirror reason above (TASK-537).
+    "parked_requests",
 )
 
 _log = logging.getLogger("clauster.hosted_state")

@@ -5326,11 +5326,13 @@
         await this.refresh();
       },
       // Forget = drop a stopped/ended session's record so it leaves Recent/resumable.
-      // Fail-closed on the server (a live session is refused 409); never stops a process.
+      // Fail-closed on the server (a live session is refused 409). The one process it ends
+      // is a hosted Error row's agent, which may still run (TASK-539); else it ends none.
       // `forget(name)` is a bridge (keyed by project), `forgetHosted(h)` a hosted session.
       async _forget(id, label) {
         if (!window.confirm("Forget \"" + label + "\"? This drops the stopped session from the "
-          + "list so you can start fresh. It does not stop a live session.")) return;
+          + "list so you can start fresh. It does not stop a live session. On an Error card "
+          + "of a Direct Session it first ends the agent, which may still run.")) return;
         this.forgetting[id] = true;
         try {
           const res = await fetch(ROOT + "/api/instances/" + encodeURIComponent(id) + "/forget",

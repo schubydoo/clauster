@@ -750,7 +750,35 @@ conversation in a new agent. If it offers **Kill**, the old `claude` process is
 still running: kill it first. Resume on an `Error` card first ends the old agent
 through the daemon. If the daemon refuses or does not answer that kill, Resume
 refuses with `cannot resume: the old agent may still be running`. Read
-`daemon.log` for the reason, and try again.
+`daemon.log` for the reason, and try again. Forget on an `Error` card does the
+same. It refuses with `cannot forget: the agent may still be running, and the
+claustrum daemon cannot be reached to end it` when Clauster cannot connect, and
+with `cannot forget: the old agent may still be running, and the daemon refused
+or did not answer the kill` when the daemon does not take the kill. A Stop or
+Kill of an `Error` row through the API refuses the same way, with `cannot stop`
+or `cannot kill`. With `claustrum.enabled: false` the text ends `no claustrum
+daemon is connected to end it`. After the daemon kill, Resume, Forget, Stop and
+Kill also end the agent by its process id when Clauster has one, so an agent
+that outlived a daemon restart ends too.
+
+### A Direct Session names a lost permission prompt
+
+**What you see:** after a Clauster restart or a dropped daemon connection, a
+Direct Session card shows an error that ends with `the agent was waiting on a permission prompt that Clauster could
+not restore, so it cannot be answered here: Bash (request ...)`.
+
+**Most likely cause:** the agent was waiting on that prompt when Clauster
+stopped, and the reattach did not find the agent running. The daemon no longer
+had the process, it refused the reattach, or the connection dropped. If the card
+offers **Kill**, the `claude` process may still run and wait on the prompt: kill
+it, then Resume the conversation. After a dropped connection, the next daemon
+connection reattaches the session and opens the prompt again. On an `Error`
+card whose agent may still run, or an `orphan` card, the text comes back after
+each restart until you Resume, Kill or Forget the card. The same text can show
+after a reconnect, with no restart. On a `Crashed` card with no `orphan` badge,
+or a card that reads `claustrum connection dropped and the daemon no longer has
+this session` with no `orphan` badge, the agent is gone, so the text shows once. See
+[A Direct Session's view after a restart](concepts/how-it-works.md#a-direct-sessions-view-after-a-restart).
 
 ## Getting more detail
 

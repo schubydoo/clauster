@@ -119,6 +119,9 @@ _HOSTED_FIELDS = (
     "started_at",
     "intentional_stop",
     "instance_id",
+    # The prompts the agent was waiting on (TASK-537); ``_present`` drops the NULL of a row
+    # with none, and of a row an older build wrote.
+    "parked_requests",
 )
 
 

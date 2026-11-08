@@ -170,8 +170,8 @@ def check(record: dict) -> None:
     )
 
     # The documented inverse relationship, as a fixed point from the first pass onward.
-    once = manager._record(instance)
-    twice = manager._record(manager._instance_from_record(_PROCESS_ID, once))
+    once = manager._record(instance, parked=())
+    twice = manager._record(manager._instance_from_record(_PROCESS_ID, once), parked=())
     assert twice == once, f"record round trip is not stable\n  1st {once!r}\n  2nd {twice!r}"
 
 
