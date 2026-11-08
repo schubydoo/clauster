@@ -1971,6 +1971,16 @@ long-running service keeps those files alive by re-stamping them every hour,
 so an age-based cleanup of <code>/tmp</code> leaves them alone. If they are deleted
 another way, <a href="../operations/#healthz-liveness-and-readiness"><code>/healthz</code></a>
 answers <code>503</code> until you restart Clauster.
+On Linux and macOS, the pty keeper (the process that holds the terminal of an
+Interactive Session bridge) starts as its own copy of the binary. It unpacks
+into its own <code>_MEI…</code> directory, keeps those files alive in the same way, and
+deletes the directory when the keeper exits. So a keeper keeps working after a
+Clauster restart deletes the directory of the server that started it. A keeper
+that an older release started still runs from that server's directory until
+you stop and resume its bridge. Each keeper's copy takes as much space as the
+server's own (about 90 MB on Linux). If <code>/tmp</code> is a <code>tmpfs</code>, that space is
+memory. The binary unpacks into <code>TMPDIR</code> when it is set. A keeper gets the
+<code>TMPDIR</code> of the server, unless <code>claude.env</code> sets its own.
 The unpack step also sets <code>_PYI_*</code> variables in the binary's own environment,
 and on Linux it adds the <code>_MEI…</code> directory to <code>LD_LIBRARY_PATH</code>. Clauster
 removes them, and puts back your own <code>LD_LIBRARY_PATH</code>, before it starts a

@@ -2907,9 +2907,10 @@ each old one:</p>
 No output means that the process is clean:</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-15-1" name="__codelineno-15-1" href="#__codelineno-15-1"></a>tr<span class="w"> </span><span class="s1">'\0'</span><span class="w"> </span><span class="s1">'\n'</span><span class="w"> </span>&lt;<span class="w"> </span>/proc/&lt;pid&gt;/environ<span class="w"> </span><span class="p">|</span><span class="w"> </span>grep<span class="w"> </span>-E<span class="w"> </span><span class="s1">'^(LD_LIBRARY_PATH=(.*:)?[^:]*/_MEI|_PYI_)'</span>
 </code></pre></div>
-<p>Do not run this check on a pty keeper's own pid. A current keeper keeps these
-variables on purpose, and it removes them from the bridge that it starts. Check
-the bridge pid instead.</p>
+<p>Do not run this check on a pty keeper's own pid. In the binary, a current keeper
+always has these variables: on Linux and macOS it runs as its own copy of the
+binary, with its own <code>_MEI…</code> directory. It removes them from the bridge that it
+starts. Check the bridge pid instead.</p>
 <h2 id="an-interactive-session-pty-bridge-is-wedged">An Interactive Session (pty) bridge is wedged<a class="headerlink" href="#an-interactive-session-pty-bridge-is-wedged" title="Permanent link">&para;</a></h2>
 <h3 id="the-live-log-tail-is-silent-or-frozen">The live log tail is silent or frozen<a class="headerlink" href="#the-live-log-tail-is-silent-or-frozen" title="Permanent link">&para;</a></h3>
 <p><strong>What you see:</strong> the dashboard's live log view stops updating.</p>
