@@ -393,6 +393,13 @@ class HostedSession:
         # it tracks concurrent viewers and is not an unbounded accumulation.
         self._subscribers: list[_Subscriber] = []
         self._pending: dict[str, _ControlRequest] = {}
+        # Requests respond_control claimed out of _pending whose answer write is still in
+        # flight (Greptile on PR 1858). The agent waits on them until the write lands, so
+        # the stored and lost views include them (TASK-537).
+        self._answering: dict[str, _ControlRequest] = {}
+        # Set once a kill of this agent was confirmed: it waits on nothing any more, so a
+        # failed answer write afterwards must not keep its prompt.
+        self._agent_ended = False
         # Latched at the start of stop() so a concurrent respond_control fails closed
         # rather than writing a control_response into a session being killed.
         self._stopping = False
@@ -414,6 +421,30 @@ class HostedSession:
     def pending_requests(self) -> list[_ControlRequest]:
         """Snapshot of parked control requests awaiting a response (CL-5 surfaces these)."""
         return list(self._pending.values())
+
+    @property
+    def stored_requests(self) -> tuple[_ControlRequest, ...]:
+        """Every prompt the agent may still wait on, for the persisted record (TASK-537).
+
+        The parked ones, those whose answer write is in flight, and those a loss took
+        out of the parked set (:attr:`lost_requests`).
+        """
+        return _merged_requests(self._waiting(), self.lost_requests)
+
+    def _waiting(self) -> tuple[_ControlRequest, ...]:
+        """Return the parked prompts plus those whose answer write has not landed yet.
+
+        Empty once a kill or an exit ended the agent (:meth:`end_lost`): an answer still
+        in flight then reaches nobody, so nothing is stored or saved as lost for it.
+        """
+        if self._agent_ended:
+            return ()
+        return _merged_requests(self._pending.values(), self._answering.values())
+
+    def end_lost(self) -> None:
+        """Record that a kill of the agent was confirmed: drop the prompts it waited on."""
+        self.lost_requests = ()
+        self._agent_ended = True
 
     async def start(
         self,
@@ -631,7 +662,7 @@ class HostedSession:
         connection parks them again (:meth:`repark`, TASK-526).
         """
         self.status = InstanceStatus.ERROR
-        self.lost_requests = tuple(self._pending.values())
+        self.lost_requests = _merged_requests(self.lost_requests, self._waiting())
         self._resolve_parked()
         self._emit({"type": "lost", "reason": reason})
 
@@ -718,6 +749,10 @@ class HostedSession:
         event so other watchers (and browser reconnects replaying the ring) see the
         request is answered, not still actionable. CL-5 supplies the permission
         allow/deny ``response`` payload (``{"behavior": ...}``); this owns transport.
+
+        Call it shielded, as :meth:`HostedManager.respond` does: the first chunk of the
+        answer is on the socket before the first await, so only the daemon's reply may
+        settle it.
         """
         if self.status != "running":
             # Guard before consuming the parked request: a crashed/stopped session
@@ -748,9 +783,19 @@ class HostedSession:
                 **response,
                 "updatedInput": tool_input if isinstance(tool_input, dict) else {},
             }
+        # In flight until the write lands: a loss or a persist during the await still sees
+        # it (Greptile on PR 1858), because the agent waits on it until then.
+        self._answering[request_id] = parked
+        # No await between the checks above and the write: _send writes the first chunk of
+        # the answer before its first await, so a stop() or a fail-closed latch cannot slip
+        # in between. The caller (HostedManager.respond) shields this whole call, so a
+        # cancelled caller cannot decide the outcome either: the daemon's reply does.
         try:
             await self._send_control_response(request_id, response)
-        except ClaustrumError:
+        except BaseException:
+            # Any failure, not only a daemon error (review): an unexpected error is a bug,
+            # and a cancel can still reach this shielded task at loop teardown. The agent
+            # may still wait in each case, so the prompt is kept, not dropped.
             # Restore the claim if the transport write fails: the request must stay
             # parked and retryable — but only while the session is still answerable. If a
             # concurrent exit/error drained _pending during the await (or stop() latched),
@@ -759,6 +804,16 @@ class HostedSession:
             if self.status == "running" and not self._stopping:
                 self._pending.setdefault(request_id, parked)
             else:
+                if (
+                    self.status in (InstanceStatus.RUNNING, InstanceStatus.ERROR)
+                    and not self._agent_ended
+                ):
+                    # No answer reached the agent, and no kill was confirmed, so it may
+                    # still wait on this: keep it with the lost prompts (TASK-537). For an
+                    # ERROR latch this repeats what its _waiting() snapshot already kept;
+                    # the stopping case (still RUNNING) depends on it alone. The status
+                    # test is defensive: an exit sets _agent_ended before STOPPED/CRASHED.
+                    self.lost_requests = _merged_requests(self.lost_requests, (parked,))
                 self._emit(
                     {
                         "type": "control_resolved",
@@ -767,6 +822,10 @@ class HostedSession:
                     }
                 )
             raise
+        finally:
+            self._answering.pop(request_id, None)
+        # Answered: a loss during the write saved it with the lost prompts; it waits no more.
+        self.lost_requests = tuple(r for r in self.lost_requests if r.request_id != request_id)
         self._emit(
             {
                 "type": "control_resolved",
@@ -792,6 +851,11 @@ class HostedSession:
                     await asyncio.wait_for(self._stream.exited.wait(), timeout=self._stop_grace)
                 except TimeoutError:
                     await self._client.kill(self._process_id, signal="KILL")
+                    # An accepted SIGKILL ends the agent, as in _fail_closed, also when no
+                    # exit frame arrives in the grace below: it waits on no prompt now, so
+                    # the open views drop them too (they were refused while stopping).
+                    self.end_lost()
+                    self._resolve_parked()
                     try:
                         # Give the daemon's exit frame for the KILL a chance to land,
                         # so the terminal latch below has an exit code to work with.
@@ -806,7 +870,7 @@ class HostedSession:
             self.error_detail = detail = redact_for_disk(f"stop failed: {exc}")
             # Kept, as _latch_lost keeps them: the agent may still wait on these, so they
             # stay stored until a kill ends it (TASK-537, async review catch).
-            self.lost_requests = tuple(self._pending.values())
+            self.lost_requests = _merged_requests(self.lost_requests, self._waiting())
             self._resolve_parked()  # a dead session must not leave a parked request stranded
             self._emit({"type": "lost", "reason": detail})  # the daemon text can quote anything
         finally:
@@ -1125,13 +1189,13 @@ class HostedSession:
             self.error_detail = detail = redact_for_disk(reason)
             # Kept until the kill below is accepted: if it fails, the agent may still
             # wait on these, and they stay stored (TASK-537).
-            self.lost_requests = tuple(self._pending.values())
+            self.lost_requests = _merged_requests(self.lost_requests, self._waiting())
             self._resolve_parked()
             self._emit({"type": "lost", "reason": detail})
         finally:
             try:
                 await self._client.kill(self._process_id, signal="KILL")
-                self.lost_requests = ()
+                self.end_lost()
             except ClaustrumError as kill_exc:
                 logger.warning(
                     "hosted: could not end agent %s after pump failure: %s",
@@ -1200,9 +1264,9 @@ class HostedSession:
             await self._send_control_response(request_id, {})
             self._emit({"type": "control_ack", "request_id": request_id, "subtype": subtype})
             return
-        if request_id in self._pending:
-            # Parked already: a reattach restored it from the store (TASK-537), and a
-            # replay from an older cursor delivers the same request again.
+        if request_id in self._pending or request_id in self._answering:
+            # Parked already, or its answer is being written: a reattach restored it from
+            # the store (TASK-537), and a replay from an older cursor delivers it again.
             return
         # Never auto-answer a request that could grant a capability.
         self._park(
@@ -1282,6 +1346,7 @@ class HostedSession:
         """Latch the terminal status, resolve parked requests, emit the exit event."""
         self.exit_code = exit_code if isinstance(exit_code, int) else None
         self.status = InstanceStatus.STOPPED if self.exit_code == 0 else InstanceStatus.CRASHED
+        self.end_lost()  # the agent exited: it waits on no prompt any more (TASK-537)
         self._resolve_parked()
         self._emit({"type": "exit", "exit_code": self.exit_code})
 
@@ -1411,6 +1476,9 @@ class HostedManager:
         # in its error detail, and they stay persisted: a later reattach that finds the agent
         # still running parks them again, and every other one names them again.
         self._unrestored: dict[str, tuple[_ControlRequest, ...]] = {}
+        # The shielded answer tasks of respond(), held so a cancelled caller cannot leave
+        # one unreferenced while it still runs.
+        self._respond_tasks: set[asyncio.Task[None]] = set()
 
     @property
     def restored(self) -> bool:
@@ -1551,11 +1619,36 @@ class HostedManager:
         it again although the agent already has its answer. A failed write parks it
         again in memory, and that must reach the store too, also when a shutdown
         persisted while the write was in flight.
+
+        The answer and its persist run shielded in a tracked task (async review): the
+        answer's first chunk is on the socket before the first await, so a cancelled caller (a
+        dropped request) must decide neither the outcome nor skip the save that follows
+        the daemon's reply. The cancel still reaches the caller at once.
         """
+        session = self._require(hosted_id)
+        task = asyncio.ensure_future(self._respond_and_persist(session, request_id, response))
+        self._respond_tasks.add(task)
+        task.add_done_callback(self._respond_done)
+        await asyncio.shield(task)
+
+    async def _respond_and_persist(
+        self, session: HostedSession, request_id: str, response: dict[str, Any]
+    ) -> None:
+        """Answer on ``session``, then persist whatever the answer settled to."""
         try:
-            await self._require(hosted_id).respond_control(request_id, response)
+            await session.respond_control(request_id, response)
         finally:
             await self._persist()
+
+    def _respond_done(self, task: asyncio.Task[None]) -> None:
+        """Forget a finished answer task; log an unexpected error a cancelled caller misses."""
+        self._respond_tasks.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()  # retrieved, so a cancelled caller leaves no warning
+        if exc is not None and not isinstance(exc, ClaustrumError):
+            # The class name only: the message can quote the answer.
+            logger.error("hosted: answering a parked prompt failed (%s)", type(exc).__name__)
 
     async def stop(
         self, hosted_id: str, *, connect: DaemonConnect | None
@@ -1785,7 +1878,7 @@ class HostedManager:
         """
         session = self._sessions.get(key)
         if session is not None:
-            session.lost_requests = ()
+            session.end_lost()  # also for an answer write that fails after this
         self._unrestored.pop(key, None)
         self._reattach_retry.pop(key, None)  # ended: nothing left to reattach either
 
@@ -2729,7 +2822,7 @@ class HostedManager:
         if session is not None:
             # With the prompts a loss resolved locally: a lost or failed session holds
             # them there while the hooks retire it (async review catch).
-            return _merged_requests(session.pending_requests, session.lost_requests)
+            return session.stored_requests
         lost = self._reattach_retry.get(process_id)
         if lost is not None:
             return lost.requests
