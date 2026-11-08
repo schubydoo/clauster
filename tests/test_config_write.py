@@ -2631,3 +2631,20 @@ def test_a_flow_value_behind_an_anchor_or_tag_is_masked_to_the_end(line: str) ->
         shown, line, what="SKILL.md", view=cw.redact_secret_lines
     )
     assert restored == line
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "token:\n# ${SECRET_LEAK}\n  v\n",
+        "token:\n# {api_key: sk-live-LEAK}\n  v\n",
+        "token: |\n  a\n# {token: LEAK}\n  b\n",
+    ],
+)
+def test_a_comment_inside_a_secret_block_gets_every_line_mask(text: str) -> None:
+    shown = cw.redact_secret_lines(text)
+    assert "LEAK" not in shown
+    restored, _lines = cw.restore_masked_lines(
+        shown, text, what="SKILL.md", view=cw.redact_secret_lines
+    )
+    assert restored == text

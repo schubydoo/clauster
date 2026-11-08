@@ -696,9 +696,9 @@ def redact_secret_lines(text: str) -> str:
     * A secret-keyed line whose value starts on the next lines (``api_key: |``,
       ``token: &a |``, or ``token:`` with nothing after it) masks those lines: each line
       that is indented deeper than the key (or, after a bare ``token:``, a ``- `` item at
-      the key's column) shows its indent and the sentinel. A blank line stays blank, and
-      so does a comment line that is not indented deeper; neither ends the value. The
-      first other line ends it.
+      the key's column) shows its indent and the sentinel. A blank line stays blank, and a
+      comment line that is not indented deeper gets only the masks above; neither ends
+      the value. The first other line ends it.
 
     Deliberately conservative in the same direction as :func:`redact_secrets`:
     over-masking a non-secret line only costs a resend; under-masking would leak.
@@ -720,9 +720,11 @@ def redact_secret_lines(text: str) -> str:
                 # A blank line stays blank. A comment that is not indented into the value
                 # (a deeper `#` line is text of a literal value, masked below) is not part of
                 # it, but the value can go on after it, so it does not end the value. The
-                # comment still gets the `${...}` and credential-URL masks every line gets.
+                # comment still gets the `${...}`, credential-URL and flow-pair masks that a
+                # comment outside a value gets.
                 comment = _mask_interps(content, REDACTION_SENTINEL)
                 comment = _mask_url_creds(comment, f"{REDACTION_SENTINEL}@")
+                comment = _mask_flow_pairs(comment)
                 out.append(comment + line[len(content) :])
                 continue
             item = content[indent] == "-" and content[indent + 1 : indent + 2] in ("", " ", "\t")
