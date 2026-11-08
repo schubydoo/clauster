@@ -78,6 +78,15 @@ against the current docs (``code.claude.com/docs/en/plugins/cli-reference``,
   ``list --json`` now also carries a plugin's
   ``mcpServers`` definitions, which can hold ``env``/``headers`` credentials, so its
   output goes through :func:`redact_plugin_display` before it leaves this module.
+* ``claude plugin list --available --json`` (TASK-516, confirmed on 2.1.319 under a
+  throwaway ``HOME``) — an object ``{"installed": [...], "available": [...]}``.
+  ``installed`` is the ``list --json`` array. Each ``available`` entry carries
+  ``pluginId``, ``name``, ``marketplaceName``, ``source`` and, where the marketplace gives
+  them, ``description`` and ``version``. ``available`` leaves out a plugin that is
+  installed for the invocation cwd (a User install everywhere, a Project install only in
+  its own project), so the cwd is not cosmetic here either. It also lists a built-in
+  plugin directory (about 3600 entries, 2 MB) that ``marketplace list`` does not name, so
+  :func:`cli_list_offered_plugins` keeps one marketplace's entries and drops the rest.
 * ``claude plugin marketplace add <source> --scope ... [--sparse ...]`` — source
   is ``owner/repo[#ref|@ref]``, ``user@host:path``, a URL, or a path; ``--sparse``
   and ``--claudeai`` (an account-hosted marketplace that no settings file declares,
@@ -707,6 +716,87 @@ def _list_marketplaces_raw(binary: str, cwd: Path, *, run: RunFn) -> list[Any]:
     if not isinstance(data, list):
         raise PluginCliError("claude plugin marketplace list returned a non-list JSON value")
     return data
+
+
+# ---------------------------------------------------------------------------
+# What one marketplace offers (TASK-516): `plugin list --available --json`
+# ---------------------------------------------------------------------------
+
+
+def _offered_text(value: Any) -> str:
+    """Return ``value`` masked line by line when it is a string, else ``""``."""
+    return cw.redact_secret_lines(value) if isinstance(value, str) else ""
+
+
+def cli_list_offered_plugins(
+    binary: str, cwd: Path, marketplace: str, *, run: RunFn = subprocess.run
+) -> list[dict[str, Any]]:
+    """Return the plugins ``marketplace`` offers, each marked ``installed`` or not.
+
+    Reads ``claude plugin list --available --json`` from ``cwd`` (see the module
+    docstring for its shape). The CLI leaves a plugin that is installed for ``cwd`` out of
+    ``available``, so such a plugin comes from ``installed`` instead (an id ending in
+    ``@<marketplace>``) and is marked ``installed``. A plugin installed only in another
+    project stays in ``available``, so it is offered as not installed, as the CLI sees it.
+
+    Each entry keeps only ``id``, ``name``, ``description``, ``version`` and
+    ``installed``: the ``source`` (a git url) is never needed to show or install the
+    plugin. Every text field is marketplace text, so it is masked line by line and then
+    structurally (:func:`redact_plugin_display`). A masked id fails
+    :func:`validate_plugin_id`, so an install from it fails closed. A failed or malformed
+    read raises :class:`PluginCliError`.
+    """
+    validate_marketplace_name(marketplace)
+    proc = _run(binary, ["list", "--available", "--json"], cwd=cwd, run=run)
+    _raise_for_failure("list", "", proc)
+    try:
+        data = json.loads(proc.stdout or "{}")
+    except (ValueError, RecursionError) as exc:  # the same pair as cli_list_plugins
+        raise PluginCliError(
+            f"claude plugin list --available returned invalid JSON: {exc}"
+        ) from exc
+    if not isinstance(data, dict):
+        raise PluginCliError("claude plugin list --available returned a non-object JSON value")
+    available, installed = data.get("available", []), data.get("installed", [])
+    if not isinstance(available, list) or not isinstance(installed, list):
+        raise PluginCliError("claude plugin list --available returned a non-list field")
+    out: dict[str, dict[str, Any]] = {}
+    for entry in available:
+        if not isinstance(entry, dict) or entry.get("marketplaceName") != marketplace:
+            continue
+        plugin_id = entry.get("pluginId")
+        if not isinstance(plugin_id, str) or not plugin_id or plugin_id in out:
+            continue
+        out[plugin_id] = {
+            "id": plugin_id,
+            "name": entry.get("name") if isinstance(entry.get("name"), str) else plugin_id,
+            "description": entry.get("description"),
+            "version": entry.get("version"),
+            "installed": False,
+        }
+    suffix = "@" + marketplace
+    for entry in installed:
+        plugin_id = entry.get("id") if isinstance(entry, dict) else None
+        if not isinstance(plugin_id, str) or not plugin_id.endswith(suffix) or plugin_id in out:
+            continue
+        out[plugin_id] = {
+            "id": plugin_id,
+            "name": plugin_id[: -len(suffix)] or plugin_id,
+            "description": None,
+            "version": entry.get("version"),
+            "installed": True,
+        }
+    shown = [
+        {
+            "id": cw.redact_secret_lines(e["id"]),
+            "name": _offered_text(e["name"]),
+            "description": _offered_text(e["description"]),
+            "version": _offered_text(e["version"]),
+            "installed": e["installed"],
+        }
+        for e in sorted(out.values(), key=lambda e: (str(e["name"]).lower(), e["id"]))
+    ]
+    return redact_plugin_display(shown)
 
 
 # ---------------------------------------------------------------------------

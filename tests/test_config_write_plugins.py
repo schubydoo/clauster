@@ -2647,3 +2647,232 @@ def test_route_marketplace_update_failed_read_after_is_reported_not_400(
     with _client(write_config, tmp_path, _ON) as c:
         body = _update_marketplace(c)
     assert "could not read its plugin list" in body["message"]
+
+
+# --- the plugins one marketplace offers (TASK-516): `plugin list --available --json` ---
+
+#: The shape claude 2.1.319 prints (probed under a throwaway HOME, 2026-11-08): an installed
+#: plugin is left out of `available` for the cwd it is installed for, and a built-in
+#: directory that `marketplace list` does not name rides along.
+_AVAILABLE = {
+    "installed": [
+        {"id": "alpha@probe", "version": "1.2.0", "scope": "user", "enabled": True},
+        {"id": "gamma@probe", "version": "3.0.0", "scope": "project", "enabled": True},
+        {"id": "gamma@probe", "version": "3.0.0", "scope": "local", "enabled": True},
+        {"id": "elsewhere@probe", "version": "1.0.0", "scope": "project", "enabled": False},
+        {"id": "other@market2", "version": "9", "scope": "user", "enabled": True},
+    ],
+    "available": [
+        {
+            "pluginId": "zeta@probe",
+            "name": "zeta",
+            "description": "Zeta <b>bold</b>",
+            "marketplaceName": "probe",
+            "version": "0.1.0",
+            "source": {"source": "url", "url": "https://github.com/o/zeta.git"},
+        },
+        {
+            "pluginId": "beta@probe",
+            "name": "beta",
+            "marketplaceName": "probe",
+            "source": "./plugins/beta",
+        },
+        # Installed in another project only: the CLI still offers it from this cwd.
+        {"pluginId": "elsewhere@probe", "name": "elsewhere", "marketplaceName": "probe"},
+        {
+            "pluginId": "superpowers@anthropic-plugin-directory",
+            "name": "superpowers",
+            "marketplaceName": "anthropic-plugin-directory",
+        },
+    ],
+}
+
+
+def _offered(plugin_id: str, version: str = "", *, installed: bool, description: str = ""):
+    """Build one expected offered-plugin entry."""
+    return {
+        "id": plugin_id,
+        "name": plugin_id.split("@")[0],
+        "description": description,
+        "version": version,
+        "installed": installed,
+    }
+
+
+def test_cli_list_offered_plugins_keeps_one_marketplace_and_marks_installed(
+    tmp_path: Path,
+) -> None:
+    run, calls = _fake_run(rc=0, stdout=json.dumps(_AVAILABLE))
+    out = plugins.cli_list_offered_plugins(str(FAKE_CLAUDE), tmp_path, "probe", run=run)
+    assert calls[0]["argv"][1:] == ["plugin", "list", "--available", "--json"]
+    assert calls[0]["kwargs"]["cwd"] == str(tmp_path)
+    # Sorted by name; the source (a git url) is dropped; installed ones come from
+    # `installed`, once per id even when installed at two scopes.
+    assert out == [
+        _offered("alpha@probe", "1.2.0", installed=True),
+        _offered("beta@probe", installed=False),
+        _offered("elsewhere@probe", installed=False),
+        _offered("gamma@probe", "3.0.0", installed=True),
+        _offered("zeta@probe", "0.1.0", installed=False, description="Zeta <b>bold</b>"),
+    ]
+
+
+def test_cli_list_offered_plugins_marketplace_with_none_is_empty(tmp_path: Path) -> None:
+    run, _calls = _fake_run(rc=0, stdout=json.dumps(_AVAILABLE))
+    assert plugins.cli_list_offered_plugins(str(FAKE_CLAUDE), tmp_path, "nothing", run=run) == []
+
+
+def test_cli_list_offered_plugins_empty_stdout_is_empty(tmp_path: Path) -> None:
+    run, _calls = _fake_run(rc=0, stdout="")
+    assert plugins.cli_list_offered_plugins(str(FAKE_CLAUDE), tmp_path, "probe", run=run) == []
+
+
+def test_cli_list_offered_plugins_masks_marketplace_text(tmp_path: Path) -> None:
+    payload = {
+        "installed": [],
+        "available": [
+            {
+                "pluginId": "leaky@probe",
+                "name": "leaky ${SECRET_NAME}",
+                "description": "clone https://user:sk-live-123@host/repo.git\ntoken: sk-live-456",
+                "version": "${VERSION_TOKEN}",
+                "marketplaceName": "probe",
+            }
+        ],
+    }
+    run, _calls = _fake_run(rc=0, stdout=json.dumps(payload))
+    [entry] = plugins.cli_list_offered_plugins(str(FAKE_CLAUDE), tmp_path, "probe", run=run)
+    shown = json.dumps(entry)
+    for secret in ("sk-live-123", "sk-live-456", "SECRET_NAME", "VERSION_TOKEN"):
+        assert secret not in shown
+    assert cw.REDACTION_SENTINEL in entry["description"]
+    assert entry["id"] == "leaky@probe"
+
+
+def test_cli_list_offered_plugins_skips_malformed_entries(tmp_path: Path) -> None:
+    payload = {
+        "installed": ["not a dict", {"id": 7}, {"version": "1"}],
+        "available": [
+            "not a dict",
+            {"marketplaceName": "probe"},  # no pluginId
+            {"pluginId": "", "marketplaceName": "probe"},
+            {"pluginId": "x@probe", "name": 5, "description": ["x"], "marketplaceName": "probe"},
+            {"pluginId": "x@probe", "name": "dup", "marketplaceName": "probe"},
+        ],
+    }
+    run, _calls = _fake_run(rc=0, stdout=json.dumps(payload))
+    out = plugins.cli_list_offered_plugins(str(FAKE_CLAUDE), tmp_path, "probe", run=run)
+    assert out == [{**_offered("x@probe", installed=False), "name": "x@probe"}]
+
+
+def test_cli_list_offered_plugins_rejects_bad_marketplace_before_spawn(tmp_path: Path) -> None:
+    run, calls = _fake_run(rc=0, stdout="{}")
+    with pytest.raises(cw.InvalidCandidateError):
+        plugins.cli_list_offered_plugins(str(FAKE_CLAUDE), tmp_path, "-evil", run=run)
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    [
+        pytest.param("not json{{", id="invalid"),
+        pytest.param("[]", id="list-not-object"),
+        pytest.param('{"available": {}, "installed": []}', id="available-not-list"),
+        pytest.param('{"available": [], "installed": "x"}', id="installed-not-list"),
+        *_UNPARSEABLE,
+    ],
+)
+def test_cli_list_offered_plugins_rejects_malformed_output(tmp_path: Path, stdout: str) -> None:
+    run, _calls = _fake_run(rc=0, stdout=stdout)
+    with pytest.raises(plugins.PluginCliError):
+        plugins.cli_list_offered_plugins(str(FAKE_CLAUDE), tmp_path, "probe", run=run)
+
+
+def test_cli_list_offered_plugins_cli_failure_is_400_not_404(tmp_path: Path) -> None:
+    # A read names no entity: "not found" in its message is a CLI failure, never a 404.
+    run, _calls = _fake_run(rc=1, stderr="marketplace not found\ntoken: sk-live-789")
+    with pytest.raises(plugins.PluginCliError) as exc_info:
+        plugins.cli_list_offered_plugins(str(FAKE_CLAUDE), tmp_path, "probe", run=run)
+    assert not isinstance(exc_info.value, plugins.PluginNotFoundError)
+    assert "sk-live-789" not in str(exc_info.value)
+
+
+def test_route_marketplaces_offered_project_scope(
+    write_config, tmp_path, projects_root, monkeypatch
+) -> None:
+    argv_file = tmp_path / "argv.json"
+    monkeypatch.setenv("FAKE_CLAUDE_PLUGIN_ARGV_FILE", str(argv_file))
+    monkeypatch.setenv("FAKE_CLAUDE_PLUGIN_AVAILABLE_STDOUT", json.dumps(_AVAILABLE))
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.get(
+            "/api/config-write/marketplaces/offered?scope=project&project=alpha&marketplace=probe"
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["scope"] == "project" and body["project"] == "alpha"
+    assert body["marketplace"] == "probe"
+    assert [p["id"] for p in body["plugins"]] == [
+        "alpha@probe",
+        "beta@probe",
+        "elsewhere@probe",
+        "gamma@probe",
+        "zeta@probe",
+    ]
+    record = json.loads(argv_file.read_text())
+    assert record["argv"] == ["list", "--available", "--json"]
+    # Read from the project's own directory: the CLI's "installed" depends on the cwd.
+    assert Path(record["cwd"]).resolve() == (projects_root / "alpha").resolve()
+
+
+def test_route_marketplaces_offered_user_scope_omits_project(
+    write_config, tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("FAKE_CLAUDE_PLUGIN_AVAILABLE_STDOUT", json.dumps(_AVAILABLE))
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.get("/api/config-write/marketplaces/offered?scope=user&marketplace=market2")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "project" not in body
+    assert body["plugins"] == [_offered("other@market2", "9", installed=True)]
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        pytest.param("scope=bogus&project=alpha&marketplace=probe", id="bogus-scope"),
+        pytest.param("scope=project&project=alpha&marketplace=-evil", id="option-like-name"),
+        pytest.param("scope=project&project=alpha", id="missing-name"),
+    ],
+)
+def test_route_marketplaces_offered_bad_input_is_422(
+    write_config, tmp_path, projects_root, query
+) -> None:
+    with _client(write_config, tmp_path, _ON) as c:
+        assert c.get(f"/api/config-write/marketplaces/offered?{query}").status_code == 422
+
+
+def test_route_marketplaces_offered_404_when_disabled(write_config, tmp_path) -> None:
+    # Capability first (#819): a disabled surface 404s, a bad name included.
+    with _client(write_config, tmp_path, "") as c:
+        resp = c.get("/api/config-write/marketplaces/offered?scope=bogus&marketplace=-evil")
+    assert resp.status_code == 404
+
+
+def test_route_marketplaces_offered_user_scope_404_when_off(write_config, tmp_path) -> None:
+    with _client(write_config, tmp_path, _PROJECT_ONLY) as c:
+        resp = c.get("/api/config-write/marketplaces/offered?scope=user&marketplace=probe")
+    assert resp.status_code == 404
+
+
+def test_route_marketplaces_offered_cli_error_is_400_with_masked_detail(
+    write_config, tmp_path, projects_root, monkeypatch
+) -> None:
+    monkeypatch.setenv("FAKE_CLAUDE_PLUGIN_EXIT_CODE_LIST_AVAILABLE", "1")
+    monkeypatch.setenv("FAKE_CLAUDE_PLUGIN_STDERR", "boom https://u:sk-live-000@h/r.git")
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.get(
+            "/api/config-write/marketplaces/offered?scope=project&project=alpha&marketplace=probe"
+        )
+    assert resp.status_code == 400
+    assert "boom" in resp.json()["detail"]
+    assert "sk-live-000" not in resp.json()["detail"]

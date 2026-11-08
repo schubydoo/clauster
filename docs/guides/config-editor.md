@@ -197,7 +197,7 @@ The surface tabs:
 | MCP | MCP server definitions (add / edit / delete), as fields or raw JSON, plus per-server **approvals** for committed `.mcp.json` servers — Approve / Reject each, or reset all choices behind a typed confirm. |
 | Subagents | Subagent definition files: list, edit, create, delete. |
 | Skills | Skills: list, a per-skill `SKILL.md` editor, create, delete, and the visibility of each skill (`skillOverrides`). See [Skill frontmatter checks](#skill-frontmatter-checks) and [Skill visibility](#skill-visibility). |
-| Plugins | Installed plugins (install / uninstall / enable / disable / update) and the marketplaces they come from (add / remove). |
+| Plugins | Installed plugins (install / uninstall / enable / disable / update), the marketplaces they come from (add / remove), and the plugins each marketplace offers. See [Plugins and marketplaces](#plugins-and-marketplaces). |
 
 ### MCP server definitions
 
@@ -960,9 +960,31 @@ The scope rules and the update results below were checked against Claude Code
   already enabled at the scope you chose, Claude Code refuses and names that
   scope. A plugin that the project enables cannot be disabled at user scope. To
   turn it off for yourself only, disable it at the Local scope.
+- **One typed confirm covers a series of Enable, Disable and Update clicks.**
+  After an Enable, Disable or Update (of a plugin or a marketplace), the scope
+  confirm stays typed, so you can change several plugins in a row. Install,
+  Uninstall, and marketplace Add and Remove need the confirm typed again. After
+  one of them, the confirm box is empty. A change of scope, project or tab, or
+  closing the editor, also clears the confirm. The server checks the confirm on
+  every request.
 - **Each marketplace row shows the source type and its location**, for example
   `github · owner/repo`. A URL that carries a user name or password, such as
   `https://user:token@host/repo.git`, shows as `********`.
+- **Show plugins lists the plugins that a marketplace offers.** Clauster runs
+  `claude plugin list --available --json` from the directory of the scope that
+  you chose, and shows the plugins of that one marketplace. Each plugin shows its
+  version and description when the marketplace gives them. A plugin that is
+  installed for that directory is marked `installed`. A plugin that is installed
+  only in another project shows an Install button, because Claude Code offers it
+  again here. A marketplace with no plugins, or a failed read, shows a message.
+  The names and descriptions are marketplace text. Clauster masks them as it
+  masks other CLI output, and shows them as text, never as HTML. This list was
+  checked against Claude Code 2.1.319.
+- **Install from that list does not ask you to retype the plugin id.** The id
+  comes from the CLI's own list. The install still needs the scope confirm typed
+  again, and it runs the same `claude plugin install <id> --scope <scope>`
+  command as the install form. The install form, where you type the id, still
+  asks you to retype it.
 - **Clauster masks credentials in what it reads.** It masks every `headers`,
   `env` and MCP server `args` value, every `headersHelper` command, and every URL
   that carries a user name or password. Every other `url` is masked as the

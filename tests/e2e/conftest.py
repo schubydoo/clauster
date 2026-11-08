@@ -458,6 +458,12 @@ def config_mgmt_plugins_server(
     The plugin list carries what claude 2.1.319 prints (TASK-523): ``hello@market``
     installed at Project scope in ``alpha``, ``shared@market`` at User scope, and
     ``other@market`` at Project scope in ``beta``.
+
+    ``plugin list --available --json`` (TASK-516) offers ``newbie@market`` (its description
+    holds markup, which must show as text) next to the installed ones, plus an entry of the
+    CLI's built-in directory that the tab must not show. A second marketplace, ``empty``,
+    offers nothing. Every ``claude plugin`` call is logged to ``plugin-argv.jsonl`` beside
+    the state dir (``Server.state_dir.parent``).
     """
     tmp = tmp_path_factory.mktemp("e2e-configmgmt-plugins")
     yield from _start_plugins_server(tmp, mutable_projects_tree)
@@ -502,15 +508,42 @@ def _start_plugins_server(tmp: Path, mutable_projects_tree: Path) -> Iterator[Se
             "projectPath": str((mutable_projects_tree / "beta").resolve()),
         },
     ]
+    available = {
+        "installed": plugin_list,
+        "available": [
+            {
+                "pluginId": "newbie@market",
+                "name": "newbie",
+                "description": "New <img src=x onerror=window.__xss516=1> plugin",
+                "marketplaceName": "market",
+                "version": "0.1.0",
+                "source": {"source": "url", "url": "https://github.com/owner/newbie.git"},
+            },
+            {  # installed only in beta: the CLI offers it again from alpha
+                "pluginId": "other@market",
+                "name": "other",
+                "marketplaceName": "market",
+            },
+            {
+                "pluginId": "directory-only@anthropic-plugin-directory",
+                "name": "directory-only",
+                "marketplaceName": "anthropic-plugin-directory",
+            },
+        ],
+    }
+    marketplaces = [
+        {"name": "market", "source": "github", "repo": "owner/repo"},
+        {"name": "empty", "source": "directory", "path": "/srv/empty"},
+    ]
     yield from _start_server(
         tmp,
         mutable_projects_tree,
         extra="config_write:\n  enabled: true\n  allow_user_scope: true\n",
         extra_env={
             "FAKE_CLAUDE_PLUGIN_LIST_STDOUT": json.dumps(plugin_list),
-            "FAKE_CLAUDE_PLUGIN_MARKETPLACE_LIST_STDOUT": (
-                '[{"name": "market", "source": "github", "repo": "owner/repo"}]'
-            ),
+            "FAKE_CLAUDE_PLUGIN_AVAILABLE_STDOUT": json.dumps(available),
+            "FAKE_CLAUDE_PLUGIN_MARKETPLACE_LIST_STDOUT": json.dumps(marketplaces),
+            "FAKE_CLAUDE_PLUGIN_ARGV_LOG": str(tmp / "plugin-argv.jsonl"),
         },
     )
 

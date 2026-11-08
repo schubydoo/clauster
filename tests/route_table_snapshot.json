@@ -87,6 +87,12 @@
     [
       "GET"
     ],
+    "/api/config-write/marketplaces/offered"
+  ],
+  [
+    [
+      "GET"
+    ],
     "/api/config-write/mcp"
   ],
   [

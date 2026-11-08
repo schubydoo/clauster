@@ -3546,9 +3546,22 @@
                 <label class="form-label small mb-1" for="cm-plugin-confirm">
                   Type <code x-text="configMgmtConfirmToken()"></code> to arm the actions below
                 </label>
+                {# TASK-522: the confirm stays typed after Enable, Disable and Update, so a
+                   series of them needs one confirm. Any edit of the field types it fresh,
+                   which Install, Uninstall and marketplace Add/Remove need. #}
                 <input type="text" class="form-control form-control-sm cm-input-cap" id="cm-plugin-confirm" data-test="cm-plugin-confirm"
                        {{ NO_AUTOFILL }} spellcheck="false" x-model="configMgmt.plugins.confirm"
+                       @input="configMgmt.plugins.confirmSpent = false"
+                       aria-describedby="cm-plugin-confirm-hint"
                        :placeholder="configMgmtConfirmToken()">
+                <div class="text-secondary small mt-1" id="cm-plugin-confirm-hint">
+                  Enable, Disable and Update keep it typed for the next one. Install, Uninstall,
+                  and adding or removing a marketplace need it typed again.
+                </div>
+                <div class="text-warning small" data-test="cm-plugin-confirm-spent" role="status"
+                     x-show="configMgmtPluginConfirmSpent()" x-cloak>
+                  Type the confirm again to install, uninstall, or add or remove a marketplace.
+                </div>
               </div>
 
               <!-- Installed plugins -->
@@ -3602,7 +3615,7 @@
                               <button type="button" class="btn btn-sm btn-ghost-secondary" :data-test="'cm-plugin-update-' + p.id"
                                       :disabled="!configMgmtCanPluginAct()" @click="configMgmtPluginAction(p.id, 'update')">Update</button>
                               <button type="button" class="btn btn-sm btn-ghost-danger" :data-test="'cm-plugin-uninstall-' + p.id"
-                                      :disabled="!configMgmtCanPluginAct()" @click="configMgmtPluginAction(p.id, 'uninstall')">Uninstall</button>
+                                      :disabled="!configMgmtCanPluginActFresh()" @click="configMgmtPluginAction(p.id, 'uninstall')">Uninstall</button>
                             </span>
                           </template>
                         </span>
@@ -3628,7 +3641,10 @@
                   <button type="button" class="btn btn-sm btn-primary" data-test="cm-plugin-install-go"
                           :disabled="!configMgmtCanInstallPlugin()" @click="configMgmtInstallPlugin()">Install</button>
                 </div>
-                <div class="form-hint small mt-1">Also requires the scope confirm above.</div>
+                <div class="form-hint small mt-1">
+                  Also requires the scope confirm above. To install without typing the id,
+                  use Show plugins on a marketplace below.
+                </div>
               </div>
 
               <!-- Marketplaces -->
@@ -3638,9 +3654,12 @@
               </div>
               <table class="table table-sm mb-2" data-test="cm-marketplaces-table"
                      x-show="configMgmt.plugins.marketplaces.length" x-cloak>
-                <caption class="visually-hidden">Marketplaces: name, source, and actions</caption>
-                <tbody>
-                  <template x-for="m in configMgmt.plugins.marketplaces" :key="m.name">
+                <caption class="visually-hidden">Marketplaces: name, source, actions, and the plugins each offers</caption>
+                {# One tbody per marketplace: its row, then the plugins it offers (TASK-516),
+                   read from the CLI only when asked. Every text in the list is marketplace
+                   text: x-text only, and the server masks it before it sends it. #}
+                <template x-for="m in configMgmt.plugins.marketplaces" :key="m.name">
+                  <tbody>
                     <tr>
                       <td>
                         <span class="fw-medium" x-text="m.name"></span>
@@ -3648,16 +3667,61 @@
                              :title="configMgmtMarketSource(m)" x-text="configMgmtMarketSource(m)"></div>
                       </td>
                       <td class="text-end">
-                        <span class="d-inline-flex gap-1">
+                        <span class="d-inline-flex gap-1 flex-wrap justify-content-end">
                           <button type="button" class="btn btn-sm btn-ghost-secondary"
+                                  :data-test="'cm-market-offered-toggle-' + m.name"
+                                  :aria-expanded="configMgmtOfferedOpen(m.name) ? 'true' : 'false'"
+                                  :aria-label="(configMgmtOfferedOpen(m.name) ? 'Hide' : 'Show') + ' the plugins ' + m.name + ' offers'"
+                                  @click="configMgmtToggleOffered(m.name)"
+                                  x-text="configMgmtOfferedOpen(m.name) ? 'Hide plugins' : 'Show plugins'"></button>
+                          <button type="button" class="btn btn-sm btn-ghost-secondary"
+                                  :data-test="'cm-market-update-' + m.name"
                                   :disabled="!configMgmtCanPluginAct()" @click="configMgmtMarketAction(m.name, 'update')">Update</button>
                           <button type="button" class="btn btn-sm btn-ghost-danger"
-                                  :disabled="!configMgmtCanPluginAct()" @click="configMgmtMarketAction(m.name, 'remove')">Remove</button>
+                                  :data-test="'cm-market-remove-' + m.name"
+                                  :disabled="!configMgmtCanPluginActFresh()" @click="configMgmtMarketAction(m.name, 'remove')">Remove</button>
                         </span>
                       </td>
                     </tr>
-                  </template>
-                </tbody>
+                    <tr x-show="configMgmtOfferedOpen(m.name)" x-cloak>
+                      <td colspan="2" :data-test="'cm-market-offered-' + m.name">
+                        <div class="text-secondary small" x-show="configMgmtOffered(m.name).loading" x-cloak>
+                          Reading the plugins this marketplace offers…
+                        </div>
+                        <div class="text-danger small" role="alert" :data-test="'cm-market-offered-error-' + m.name"
+                             x-show="!configMgmtOffered(m.name).loading && configMgmtOffered(m.name).error" x-cloak
+                             x-text="configMgmtOffered(m.name).error"></div>
+                        <div class="text-secondary small" :data-test="'cm-market-offered-empty-' + m.name"
+                             x-show="!configMgmtOffered(m.name).loading && !configMgmtOffered(m.name).error && configMgmtOffered(m.name).plugins.length === 0" x-cloak>
+                          This marketplace offers no plugins.
+                        </div>
+                        <ul class="list-unstyled mb-0" :aria-label="'Plugins ' + m.name + ' offers'"
+                            x-show="!configMgmtOffered(m.name).loading && configMgmtOffered(m.name).plugins.length" x-cloak>
+                          <template x-for="p in configMgmtOffered(m.name).plugins" :key="p.id">
+                            <li class="py-1 border-top" :data-test="'cm-offered-' + p.id">
+                              <div class="d-flex gap-2 align-items-start justify-content-between">
+                                <div class="text-break">
+                                  <span class="fw-medium font-monospace" x-text="p.name"></span>
+                                  <span class="text-secondary small ms-1" x-text="p.version ? 'version ' + p.version : ''"></span>
+                                  <div class="text-secondary small" x-text="p.description"></div>
+                                </div>
+                                <template x-if="p.installed">
+                                  <span class="badge bg-success-lt" :data-test="'cm-offered-installed-' + p.id"
+                                        title="Installed. It is listed under Installed plugins above.">installed</span>
+                                </template>
+                                <template x-if="!p.installed">
+                                  <button type="button" class="btn btn-sm btn-primary" :data-test="'cm-offered-install-' + p.id"
+                                          :aria-label="'Install ' + p.id"
+                                          :disabled="!configMgmtCanPluginActFresh()" @click="configMgmtInstallOffered(p)">Install</button>
+                                </template>
+                              </div>
+                            </li>
+                          </template>
+                        </ul>
+                      </td>
+                    </tr>
+                  </tbody>
+                </template>
               </table>
 
               <!-- Add a marketplace -->
