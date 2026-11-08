@@ -2846,6 +2846,8 @@ def test_run_decodes_cli_output_as_utf8_on_every_os(tmp_path: Path) -> None:
     code = f"import sys; sys.stdout.buffer.write({raw!r})"
 
     def run(argv, **kwargs):
+        # Pinned on every OS: a UTF-8 locale (Linux, macOS) hides a missing `encoding`.
+        assert kwargs["encoding"] == "utf-8" and kwargs["errors"] == "replace"
         return subprocess.run([sys.executable, "-c", code], **kwargs)
 
     with pytest.raises(plugins.PluginCliError, match="invalid JSON"):
