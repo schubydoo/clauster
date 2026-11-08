@@ -338,8 +338,9 @@ class BridgeLaunch:
             # keeper inherits them into its own os.environ and re-emits them (still
             # secret-scrubbed) when it spawns the bridge via child_env(), so the pty
             # bridge gets the same extended PATH/env as the standard path. In the
-            # standalone binary the keeper also keeps this bundle's PyInstaller state, and
-            # its own child_env() strips that from the bridge (keeper_launch_env, #1708).
+            # standalone binary on POSIX the keeper starts as a fresh one-file instance with
+            # its own unpack dir, so the returned Popen is its bootloader, not the keeper
+            # itself (keeper_launch_env, TASK-503).
             keeper_env = procutil.keeper_launch_env(self._bridge_env_overlay())
             # Detach the keeper so it outlives a Clauster restart. POSIX: its own session
             # (setsid). Windows: DETACHED_PROCESS drops the shared console so a clauster

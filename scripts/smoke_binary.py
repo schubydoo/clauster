@@ -318,36 +318,67 @@ def _stop_server(proc: subprocess.Popen) -> bool:
         return True
 
 
+def _unpack_dir_of(pid: int) -> str | None:
+    """Return the one-file unpack dir in ``pid``'s env, or ``None`` with no ``/proc`` (Linux)."""
+    environ = Path(f"/proc/{pid}/environ")
+    if not environ.exists():
+        return None
+    raw = environ.read_bytes().decode("utf-8", "replace")
+    pairs = (item.split("=", 1) for item in raw.split("\0") if "=" in item)
+    mei = dict(pairs).get("_PYI_APPLICATION_HOME_DIR")
+    if not mei:  # PyInstaller is pinned; a rename must not quietly weaken this check
+        raise SystemExit(f"pid {pid} has no _PYI_APPLICATION_HOME_DIR in its env")
+    return mei
+
+
 def _keeper_survives_its_server(keeper: dict, server: subprocess.Popen) -> None:
     """Prove the pty keeper outlives the server and still ends its bridge cleanly (POSIX).
 
-    The frozen keeper runs out of the server's unpack directory, which the server's
-    bootloader deletes on exit (``procutil.keeper_launch_env``). Stop the server, wait for
-    that directory to go (Linux, where ``/proc`` shows the keeper's env), then end the
-    bridge: the keeper must notice, record ``exited`` in its sidecar, and exit itself.
+    The frozen keeper is a one-file instance of its own (``procutil.keeper_launch_env``),
+    so it runs out of its OWN unpack directory, not the server's, which the server's
+    bootloader deletes on exit. On Linux, where ``/proc`` shows both, check the two
+    differ, stop the server, wait for the server's directory to go, and check the
+    keeper's is still there. Then end the bridge: the keeper must notice, record
+    ``exited`` in its sidecar, and exit itself, and its bootloader must delete its
+    directory.
     """
     sidecar = Path(keeper["sidecar"])
     keeper_pid, bridge_pid = keeper["keeper_pid"], keeper["bridge_pid"]
-    mei = None
-    environ = Path(f"/proc/{keeper_pid}/environ")
-    if environ.exists():
-        raw = environ.read_bytes().decode("utf-8", "replace")
-        pairs = (item.split("=", 1) for item in raw.split("\0") if "=" in item)
-        mei = dict(pairs).get("_PYI_APPLICATION_HOME_DIR")
-        if not mei:  # PyInstaller is pinned; a rename must not quietly weaken this check
-            raise SystemExit("the frozen keeper has no _PYI_APPLICATION_HOME_DIR in its env")
+    keeper_mei = _unpack_dir_of(keeper_pid)
+    server_mei = None
+    children = Path(f"/proc/{server.pid}/task/{server.pid}/children")
+    if keeper_mei is not None and children.exists():
+        # `server` is the bootloader; the Python server is its one child.
+        server_mei = _unpack_dir_of(int(children.read_text().split()[0]))
+        if server_mei == keeper_mei:
+            raise SystemExit(
+                f"the pty keeper runs out of the server's unpack dir {server_mei}; it must "
+                "be a one-file instance of its own (see procutil.keeper_launch_env)"
+            )
     if _stop_server(server):
         raise SystemExit("the server did not exit within 15s of SIGTERM and was killed")
-    if mei:
-        _wait_until(lambda: not os.path.isdir(mei), 20, "the server's unpack dir to be deleted")
+    if server_mei:
+        _wait_until(
+            lambda: not os.path.isdir(server_mei), 20, "the server's unpack dir to be deleted"
+        )
     if not _pid_alive(keeper_pid):
         raise SystemExit("the pty keeper died with its server; it must outlive a restart")
+    if keeper_mei and not os.path.isdir(keeper_mei):
+        raise SystemExit(f"the keeper's own unpack dir {keeper_mei} went with the server")
     os.kill(bridge_pid, signal.SIGINT)  # the fake bridge's clean-exit signal
     _wait_until(lambda: not _pid_alive(keeper_pid), 20, "the keeper to exit after its bridge")
     state = json.loads(sidecar.read_text(encoding="utf-8")).get("state")
     if state != "exited":
         raise SystemExit(f"keeper sidecar ended in state {state!r}, expected 'exited'")
-    detail = "unpack dir deleted first" if mei else "unpack dir not observable here"
+    if keeper_mei:
+        _wait_until(
+            lambda: not os.path.isdir(keeper_mei), 20, "the keeper's unpack dir to be deleted"
+        )
+    detail = (
+        "server unpack dir deleted first, keeper's own kept, then removed"
+        if server_mei
+        else "unpack dirs not observable here"
+    )
     print(f"pty keeper outlived its server and exited cleanly ({detail})")
 
 
@@ -359,9 +390,9 @@ def _check_child_env(binary: Path) -> None:
     bundle's libraries, and a re-run of the binary from it can fail to start. The fake
     claude dumps its env on every run. This boots the binary, starts a standard bridge
     and (POSIX) a pty bridge, whose spawn is the ``__pty-keeper__`` re-invocation's own,
-    and checks every dumped env. On POSIX it also pins the keeper's single-process design
-    (the pid the runner records IS the keeper that writes the sidecar) and that the keeper
-    outlives its server. Last, ``doctor`` without an ``LD_LIBRARY_PATH`` covers the
+    and checks every dumped env. On POSIX it also pins that the pid the runner records IS
+    the keeper that writes the sidecar (not the keeper's one-file bootloader) and that the
+    keeper outlives its server. Last, ``doctor`` without an ``LD_LIBRARY_PATH`` covers the
     "remove it" case.
     """
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
@@ -413,11 +444,11 @@ def _check_child_env(binary: Path) -> None:
                 if pty.get("keeper_pid") != info.get("keeper_pid"):
                     raise SystemExit(
                         f"the runner recorded keeper pid {pty.get('keeper_pid')} but the keeper "
-                        f"wrote {info.get('keeper_pid')}: the frozen keeper is no longer one "
-                        "process (see procutil.keeper_launch_env)"
+                        f"wrote {info.get('keeper_pid')}: the runner did not adopt the frozen "
+                        "keeper's own pid (see procutil.keeper_launch_env)"
                     )
                 keeper = {**info, "sidecar": str(sidecars[-1])}
-                print(f"pty keeper is one process: pid {info['keeper_pid']}")
+                print(f"runner records the keeper's own pid: {info['keeper_pid']}")
             dumps = _wait_for_argv(dumps_dir, wanted)
             _request(port, "DELETE", f"/api/instances/{std['instance_id']}")
             if keeper is not None:

@@ -907,6 +907,203 @@ async def test_spawn_pty_reaches_running_then_stops(runner_config) -> None:
     assert procutil.proc_create_time(inst.keeper_pid) is None
 
 
+# A stand-in for the one-file bootloader a frozen keeper launch now is (TASK-503): it starts
+# the real keeper as its only child and waits for it. Its cmdline carries the keeper's argv
+# unchanged, exactly as the real bootloader's does, so it passes the keeper cmdline gate too.
+_BOOTLOADER = "import subprocess, sys; sys.exit(subprocess.call(sys.argv[1:]))"
+
+
+def _launch_through_a_bootloader(monkeypatch) -> list:
+    """Make every keeper launch a two-process one; return the launched ``Popen`` handles."""
+    real_cmd = BridgeLaunch._keeper_launch_cmd
+    real_popen = BridgeLaunch._popen_keeper
+    launched: list = []
+
+    def _cmd(*args, **kwargs):
+        return [sys.executable, "-c", _BOOTLOADER, *real_cmd(*args, **kwargs)]
+
+    def _popen(self, *args, **kwargs):
+        proc = real_popen(self, *args, **kwargs)
+        launched.append(proc)
+        return proc
+
+    monkeypatch.setattr(BridgeLaunch, "_keeper_launch_cmd", staticmethod(_cmd))
+    monkeypatch.setattr(BridgeLaunch, "_popen_keeper", _popen)
+    return launched
+
+
+def _sidecar_of(inst) -> dict:
+    sidecar = SessionRunner._sidecar_path_for(Path(inst.bridge_debug_log_path))
+    return json.loads(sidecar.read_text(encoding="utf-8"))
+
+
+@_POSIX_ONLY
+async def test_spawn_pty_records_the_keeper_not_its_bootloader(runner_config, monkeypatch) -> None:
+    # TASK-503: a frozen keeper is a bootloader plus the Python child that holds the PTY. The
+    # row must name the child (the pid in the sidecar), with that child's own start pair.
+    launched = _launch_through_a_bootloader(monkeypatch)
+    runner, _ = _pty_runner(runner_config)
+    inst = await runner.spawn("alpha")
+    try:
+        assert inst.status is InstanceStatus.RUNNING
+        (launcher,) = launched
+        assert inst.keeper_pid == _sidecar_of(inst)["keeper_pid"]
+        assert inst.keeper_pid != launcher.pid
+        assert psutil.Process(inst.keeper_pid).ppid() == launcher.pid
+        assert (inst.keeper_proc_start, inst.keeper_start_ticks) == procutil.proc_start_pair(
+            inst.keeper_pid
+        )
+        assert procutil.is_live_keeper(
+            inst.keeper_pid, inst.keeper_proc_start, start_ticks=inst.keeper_start_ticks
+        )
+        assert runner._procs[inst.instance_id] is launcher  # still held, to be reaped
+    finally:
+        stopped = await runner.stop(inst.instance_id)
+    assert stopped.status is InstanceStatus.STOPPED
+    assert procutil.proc_create_time(inst.bridge_pid) is None
+    assert procutil.proc_create_time(inst.keeper_pid) is None
+    # The stop paths never signal the bootloader; it exits by itself after its keeper.
+    launcher.wait(timeout=10)
+    assert launcher.returncode is not None
+
+
+@_POSIX_ONLY
+async def test_rediscover_and_stop_a_two_process_keeper_after_a_restart(
+    runner_config, monkeypatch
+) -> None:
+    # The restart half of TASK-503: a new runner (no Popen, so no launch pid) finds the keeper
+    # by its sidecar, which names the child the first runner already recorded, and its stop
+    # winds the keeper and its bridge down.
+    launched = _launch_through_a_bootloader(monkeypatch)
+    first, _ = _pty_runner(runner_config)
+    inst = await first.spawn("alpha")
+    second, _ = _pty_runner(runner_config)
+    try:
+        assert inst.status is InstanceStatus.RUNNING
+        await second.rediscover()
+        found = second.get_instance_for_project("alpha")
+        assert found is not None
+        assert found.status is InstanceStatus.RUNNING
+        assert found.keeper_pid == inst.keeper_pid != launched[0].pid
+        assert found.bridge_pid == inst.bridge_pid
+    finally:
+        stopped = await second.stop(inst.instance_id)
+    assert stopped.status is InstanceStatus.STOPPED
+    assert procutil.proc_create_time(inst.bridge_pid) is None
+    assert procutil.proc_create_time(inst.keeper_pid) is None
+    launched[0].wait(timeout=10)
+    assert launched[0].returncode is not None
+
+
+@_POSIX_ONLY
+async def test_poll_once_reaps_the_bootloader_after_its_keeper_exits(
+    runner_config, monkeypatch
+) -> None:
+    # The bootloader, not the keeper, is this process's child: when the bridge exits by itself
+    # the keeper and then the bootloader follow, and the poll loop must reap the bootloader
+    # through its Popen or it lingers as a zombie under the server.
+    launched = _launch_through_a_bootloader(monkeypatch)
+    runner, _ = _pty_runner(runner_config)
+    inst = await runner.spawn("alpha")
+    try:
+        (launcher,) = launched
+        SessionRunner._signal_stop(inst.bridge_pid, twice=True)
+        for _ in range(100):
+            if psutil.Process(launcher.pid).status() == psutil.STATUS_ZOMBIE:
+                break
+            await asyncio.sleep(0.1)
+        # Exited but unreaped: only a waitpid on it ends the zombie.
+        assert psutil.Process(launcher.pid).status() == psutil.STATUS_ZOMBIE
+        assert launcher.returncode is None
+        await runner.poll_once()
+        assert launcher.returncode is not None
+    finally:
+        await runner.stop(inst.instance_id)
+
+
+class _Launch:
+    def __init__(self, pid: int) -> None:
+        self.pid = pid
+
+
+def test_keeper_identity_from_sidecar_keeps_the_launch_pid_without_a_distinct_child(
+    runner_config, monkeypatch
+) -> None:
+    runner, _ = _pty_runner(runner_config)
+    spawner = runner._spawner
+    calls: list = []
+    monkeypatch.setattr(
+        "clauster.procutil.is_keeper_child_of", lambda pid, ppid: calls.append(pid) or True
+    )
+    # No sidecar pid yet, a malformed one, or the launch's own (a source install): no change,
+    # and the gate is not even asked.
+    for info in ({}, {"keeper_pid": True}, {"keeper_pid": "7"}, {"keeper_pid": 500}):
+        assert spawner._keeper_identity_from_sidecar(info, 500) is None
+    assert calls == []
+
+
+def test_keeper_identity_from_sidecar_refuses_a_pid_that_is_not_the_launchs_child(
+    runner_config, monkeypatch, caplog
+) -> None:
+    # The sidecar is a file on disk and the adopted pid reaches a tree kill: a pid that is not
+    # the bootloader's own keeper child is refused, and the row keeps the launch pid.
+    runner, _ = _pty_runner(runner_config)
+    monkeypatch.setattr("clauster.procutil.is_keeper_child_of", lambda pid, ppid: False)
+    with caplog.at_level("WARNING", logger="clauster.spawn_coordinator"):
+        assert runner._spawner._keeper_identity_from_sidecar({"keeper_pid": 501}, 500) is None
+    assert any("not the keeper child" in r.getMessage() for r in caplog.records)
+
+
+def test_keeper_identity_from_sidecar_fences_the_start_pair(runner_config, monkeypatch) -> None:
+    # A keeper that exits, and a pid recycled, between the gate and the pair read would give
+    # a pair describing another process; the second gate check refuses it.
+    runner, _ = _pty_runner(runner_config)
+    answers = iter([True, False])
+    monkeypatch.setattr("clauster.procutil.is_keeper_child_of", lambda pid, ppid: next(answers))
+    monkeypatch.setattr("clauster.procutil.proc_start_pair", lambda pid: (1.0, 2))
+    assert runner._spawner._keeper_identity_from_sidecar({"keeper_pid": 501}, 500) is None
+
+    monkeypatch.setattr("clauster.procutil.is_keeper_child_of", lambda pid, ppid: True)
+    assert runner._spawner._keeper_identity_from_sidecar({"keeper_pid": 501}, 500) == (501, 1.0, 2)
+
+
+async def test_adopt_keeper_identity_only_replaces_this_launchs_row(
+    runner_config, monkeypatch
+) -> None:
+    from clauster.models import RemoteControlInstance
+
+    runner, _ = _pty_runner(runner_config)
+    spawner = runner._spawner
+    monkeypatch.setattr(
+        type(spawner),
+        "_keeper_identity_from_sidecar",
+        staticmethod(lambda info, pid: (501, 1.0, 2)),
+    )
+    inst = RemoteControlInstance(
+        project="alpha", label="alpha", keeper_pid=500, keeper_proc_start=9.0
+    )
+    inst.keeper_start_ticks = 8
+    await spawner._adopt_keeper_identity(inst, {"keeper_pid": 501}, _Launch(500))
+    assert (inst.keeper_pid, inst.keeper_proc_start, inst.keeper_start_ticks) == (501, 1.0, 2)
+
+    # Already adopted (the row no longer names this launch): left alone, trio intact.
+    await spawner._adopt_keeper_identity(inst, {"keeper_pid": 777}, _Launch(500))
+    assert (inst.keeper_pid, inst.keeper_proc_start, inst.keeper_start_ticks) == (501, 1.0, 2)
+
+    # The row moved to another launch while the gate ran in its thread: not overwritten.
+    moved = RemoteControlInstance(project="alpha", label="alpha", keeper_pid=500)
+
+    def _gate_then_move(info, pid):
+        moved.keeper_pid = 600
+        return (501, 1.0, 2)
+
+    monkeypatch.setattr(
+        type(spawner), "_keeper_identity_from_sidecar", staticmethod(_gate_then_move)
+    )
+    await spawner._adopt_keeper_identity(moved, {"keeper_pid": 501}, _Launch(500))
+    assert moved.keeper_pid == 600
+
+
 @_POSIX_ONLY
 async def test_spawn_pty_no_url_does_not_falsely_run(runner_config, monkeypatch) -> None:
     """A flag-form bridge that never prints a URL must not be reported RUNNING."""

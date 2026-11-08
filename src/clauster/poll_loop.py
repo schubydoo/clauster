@@ -248,6 +248,12 @@ class PollLoop:
             # reap it here so it never lingers as a zombie after an organic exit.
             if instance.keeper_pid is not None:
                 await asyncio.to_thread(procutil.reap_if_exited, instance.keeper_pid)
+                # A frozen keeper is a one-file instance (TASK-503): the row records the
+                # keeper itself, and the direct child is its bootloader, which exits after
+                # it. Reap that through its Popen, which also records the exit.
+                launcher = self._registry._procs.get(instance.instance_id)
+                if launcher is not None and launcher.pid != instance.keeper_pid:
+                    await asyncio.to_thread(launcher.poll)
             if pid is None:
                 continue
             await asyncio.to_thread(procutil.reap_if_exited, pid)

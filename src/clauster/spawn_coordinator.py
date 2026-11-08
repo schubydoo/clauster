@@ -971,6 +971,59 @@ class SpawnCoordinator:
             time.sleep(_READY_POLL_INTERVAL)  # pragma: skip-on-win
         return info  # pragma: skip-on-win
 
+    @staticmethod
+    def _keeper_identity_from_sidecar(
+        info: dict, launcher_pid: int
+    ) -> tuple[int, float | None, int | None] | None:
+        """Return the keeper's own ``(pid, proc_start, start_ticks)`` when it is not the launch.
+
+        A frozen keeper on POSIX is a fresh one-file instance (TASK-503,
+        :func:`procutil.keeper_launch_env`): ``launcher_pid`` is its bootloader, and the
+        keeper that holds the PTY is the bootloader's Python child, which writes its own
+        pid to the sidecar. ``None`` when there is nothing to change (no sidecar pid yet, or
+        it IS the launch, as for a source install) or when the pid fails the gate.
+
+        The gate (:func:`procutil.is_keeper_child_of`) runs on both sides of the one
+        :func:`procutil.proc_start_pair` read. The sidecar is a file on disk and this pid
+        reaches ``_cleanup_keeper``'s tree kill, so it must be the bootloader's own keeper
+        child. Checking again after the read fences the pair: a keeper that exited, and a
+        pid the OS recycled, between the first check and the read would no longer name the
+        bootloader as its parent.
+        """
+        pid = _row_int(info.get("keeper_pid"))
+        if pid is None or pid == launcher_pid:
+            return None
+        if not procutil.is_keeper_child_of(pid, launcher_pid):
+            _log.warning(
+                "keeper sidecar names pid %s, which is not the keeper child of launch pid %s; "
+                "keeping the launch pid",
+                pid,
+                launcher_pid,
+            )
+            return None
+        created, ticks = procutil.proc_start_pair(pid)
+        if not procutil.is_keeper_child_of(pid, launcher_pid):
+            return None
+        return pid, created, ticks
+
+    async def _adopt_keeper_identity(
+        self, instance: RemoteControlInstance, info: dict, proc: subprocess.Popen
+    ) -> None:
+        """Record the keeper's own pid and start pair in place of the launch's (TASK-503).
+
+        Rediscovery, the sidecar sweep (``keeper_pid in held_keepers``) and the stop paths
+        all identify a keeper by the pid in its sidecar, so the row must carry that pid. The
+        three fields are replaced together, never one alone (the trio rule of
+        ``Rediscovery._recover_keeper_identity``). The ``Popen`` stays in ``_procs``: the
+        bootloader is this process's child, and the poll loop reaps it through that handle.
+        """
+        if instance.keeper_pid is None or instance.keeper_pid != proc.pid:
+            return  # already adopted, or not this launch's row
+        found = await asyncio.to_thread(self._keeper_identity_from_sidecar, info, proc.pid)
+        if found is None or instance.keeper_pid != proc.pid:
+            return  # the row moved on to another launch while the gate ran
+        instance.keeper_pid, instance.keeper_proc_start, instance.keeper_start_ticks = found
+
     def _apply_pty_info(
         self, instance: RemoteControlInstance, info: dict, proc: subprocess.Popen
     ) -> None:
@@ -1083,6 +1136,7 @@ class SpawnCoordinator:
             procutil.proc_start_pair, proc.pid
         )
         info = await asyncio.to_thread(self._await_ready_pty, sidecar, proc)
+        await self._adopt_keeper_identity(instance, info, proc)
         self._apply_pty_info(instance, info, proc)
         await asyncio.to_thread(self._flush_redacted_mirror, instance)
         if instance.status is InstanceStatus.ERROR:
@@ -1235,6 +1289,7 @@ class SpawnCoordinator:
                 # bridge-log markers; readiness is the connect URL appearing there.
                 sidecar = self._sidecar_path_for(log_path)
                 info = await asyncio.to_thread(self._read_sidecar, sidecar)
+                await self._adopt_keeper_identity(instance, info or {}, proc)
                 self._apply_pty_info(instance, info or {}, proc)
                 # Keep the at-rest mirror current during pty startup too: poll_once
                 # can't yet (bridge_pid is still unknown until the sidecar reveals it),

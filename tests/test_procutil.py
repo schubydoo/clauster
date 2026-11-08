@@ -717,62 +717,75 @@ def test_keeper_launch_env_is_child_env_on_a_source_install(monkeypatch):
     assert procutil.keeper_launch_env({"FOO": "bar"}) == procutil.child_env({"FOO": "bar"})
 
 
-def _bridge_env_from_keeper(monkeypatch, keeper_env):
-    """Replay the keeper's own spawn: its os.environ is ``keeper_env``, it calls child_env."""
-    monkeypatch.setattr(os, "environ", dict(keeper_env))
+_KEEPER_MEI = "/tmp/_MEIkeeper99"
+
+
+def _bridge_env_from_fresh_keeper(monkeypatch, keeper_env):
+    """Replay a fresh one-file keeper's own spawn of its bridge.
+
+    Its bootloader writes new ``_PYI_*`` state for its OWN unpack dir and prepends that dir
+    to ``LD_LIBRARY_PATH``, saving the launch value in ``*_ORIG`` when there was one (the
+    6.22.3 bootloader, ``pyi_utils_posix.c``). The keeper then calls ``child_env``.
+    """
+    env = dict(keeper_env)
+    env.update({**_PYI_STATE, "_PYI_APPLICATION_HOME_DIR": _KEEPER_MEI})
+    if "LD_LIBRARY_PATH" in env:
+        env["LD_LIBRARY_PATH_ORIG"] = env["LD_LIBRARY_PATH"]
+        env["LD_LIBRARY_PATH"] = f"{_KEEPER_MEI}:{env['LD_LIBRARY_PATH']}"
+    else:
+        env["LD_LIBRARY_PATH"] = _KEEPER_MEI
+    monkeypatch.setattr(os, "environ", env)
     return procutil.child_env()
 
 
 @pytest.mark.parametrize(
-    ("ld", "ld_orig", "extra", "keeper_orig", "bridge_ld"),
+    ("ld", "ld_orig", "extra", "bridge_ld"),
     [
-        (f"{_MEI}:/opt/lib", "/opt/lib", None, "/opt/lib", "/opt/lib"),
-        (_MEI, None, None, None, None),
-        (f"{_MEI}:/opt/lib", "/opt/lib", {"LD_LIBRARY_PATH": "/op/lib"}, "/op/lib", "/op/lib"),
-        (_MEI, None, {"LD_LIBRARY_PATH": "/op/lib"}, "/op/lib", "/op/lib"),
+        (f"{_MEI}:/opt/lib", "/opt/lib", None, "/opt/lib"),
+        (_MEI, None, None, None),
+        (f"{_MEI}:/opt/lib", "/opt/lib", {"LD_LIBRARY_PATH": "/op/lib"}, "/op/lib"),
+        (_MEI, None, {"LD_LIBRARY_PATH": "/op/lib"}, "/op/lib"),
     ],
     ids=["user-path", "no-user-path", "operator-over-user", "operator-only"],
 )
-def test_keeper_launch_env_keeps_the_runtime_and_hands_the_bridge_the_clean_path(
-    monkeypatch, ld, ld_orig, extra, keeper_orig, bridge_ld
+def test_keeper_launch_env_starts_a_fresh_instance_and_hands_the_bridge_the_clean_path(
+    monkeypatch, ld, ld_orig, extra, bridge_ld
 ):
-    # The keeper stays a sub-process of THIS bundle (same _PYI_* state, bundle-first library
-    # path), and *_ORIG carries the value its bridge must get back once it calls child_env.
+    # TASK-503: no _PYI_* state from THIS bundle, so the keeper's bootloader starts a fresh
+    # one-file instance with its own unpack dir instead of running out of the server's.
     _as_frozen(monkeypatch, ld=ld, ld_orig=ld_orig)
     monkeypatch.setenv("CLAUSTER_SESSION_SECRET", "must-not-leak")
     keeper = procutil.keeper_launch_env(extra)
-    assert {k: v for k, v in keeper.items() if k.startswith("_PYI_")} == _PYI_STATE
-    assert keeper["LD_LIBRARY_PATH"] == ld
-    assert keeper.get("LD_LIBRARY_PATH_ORIG") == keeper_orig
+    assert keeper == procutil.child_env(extra)
+    assert not [name for name in keeper if name.startswith("_PYI_")]
+    assert _MEI not in keeper.get("LD_LIBRARY_PATH", "")
     assert "CLAUSTER_SESSION_SECRET" not in keeper
 
-    bridge = _bridge_env_from_keeper(monkeypatch, keeper)
+    bridge = _bridge_env_from_fresh_keeper(monkeypatch, keeper)
     assert bridge.get("LD_LIBRARY_PATH") == bridge_ld
     assert "LD_LIBRARY_PATH_ORIG" not in bridge
     assert not [name for name in bridge if name.startswith("_PYI_")]
 
 
-def test_keeper_launch_env_drops_an_operator_reset_flag(monkeypatch):
-    # PYINSTALLER_RESET_ENVIRONMENT=1 would make the keeper a fresh two-process instance.
-    _as_frozen(monkeypatch, ld=_MEI)
-    keeper = procutil.keeper_launch_env({"PYINSTALLER_RESET_ENVIRONMENT": "1"})
+@pytest.mark.parametrize("platform", ["linux", "darwin"])
+def test_keeper_launch_env_keeps_no_bundle_state_on_posix(monkeypatch, platform):
+    _as_frozen(monkeypatch, platform=platform, ld="/user/lib")
+    monkeypatch.setenv("PYINSTALLER_RESET_ENVIRONMENT", "1")
+    keeper = procutil.keeper_launch_env(None)
+    assert not [name for name in keeper if name.startswith("_PYI_")]
     assert "PYINSTALLER_RESET_ENVIRONMENT" not in keeper
 
 
-def test_keeper_launch_env_without_any_library_path_adds_none(monkeypatch):
-    # Defensive: a one-file child always has one, but its absence must not invent one.
-    _as_frozen(monkeypatch, ld=None)
-    keeper = procutil.keeper_launch_env(None)
-    assert "LD_LIBRARY_PATH" not in keeper
-    assert "LD_LIBRARY_PATH_ORIG" not in keeper
-
-
-def test_keeper_launch_env_on_macos_only_keeps_pyi_state(monkeypatch):
-    _as_frozen(monkeypatch, platform="darwin", ld="/user/lib")
-    keeper = procutil.keeper_launch_env(None)
+def test_keeper_launch_env_on_windows_keeps_the_one_process_form(monkeypatch):
+    # Windows keeps THIS bundle's state (unmeasured there as a two-process keeper), drops an
+    # operator reset flag that would split it, and leaves a user LD_LIBRARY_PATH alone.
+    _as_frozen(monkeypatch, platform="win32", ld="/user/lib")
+    monkeypatch.setenv("CLAUSTER_SESSION_SECRET", "must-not-leak")
+    keeper = procutil.keeper_launch_env({"PYINSTALLER_RESET_ENVIRONMENT": "1"})
     assert {k: v for k, v in keeper.items() if k.startswith("_PYI_")} == _PYI_STATE
+    assert "PYINSTALLER_RESET_ENVIRONMENT" not in keeper
     assert keeper["LD_LIBRARY_PATH"] == "/user/lib"
-    assert "LD_LIBRARY_PATH_ORIG" not in keeper
+    assert "CLAUSTER_SESSION_SECRET" not in keeper
 
 
 def test_is_secret_env_name_matches_known_and_shaped():
@@ -1040,6 +1053,65 @@ def test_is_keeper_process_zombie_is_false(monkeypatch):
         _fake_proc(status=psutil.STATUS_RUNNING, cmdline=keeper_argv),
     )
     assert procutil.is_keeper_process(1234) is True
+
+
+_FROZEN_KEEPER_ARGV = ("/usr/local/bin/clauster", "__pty-keeper__", "--sidecar", "/tmp/k.json")
+
+
+def _fake_child(*, ppid, status=psutil.STATUS_RUNNING, cmdline=_FROZEN_KEEPER_ARGV):
+    base = _fake_proc(status=status, cmdline=cmdline)
+
+    class FakeChild(base):
+        def ppid(self):
+            return ppid
+
+    return FakeChild
+
+
+def test_is_keeper_child_of_accepts_the_bootloaders_keeper_child(monkeypatch):
+    # TASK-503: the frozen keeper is the Python child of its one-file bootloader.
+    monkeypatch.setattr(procutil.psutil, "Process", _fake_child(ppid=500))
+    assert procutil.is_keeper_child_of(501, 500) is True
+
+
+@pytest.mark.parametrize(
+    ("fake", "why"),
+    [
+        (_fake_child(ppid=1), "another parent: a recycled pid, or an orphan"),
+        (_fake_child(ppid=500, cmdline=("python3", "-c", "x")), "not a keeper"),
+        (_fake_child(ppid=500, status=psutil.STATUS_ZOMBIE), "a zombie"),
+    ],
+    ids=["other-parent", "not-a-keeper", "zombie"],
+)
+def test_is_keeper_child_of_rejects(monkeypatch, fake, why):
+    monkeypatch.setattr(procutil.psutil, "Process", fake)
+    assert procutil.is_keeper_child_of(501, 500) is False, why
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        psutil.NoSuchProcess(501),
+        psutil.AccessDenied(501),
+        ValueError("pid"),
+        RuntimeError("btime"),
+    ],
+    ids=["gone", "denied", "negative", "no-clock"],
+)
+def test_is_keeper_child_of_fails_closed_on_a_psutil_error(monkeypatch, exc):
+    class Raises:
+        def __init__(self, pid):
+            raise exc
+
+    monkeypatch.setattr(procutil.psutil, "Process", Raises)
+    assert procutil.is_keeper_child_of(501, 500) is False
+
+
+def test_is_keeper_child_of_on_real_processes():
+    # Real psutil: this process is our parent's child but not a keeper, and a negative pid
+    # (an on-disk sidecar value) answers rather than raising.
+    assert procutil.is_keeper_child_of(os.getpid(), os.getppid()) is False
+    assert procutil.is_keeper_child_of(-1, os.getpid()) is False
 
 
 def test_is_bridge_process_zombie_is_false(monkeypatch):

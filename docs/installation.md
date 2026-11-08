@@ -167,6 +167,13 @@ want the full supply-chain check.
     so an age-based cleanup of `/tmp` leaves them alone. If they are deleted
     another way, [`/healthz`](operations.md#healthz-liveness-and-readiness)
     answers `503` until you restart Clauster.
+    On Linux and macOS, the pty keeper (the process that holds the terminal of an
+    Interactive Session bridge) starts as its own copy of the binary. It unpacks
+    into its own `_MEI…` directory, keeps those files alive in the same way, and
+    deletes the directory when it exits. So a keeper keeps working after a
+    Clauster restart deletes the directory of the server that started it. Each
+    keeper's copy takes as much space as the server's own (about 90 MB on Linux).
+    If `/tmp` is a `tmpfs`, that space is memory.
     The unpack step also sets `_PYI_*` variables in the binary's own environment,
     and on Linux it adds the `_MEI…` directory to `LD_LIBRARY_PATH`. Clauster
     removes them, and puts back your own `LD_LIBRARY_PATH`, before it starts a
