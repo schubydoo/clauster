@@ -22,7 +22,9 @@ named like a credential, so gitleaks and CodeQL do not flag the test data.
 
 from __future__ import annotations
 
+import math
 import re
+import time
 from pathlib import Path
 
 import pytest
@@ -36,6 +38,8 @@ from clauster.config import load_config
 MASK = cw.REDACTION_SENTINEL
 #: ``https://u:qv-bin@h.example.com`` as base64, for a ``!!binary`` value.
 _B64_URL = "aHR0cHM6Ly91OnF2LWJpbkBoLmV4YW1wbGUuY29t"
+#: ``password=qv-b64kv`` as base64.
+_B64_KV = "cGFzc3dvcmQ9cXYtYjY0a3Y="
 FAKE_CLAUDE = Path(__file__).resolve().parent / "fixtures" / "fake_claude" / "claude"
 
 _STDIO = (
@@ -435,6 +439,18 @@ def test_a_secret_shaped_args_item_is_masked_and_round_trips(tmp_path: Path) -> 
             "\n---\n",
             "qv_hook",
         ),
+        # An escaped `key=value` or `key: value` secret: the whole line masker reads the
+        # loaded text, as it reads the same text written without the escape.
+        ('---\nmcpServers: {a: {args: ["--api\\x2dkey=qv-eq"]}}\n---\n', "qv-eq"),
+        ('---\nmcpServers: {a: {args: ["tok\\x65n: qv-kv"]}}\n---\n', "qv-kv"),
+        # A loaded `${...}` that spans a line break: the line masker reads each line alone,
+        # so the whole text is scanned too.
+        ('---\nmcpServers: {a: {args: ["\\x24{\\nqv_nl}"]}}\n---\n', "qv_nl"),
+        ('---\ndescription: "see \\x24{\\nqv_nl2}"\n---\nb\n', "qv_nl2"),
+        # The loaded text is read as a line of its own.
+        ('---\ndescription: "API_KEY\\x3dqv-desc"\n---\nb\n', "qv-desc"),
+        ('---\nmetadata: {k: "env: {t\\x6fken: qv-flow}"}\n---\n', "qv-flow"),
+        (f"---\nmetadata: {{k: !!binary {_B64_KV}}}\n---\n", "cGFzc3dv"),
         # Any other frontmatter field: the decoded value is read there too.
         ('---\ndescription: "see https://u:qv-top\\u0040h.example.com"\n---\nb\n', "qv-top"),
         ("---\nmetadata: {k: !!binary aHR0cHM6Ly91OnF2LWJpbkBoLmV4YW1wbGUuY29t}\n---\n", "aHR0"),
@@ -519,6 +535,14 @@ def test_the_header_view_leaves_what_the_line_masker_shows(tmp_path: Path, store
     assert sk.read_skill_file(tmp_path, "s")[0] == cw.redact_secret_lines(stored)
 
 
+def test_a_literal_value_with_a_backslash_is_masked_in_place(tmp_path: Path) -> None:
+    # A plain scalar reads its backslash as text, so its source is the loaded value: the
+    # line masker's view of that value replaces it in place, and the key stays.
+    stored = "---\nmetadata: {k: API_KEY=qv-v\\y}\n---\n"
+    _place(tmp_path, stored)
+    assert sk.read_skill_file(tmp_path, "s")[0] == f"---\nmetadata: {{k: API_KEY={MASK}}}\n---\n"
+
+
 def test_a_folded_value_with_a_reference_is_masked_in_place(tmp_path: Path) -> None:
     # The value reads in its source as it loads, so only the reference is masked, as by
     # the line masker, and the key and the other lines stay.
@@ -529,6 +553,45 @@ def test_a_folded_value_with_a_reference_is_masked_in_place(tmp_path: Path) -> N
     _place(tmp_path, stored)
     content = sk.read_skill_file(tmp_path, "s")[0]
     assert content == stored.replace("${CLAUDE_SKILL_DIR}", MASK)
+
+
+@pytest.mark.parametrize(
+    ("header", "held"),
+    [
+        ("k: !!%62inary x\n", True),
+        ("k: !<tag:yaml.org,2002:%62inary> x\n", True),
+        ("k: a!b c%d\n", False),  # the `%` is in another word than the `!`
+        ("k: 100%!\n", False),  # the `%` is before the `!`
+        ("k: " + "!" * 50 + "\n", False),
+    ],
+)
+def test_the_tag_pre_check_reads_a_percent_escape_in_one_word(header: str, held: bool) -> None:
+    assert sk._may_hold_masked(header) is held
+
+
+def test_the_pre_check_is_linear_in_a_run_of_tag_marks() -> None:
+    # Greptile on PR 1855: `![^\s]*%` scanned the rest of a run of `!` again from each `!`.
+    # A ratio, not a time bound: eight times the text must cost far less than 64 times.
+    def cost(n: int) -> float:
+        header = "k: " + "!" * n + "\n"
+        best = math.inf
+        for _ in range(5):
+            start = time.perf_counter()
+            sk._may_hold_masked(header)
+            best = min(best, time.perf_counter() - start)
+        return best
+
+    small, large = cost(20_000), cost(160_000)
+    assert large < 24 * max(small, 1e-6)
+
+
+def test_an_oversized_header_is_masked_whole_before_any_scan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The size check comes first, so no scan reads a header that no save can write.
+    monkeypatch.setattr(sk, "_may_hold_masked", lambda text: pytest.fail("scanned"))
+    header = "k: v\n" * (sk.MAX_FILE_BYTES // 5 + 1)
+    assert sk._mask_header_values(header, readable=True) == f"{MASK}\n" * header.count("\n")
 
 
 def test_a_plain_args_item_spelled_with_an_escape_still_shows(tmp_path: Path) -> None:

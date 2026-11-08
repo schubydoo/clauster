@@ -642,10 +642,14 @@ user name or password, or a list item such as `- --token=abc`. In a flow list,
 `[--token=abc]` shows in clear, as it does on the MCP tab. In `hooks`, every
 `headers` value shows as `********`.
 The editor also reads each frontmatter value as YAML loads it, as the MCP and
-Hooks tabs do. A `${...}` reference or a URL with a user name or password is
-therefore masked also when it is written with an escape (such as `\x40` for
-`@`, also an escaped line break) or as `!!binary`. A `url` value written as
-`!!binary` shows as `********`. In `mcpServers` and `hooks`, a
+Hooks tabs do. A value that is written with an escape (such as `\x40` for `@`
+or `\x2d` for `-`, also an escaped line break) or as `!!binary` is masked when
+its loaded text, read on its own, holds what the line masking above masks: a
+`${...}` reference, a URL with a user name or password, or a line such as
+`--api-key=abc`. Such a value can therefore be masked where the same text,
+written without the escape, shows in clear, such as `[--token=abc]` above.
+A `url` value written as `!!binary` shows
+as `********`. In `mcpServers` and `hooks`, a
 value under a key that looks secret shows as `********`, also when the key looks
 secret only after its escapes are read (such as `"client\x53ecret"`). Elsewhere
 such an escaped key masks its value too. A `${...}` reference that is split
