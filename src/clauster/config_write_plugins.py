@@ -762,6 +762,19 @@ def _offered_id(value: Any, suffix: str) -> str | None:
     return value
 
 
+def _install_rank(entry: dict[str, Any], cwd: Path) -> int:
+    """Return how closely an ``installed`` entry applies to ``cwd``: lower applies more.
+
+    Claude Code's own precedence: a Local install of this directory (0), then a Project
+    install of it (1), then a User install (2). An install for another directory, or with
+    no or another scope, ranks last (3).
+    """
+    scope = entry.get("scope")
+    if scope in ("local", "project") and _same_dir(entry.get("projectPath"), cwd):
+        return 0 if scope == "local" else 1
+    return 2 if scope == "user" else 3
+
+
 def cli_list_offered_plugins(
     binary: str, cwd: Path, marketplace: str, *, run: RunFn = subprocess.run
 ) -> list[dict[str, Any]]:
@@ -770,8 +783,10 @@ def cli_list_offered_plugins(
     Reads ``claude plugin list --available --json`` from ``cwd`` (see the module
     docstring for its shape). The CLI leaves a plugin that is installed for ``cwd`` out of
     ``available``, so such a plugin comes from ``installed`` instead and is marked
-    ``installed``. A plugin installed only in another project stays in ``available``, so
-    it is offered as not installed, as the CLI sees it.
+    ``installed``. One id can be installed at several scopes and projects; its row shows
+    the install that applies to ``cwd`` (:func:`_install_rank`). A plugin installed only in
+    another project stays in ``available``, so it is offered as not installed, as the CLI
+    sees it.
 
     The dashboard installs from this list without a retype of the id, so the row's id and
     label must be the plugin that installs. An entry is kept only when its id is a valid
@@ -814,10 +829,17 @@ def cli_list_offered_plugins(
             "version": entry.get("version"),
             "installed": False,
         }
+    # `installed` holds every project's installs (TASK-523): per id, keep the one that applies
+    # to `cwd` (Greptile, PR 1857), so the row shows the version installed here.
+    chosen: dict[str, tuple[int, dict[str, Any]]] = {}
     for entry in installed:
         plugin_id = _offered_id(entry.get("id") if isinstance(entry, dict) else None, suffix)
         if plugin_id is None or plugin_id in out:
             continue
+        rank = _install_rank(entry, cwd)
+        if plugin_id not in chosen or rank < chosen[plugin_id][0]:
+            chosen[plugin_id] = (rank, entry)
+    for plugin_id, (_rank, entry) in chosen.items():
         out[plugin_id] = {"description": None, "version": entry.get("version"), "installed": True}
     shown = [
         {

@@ -2778,6 +2778,56 @@ def test_cli_list_offered_plugins_empty_available_is_a_real_answer(tmp_path: Pat
     assert out == [_offered("a@probe", "1", installed=True)]
 
 
+@pytest.mark.parametrize(
+    ("entries", "version"),
+    [
+        pytest.param(
+            [("project", "other", "1"), ("project", "here", "2")],
+            "2",
+            id="this-project-over-another-project",
+        ),
+        pytest.param(
+            [("project", "other", "1"), ("user", None, "5")],
+            "5",
+            id="user-over-another-project",
+        ),
+        pytest.param(
+            [("user", None, "3"), ("project", "here", "4")],
+            "4",
+            id="this-project-over-user",
+        ),
+        pytest.param(
+            [("project", "here", "6"), ("local", "here", "7"), ("user", None, "8")],
+            "7",
+            id="local-over-project-and-user",
+        ),
+        pytest.param(
+            [("local", "other", "1"), ("project", "other", "9")],
+            "1",
+            id="only-other-projects-keeps-the-first",
+        ),
+    ],
+)
+def test_cli_list_offered_plugins_shows_the_install_that_applies_here(
+    tmp_path: Path, entries: list[tuple[str, str | None, str]], version: str
+) -> None:
+    # Greptile, PR 1857: `installed` lists every project's installs. The row for this
+    # cwd shows the install that applies here (local, then project, then user), not the
+    # first one listed.
+    here, other = tmp_path / "here", tmp_path / "other"
+    here.mkdir()
+    other.mkdir()
+    dirs = {"here": here, "other": other}
+    installed = [
+        {"id": "p@m", "version": v, "scope": scope}
+        | ({"projectPath": str(dirs[where])} if where else {})
+        for scope, where, v in entries
+    ]
+    run, _calls = _fake_run(rc=0, stdout=json.dumps({"available": [], "installed": installed}))
+    out = plugins.cli_list_offered_plugins(str(FAKE_CLAUDE), here, "m", run=run)
+    assert out == [_offered("p@m", version, installed=True)]
+
+
 def test_cli_list_offered_plugins_lone_surrogate_cannot_500(
     write_config, tmp_path, projects_root, monkeypatch
 ) -> None:
