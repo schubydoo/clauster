@@ -1547,8 +1547,8 @@ def _keep_replaced_mode(
     walk recorded as replaced (the same ``st_dev`` and ``st_ino``), so a new member keeps
     the default mode, and an executable script keeps its x bit when its text is saved
     (TASK-500), as :func:`~clauster.config_file_writer.write_file` keeps a mode on replace.
-    As for a kept file (:func:`_copy_stored_file`), setuid and setgid are cleared, and the
-    stored group is set back or the group bits are cleared.
+    As for a kept file (:func:`_copy_stored_file`), setuid and setgid are cleared (the sticky
+    bit too), and the stored group is set back or the group bits are cleared.
     """
     try:
         now = os.lstat(stored_path)
@@ -1556,7 +1556,9 @@ def _keep_replaced_mode(
         return  # nothing is stored under the key: a new member
     stored = replaced_files.get((now.st_dev, now.st_ino))
     if stored is not None:
-        mode = stat.S_IMODE(stored.st_mode) & ~_SET_ID_BITS
+        # No sticky bit either: a file gains nothing from it, and macOS refuses (EFTYPE) a
+        # chmod that sets it on a file for any user but root.
+        mode = stat.S_IMODE(stored.st_mode) & ~(_SET_ID_BITS | stat.S_ISVTX)
         os.chmod(target, _kept_mode(target, stored, mode))
 
 
@@ -1565,7 +1567,32 @@ def _fold(parts: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(unicodedata.normalize("NFC", part).casefold() for part in parts)
 
 
-def _stored_spelling(skill_dir: Path, parts: tuple[str, ...]) -> tuple[str, ...] | None:
+def _too_many_entries(name: str) -> cw.InvalidCandidateError:
+    """Return the refusal for a stored skill that holds more than :data:`MAX_STORED_ENTRIES`."""
+    return cw.InvalidCandidateError(
+        f"skill {name!r} holds more than {MAX_STORED_ENTRIES} stored files and "
+        "directories, so the save cannot keep them all. Nothing was written, and no "
+        "stored file was dropped. Remove stored files on the host, then save again"
+    )
+
+
+def _bounded_names(directory: Path, *, name: str) -> list[str]:
+    """Return the entry names of the stored ``directory``, or refuse one over the entry cap.
+
+    Listed one past :data:`MAX_STORED_ENTRIES` at most, so matching a request key costs no
+    more than the walk's cap allows: a directory that holds more is refused (→ 422), as the
+    walk would refuse the tree.
+    """
+    with os.scandir(directory) as entries:
+        names = [entry.name for entry in itertools.islice(entries, MAX_STORED_ENTRIES + 1)]
+    if len(names) > MAX_STORED_ENTRIES:
+        raise _too_many_entries(name)
+    return names
+
+
+def _stored_spelling(
+    skill_dir: Path, parts: tuple[str, ...], *, name: str
+) -> tuple[str, ...] | None:
     """Return the stored names of the entry the file system maps ``parts`` to, or None.
 
     Component by component: a name stored exactly is that entry. Otherwise the file
@@ -1577,14 +1604,16 @@ def _stored_spelling(skill_dir: Path, parts: tuple[str, ...]) -> tuple[str, ...]
     rule the fold does not model (an NTFS 8.3 short name) then never picks a name.
     Anything else is None: the save keeps and counts the stored file, and the named
     write refuses if the key then collides with that copy. A wrong None only refuses or
-    over-counts. A wrong match would delete a stored file. ``os.listdir`` follows a
-    stored symlink in a parent component, which does no harm: the walk refuses the link.
+    over-counts. A wrong match would delete a stored file. The listing follows a stored
+    symlink in a parent component, which does no harm: the walk refuses the link. Each
+    listing is bounded (:func:`_bounded_names`, skill ``name``), so a huge directory is
+    refused before it is read in full (TASK-500).
     """
     current = skill_dir
     out: list[str] = []
     for part in parts:
         try:
-            names = os.listdir(current)
+            names = _bounded_names(current, name=name)
             if part in names:
                 out.append(part)
                 current = current / part
@@ -1605,7 +1634,7 @@ def _stored_spelling(skill_dir: Path, parts: tuple[str, ...]) -> tuple[str, ...]
     return tuple(out)
 
 
-def _replaced_by(skill_dir: Path, files: dict[str, Any]) -> Callable[[Path], bool]:
+def _replaced_by(skill_dir: Path, files: dict[str, Any], *, name: str) -> Callable[[Path], bool]:
     """Return a test of whether a stored file is one of the members the request names.
 
     A key names a member by its parts, as :func:`~clauster.config_file_writer.resolve_
@@ -1620,7 +1649,7 @@ def _replaced_by(skill_dir: Path, files: dict[str, Any]) -> Callable[[Path], boo
     for parts in named:
         if Path(*parts).is_absolute() or any(p in ("", ".", "..") for p in parts):
             continue  # not a path the save can write: resolve_contained_path refuses it
-        stored = _stored_spelling(skill_dir, parts)
+        stored = _stored_spelling(skill_dir, parts, name=name)
         if stored is not None:
             spelled.add(stored)
 
@@ -1670,11 +1699,7 @@ def _keep_stored_members(
         )
         entries += len(listing)
         if entries > MAX_STORED_ENTRIES:
-            raise cw.InvalidCandidateError(
-                f"skill {name!r} holds more than {MAX_STORED_ENTRIES} stored files and "
-                "directories, so the save cannot keep them all. Nothing was written, and no "
-                "stored file was dropped. Remove stored files on the host, then save again"
-            )
+            raise _too_many_entries(name)
         for entry_name, info in listing:
             member = rel / entry_name
             reparse = getattr(info, "st_reparse_tag", 0)
@@ -2144,12 +2169,12 @@ def _mask_header_values(header: str, *, readable: bool) -> str:
     break, a fence only Claude Code reads (``readable`` false), and a header that may hold a
     masked value (:func:`_may_hold_masked`) and either composes only through Claude
     Code's re-quoting retry (the CLI may not need the retry and read it as written), holds
-    a ``?`` in a flow collection that the two YAML versions split (``[?sk-x]`` is a key to
-    PyYAML, so its text is no masked value, and an ``args`` item to the CLI,
-    :func:`~clauster.config_write._flow_question_mark`), or holds syntax YAML 1.2 refuses
-    (the CLI then reads the retry, :func:`_yaml12_may_refuse`). A save of ``SKILL.md``
-    refuses all but the retry case, so masking them whole costs a retype at most. The line
-    count never changes.
+    a ``?`` in a flow collection that the two YAML versions split (under a masked key,
+    ``[?sk-x]`` is a mapping key to PyYAML, which the masked-value walk does not mask, and
+    a value to the CLI, :func:`~clauster.config_write._flow_question_mark`), or holds
+    syntax YAML 1.2 refuses (the CLI then reads the retry, :func:`_yaml12_may_refuse`). A
+    save of ``SKILL.md`` refuses all but the retry case, so masking them whole costs a
+    retype at most. The line count never changes.
 
     Two checks on the text come first. A header longer than :data:`MAX_FILE_BYTES`, which
     no save can write, is masked whole without being scanned or parsed, so a large member
@@ -2745,7 +2770,7 @@ def write_skill(
             kept_dirs, replaced_files = _keep_stored_members(
                 skill_dir,
                 staging,
-                _replaced_by(skill_dir, files),
+                _replaced_by(skill_dir, files, name=name),
                 name=name,
                 sent=sent,
             )

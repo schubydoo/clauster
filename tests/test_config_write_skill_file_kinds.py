@@ -161,6 +161,10 @@ def test_the_walk_stops_listing_a_huge_directory_at_the_cap(tmp_path: Path, monk
         return out
 
     monkeypatch.setattr(sk, "_list_stored_dir", _recording)
+    # The key matcher refuses such a root first (the test below); step past it to the walk.
+    monkeypatch.setattr(
+        sk, "_replaced_by", lambda *_a, **_k: lambda member: member == Path(sk.SKILL_FILENAME)
+    )
     with pytest.raises(cw.InvalidCandidateError, match="holds more than 3"):
         _save(tmp_path, {sk.SKILL_FILENAME: _VALID_MD})
     assert lengths == [4]  # the listing stopped one past the cap, not at 42 entries
@@ -430,14 +434,14 @@ def test_the_subagent_surface_shares_the_refusal() -> None:
 
 
 def test_a_flow_question_mark_header_is_masked_whole(tmp_path: Path) -> None:
-    # PyYAML reads `?qv-arg-one` as a key, so the masked-value walk would not see it as an
-    # `args` value, which is what Claude Code reads.
-    stored = "---\ndescription: d\nmcpServers: {srv: {args: [?qv-arg-one]}}\n---\nRun it.\n"
+    # PyYAML reads `?qv-env-one` as a mapping key, which the masked-value walk does not
+    # mask, while Claude Code reads it as an `env` value, which the MCP tab masks.
+    stored = "---\ndescription: d\nmcpServers: {srv: {env: {K: [?qv-env-one]}}}\n---\nRun it.\n"
     path = tmp_path / "skills" / "s" / sk.SKILL_FILENAME
     path.parent.mkdir(parents=True)
     path.write_bytes(stored.encode())
     content, _hash, _exists = sk.read_skill_file(tmp_path, "s")
-    assert "qv-arg-one" not in content
+    assert "qv-env-one" not in content
     assert content == f"---\n{MASK}\n{MASK}\n---\nRun it.\n"
 
 
@@ -504,3 +508,98 @@ def test_the_skill_list_reports_a_skill_md_gone_since_its_check(
     assert (
         listed[0]["frontmatter_error"] == "SKILL.md could not be read: No such file or directory"
     )
+
+
+# --- review follow-ups ----------------------------------------------------------------
+
+
+def test_matching_a_key_never_lists_a_huge_directory_in_full(tmp_path: Path, monkeypatch) -> None:
+    # The key matcher runs before the walk; its listings stop one past the cap as well.
+    skill_dir = _store(tmp_path)
+    for index in range(40):
+        (skill_dir / f"f{index}").write_bytes(b"")
+    monkeypatch.setattr(sk, "MAX_STORED_ENTRIES", 3)
+    real_scandir = sk.os.scandir
+    seen: list[int] = []
+
+    class _Counting:
+        def __init__(self, path):
+            self._inner = real_scandir(path)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self._inner.close()
+
+        def __iter__(self):
+            for count, entry in enumerate(self._inner, start=1):
+                seen.append(count)
+                yield entry
+
+    monkeypatch.setattr(sk.os, "scandir", _Counting)
+    with pytest.raises(cw.InvalidCandidateError, match="holds more than 3"):
+        sk._replaced_by(skill_dir, {"f0": ""}, name="s")
+    assert max(seen) == 4  # one past the cap, never all 42 entries
+
+
+@_FIFO
+def test_a_fifo_swapped_in_after_the_lstat_never_blocks_the_open(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # The lstat saw a regular file; a FIFO is there by the open. O_NONBLOCK is then the only
+    # guard: the open returns at once and the fstat check refuses the entry.
+    skill_dir = _store(tmp_path)
+    fifo = skill_dir / "scripts" / "pipe"
+    os.mkfifo(fifo)
+    regular = os.lstat(skill_dir / "scripts" / "run.sh")
+    real_lstat = sk.os.lstat
+    monkeypatch.setattr(
+        sk.os,
+        "lstat",
+        lambda path, *a, **k: regular if Path(path) == fifo else real_lstat(path, *a, **k),
+    )
+    with pytest.raises(cw.InvalidCandidateError, match="'scripts/pipe' changed while it was"):
+        _returns_within(
+            5, fifo, lambda: sk.read_skill_file_for_edit(tmp_path, "s", "scripts/pipe")
+        )
+
+
+@_POSIX_MODES
+def test_a_replaced_member_clears_group_bits_it_cannot_keep_for_the_stored_group(
+    tmp_path: Path, monkeypatch
+) -> None:
+    stored_file = tmp_path / "stored"
+    stored_file.write_bytes(b"old\n")
+    target = tmp_path / "target"
+    target.write_bytes(b"new\n")
+    info = os.lstat(stored_file)
+    fields = list(info)[:10]
+    fields[0] = stat.S_IFREG | 0o1775  # with the sticky bit, which a file never keeps
+    fields[5] = info.st_gid + 1  # st_gid: a group the save cannot give the new file
+    stored = os.stat_result(fields)
+
+    def _refuse(*_a, **_k):
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(sk.os, "chown", _refuse)
+    sk._keep_replaced_mode(target, stored_file, {(info.st_dev, info.st_ino): stored})
+    assert target.stat().st_mode & 0o7777 == 0o705
+
+
+def test_the_stored_cause_is_redacted_like_the_skill_list(tmp_path: Path, monkeypatch) -> None:
+    path = tmp_path / "skills" / "s" / sk.SKILL_FILENAME
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"---\ndescription: d\napi_token: qv-t-one\n---\nRun it.\n")
+    content, file_hash, _exists, _note = sk.read_skill_file_for_edit(tmp_path, "s")
+
+    def _fails(_text):
+        raise cw.InvalidCandidateError("SKILL.md frontmatter is bad:\napi_token: qv-leak-value")
+
+    monkeypatch.setattr(sk, "_check_skill_md", _fails)
+    listed = sk.list_skills(tmp_path)[0]["frontmatter_error"]
+    with pytest.raises(cw.InvalidCandidateError) as caught:
+        sk.write_skill(tmp_path, "s", {sk.SKILL_FILENAME: content}, expected_hash=file_hash)
+    assert "the stored file itself does not pass the checks" in str(caught.value)
+    assert listed in str(caught.value)
+    assert "qv-leak-value" not in str(caught.value)
