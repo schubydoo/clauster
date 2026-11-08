@@ -68,7 +68,55 @@ panel uses, from the CLI:
 clauster doctor -c /etc/clauster/clauster.yml
 ```
 
-It prints one line per check and exits non-zero if any check **fails**.
+It prints one line per check and exits non-zero if any check **fails**. Its first
+line says whose results follow: the running server's, or the local checks of the
+CLI, with the reason.
+
+#### Show the running server's results
+
+When a Clauster server already listens on the configured `port`, a CLI run on its
+own does not see what the server sees. It runs in a different environment (for
+example without the service unit's `CLAUSTER_PYTE_PATH`), and it cannot check the
+server's unpacked program files. Give the CLI an [API token](public-api.md#named-api-tokens-clauster-api-token)
+to show the server's own results instead:
+
+```sh
+clauster api-token issue doctor -c /etc/clauster/clauster.yml   # prints the token once
+export CLAUSTER_API_TOKEN=<token>
+clauster doctor -c /etc/clauster/clauster.yml
+```
+
+With the token, the CLI reads `/api/doctor` from the server on `127.0.0.1:<port>`
+and prints those rows: the same rows, statuses and details as the dashboard panel,
+`bundle` and the server's `extra:*` rows included. The first line is
+`clauster: showing the results of the running server on port <port>`. The exit
+code follows the server's result.
+
+The CLI shows its local checks, and names the reason on its first line, in each
+of these cases:
+
+- No server listens on `127.0.0.1:<port>`.
+- A server listens, but you gave no token.
+- The server refused the token (`HTTP 401` or `HTTP 403`), or answered with
+  another status. A server with `ui.enabled: false` answers `HTTP 404`.
+- The server did not answer, sent results that the CLI cannot read, or (with
+  `tls` set) presented a different certificate than the configured one.
+
+The CLI never mixes the two sets of rows.
+
+⚠️ The token is a credential. Keep these limits in mind:
+
+- `--token <token>` also works, but other users on the host can read a
+  command-line argument in the process list. Use the `CLAUSTER_API_TOKEN`
+  variable instead.
+- The CLI sends the token only to `127.0.0.1:<port>`. With `tls` set, it sends
+  the token only after the server proves that it holds the configured
+  certificate. Without `tls`, the request is plain HTTP on loopback, so any local
+  process that holds the port receives the token.
+- With `auth.enabled: false`, the server does not check the token. The CLI still
+  asks for one, so that it never reads a server's results without being told to.
+- The CLI never reads the server's token store or any other secret. The only
+  credential it sends is the one you give it.
 
 The dashboard shows the same result as the **System readiness** pill in the header.
 The pill is always present. It counts the warnings or blocking checks when there are
@@ -92,10 +140,10 @@ Checks:
 | `bundle-env` | (Linux) whether a running bridge, background agent or the claustrum daemon still has an older standalone binary's runtime environment (`_PYI_*` variables, or a `_MEI…` directory in `LD_LIBRARY_PATH`). It reads `/proc` for processes of the same user only, and it names only the process and its pid, never a value. | **WARN** naming each such process: restart it (see [troubleshooting](troubleshooting.md#in-a-session-node-fails-with-glibc_238-not-found-or-clauster-cannot-load-libpython)). **WARN** naming each process whose environment could not be read (another user's process, a read error, or an empty environment), because an unread process is not a clean one: `N clean, M could not be read: …`, or `check not completed: …` when none could be read. A process that exited during the check is left out. **WARN** `could not check: <error type>` if the probe itself failed. Never FAIL. On macOS and Windows the row says that it was not checked. |
 | `version` | For a from-source checkout, whether `HEAD` is behind its last-fetched upstream. | **WARN** if behind; absent for PyPI/Docker installs. |
 | `node-toolchain` | On an nvm host, whether nvm's default `node` is reachable on a spawned bridge's `PATH`. | **WARN** if missing or not on the bridge `PATH` — advisory; only present on POSIX nvm hosts. |
-| `port` | (CLI only) whether the listen port is free to bind. | **WARN** if already in use. |
-| `server` | (CLI only) when the listen port is in use, the `/healthz` verdict of the server that holds it. | **FAIL** if it answers anything but `200` — for example the `503` above. **WARN** if, with `tls` set, the listener presents a different certificate than the configured one (the probe trusts only that certificate) or the certificate file is unreadable. Absent when the port is free or the listener does not answer HTTP. |
+| `port` | (CLI local checks only) whether the listen port is free to bind. | **OK** if free, or if the `server` row is OK, because the holder is then this deployment's running server. **WARN** if any other process holds it. |
+| `server` | (CLI local checks only) when the listen port is in use, the `/healthz` verdict of the server that holds it. | **FAIL** if it answers anything but `200` — for example the `503` above. **WARN** if, with `tls` set, the listener presents a different certificate than the configured one (the probe trusts only that certificate) or the certificate file is unreadable. Absent when the port is free or the listener does not answer HTTP. |
 | `systemd` | The loaded `clauster.service` uses a non-reaping `KillMode` (see below). | **WARN** if it would reap live pty bridges. |
-| `bundle` | (Dashboard panel only, standalone binary only) the running server's unpacked program files are all present. A CLI run unpacks its own fresh copy, so it reports this through the `server` check instead. | **FAIL** if any file is missing — restart Clauster. |
+| `bundle` | (Server results only, standalone binary only) the running server's unpacked program files are all present. The dashboard panel shows it, and so does the CLI when it [shows the running server's results](#show-the-running-servers-results). The local checks of the CLI report this through the `server` check instead, because a CLI run unpacks its own fresh copy. | **FAIL** if any file is missing — restart Clauster. |
 | `extra:*` | Each optional [extra](installation.md) (`pty`/`notify`) is importable in the running interpreter. | **WARN** if missing (with the install hint) — never FAIL; a missing extra only leaves its feature dormant. A Windows-only extra is skipped off-Windows. |
 
 `claude-login` deserves a callout: it is the cause of the classic "bridge runs

@@ -202,7 +202,9 @@ or an unrelated process owns the port.
 ss -tlnp | grep 7621     # who owns it?
 ```
 
-Stop the other process, or change `port` in `clauster.yml`.
+Stop the other process, or change `port` in `clauster.yml`. When this
+deployment's own healthy server holds the port, the `port` row is OK instead and
+says so, and the `server` row reports that server's `/healthz` verdict.
 
 ### "not writable" / permission denied writing state
 

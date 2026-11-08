@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 from clauster import __main__ as cli
-from clauster import auth
+from clauster import auth, ops
 from clauster.config import ClausterConfig
 
 # .cmd on Windows: the extensionless stub isn't launchable by subprocess, and
@@ -577,6 +577,52 @@ def test_doctor_failure_exit_1(write_config, tmp_path):
     assert (
         cli.main(["doctor", "-c", _cfg(write_config, tmp_path, '  min_version: "9.9.9"\n')]) == 1
     )
+
+
+def _capture_doctor(monkeypatch, ok: bool = True) -> list:
+    seen: list = []
+
+    def _fake(config_path, *, token):
+        seen.append(token)
+        return ops.DoctorReport(
+            [ops.Check("bundle", ops.OK if ok else ops.FAIL, "files present")],
+            ok,
+            "showing the results of the running server on port 1",
+        )
+
+    monkeypatch.setattr(ops, "run_cli_doctor", _fake)
+    return seen
+
+
+@pytest.mark.parametrize(
+    ("argv", "env", "expected"),
+    [
+        ([], None, None),
+        ([], "from-env", "from-env"),
+        (["--token", "from-flag"], "from-env", "from-flag"),
+        (["--token", "  padded  "], None, "padded"),
+        (["--token", "   "], None, None),
+    ],
+)
+def test_doctor_token_comes_from_the_flag_or_the_variable(monkeypatch, argv, env, expected):
+    if env is None:
+        monkeypatch.delenv("CLAUSTER_API_TOKEN", raising=False)
+    else:
+        monkeypatch.setenv("CLAUSTER_API_TOKEN", env)
+    seen = _capture_doctor(monkeypatch)
+    assert cli.main(["doctor", *argv]) == 0
+    assert seen == [expected]
+
+
+@pytest.mark.parametrize(("ok", "code"), [(True, 0), (False, 1)])
+def test_doctor_prints_whose_results_first(monkeypatch, capsys, ok, code):
+    _capture_doctor(monkeypatch, ok=ok)
+    assert cli.main(["doctor", "--token", "t0k"]) == code
+    err = capsys.readouterr().err
+    lines = err.splitlines()
+    assert lines[0] == "clauster: showing the results of the running server on port 1"
+    assert "bundle" in lines[1]
+    assert "t0k" not in err
 
 
 # ----- backup / restore / migrate --------------------------------------

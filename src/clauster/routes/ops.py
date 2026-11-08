@@ -191,6 +191,9 @@ async def api_doctor(config: ConfigDep, bundle_guard: BundleGuardDep) -> dict:
     port, so it would always false-warn "already in use", and the port isn't a
     bridge prerequisite anyway.
 
+    ``clauster doctor`` with an API token reads this route, so the CLI prints the same
+    rows as the panel (TASK-507). It authenticates like any other API client.
+
     Read-only and auth-gated by the guard middleware. Runs off the event loop:
     doctor does blocking subprocess probes (``claude --version``, ``git``). It
     re-reads the config from ``source_path`` (same as the CLI), so it also reflects
