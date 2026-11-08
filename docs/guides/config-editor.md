@@ -588,12 +588,18 @@ that file on the host.
 
 The Skills editor masks each file line by line: a `key: value` line with a
 secret-shaped key, also as a list item (`- token: ...`), a `${...}` reference,
-or a URL with a user name or password. In a flow mapping, such as
+or a URL with a user name or password. In a flow mapping or list, such as
 `env: {API_KEY: ..., MODE: fast}`, the value of each pair with a secret-shaped
-key is masked. If a line with a secret-shaped key has its value on the next
-lines (`api_key: |`, or `token:` with nothing after it), each of those lines
-shows its indent and `********`. The body of `SKILL.md` is masked too, because
-skills often hold commands.
+key is masked. If that value is itself a `{...}` or `[...]`, the rest of the
+line shows as `********`. If a line with a secret-shaped key has its value on
+the next lines (`api_key: |`, `token: &a |`, or `token:` with nothing after
+it), each of those lines shows its indent and `********`. The value ends at the
+first line that is not indented deeper, except a blank line, a comment line,
+or, after a bare `token:`, a list item (a `-` and a space) at the column of the
+key. So in the body
+of `SKILL.md`, a bullet list under a line such as `Tokens:` also shows as
+`********`. The body of `SKILL.md` is masked too, because skills often hold
+commands.
 
 In the frontmatter of `SKILL.md`, the editor also masks each value that the MCP
 and Hooks tabs mask, whatever its key name. In `mcpServers`, every `headers`,

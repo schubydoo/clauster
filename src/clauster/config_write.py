@@ -212,37 +212,45 @@ def _list_item_end(body: str) -> int:
     return i
 
 
-#: A key in a flow mapping (``{API_KEY: x}``, ``{"token": "x"}``): after the ``{`` or the
-#: ``,`` that opens the pair, an optionally quoted key and its ``:``. The value follows.
-_FLOW_KEY_RE = re.compile(r"[{,][ \t]*(?P<q>[\"']?)(?P<key>[\w.\-]+)(?P=q)[ \t]*:[ \t]*")
-#: Where a plain flow value ends: the next ``,`` or ``}``.
-_FLOW_END_RE = re.compile(r"[,}]")
+#: A key in a flow collection (``{API_KEY: x}``, ``{"token": "x"}``, ``[token: x]``): after
+#: the ``{``, ``[`` or ``,`` that opens the pair, an optionally quoted key and its ``:``. The
+#: value follows.
+_FLOW_KEY_RE = re.compile(r"[{\[,][ \t]*(?P<q>[\"']?)(?P<key>[\w.\-]+)(?P=q)[ \t]*:[ \t]*")
+#: Where a flow collection may start, or a pair continue on a line of its own.
+_FLOW_START_RE = re.compile(r"[{\[,]")
+#: Where a plain flow value ends: the next ``,``, ``}`` or ``]``.
+_FLOW_END_RE = re.compile(r"[,}\]]")
 #: A quoted flow value that is closed on its line.
 _FLOW_QUOTED_RE = re.compile(r"\"(?:[^\"\\]|\\.)*\"|'(?:[^']|'')*'")
 
 
 def _mask_flow_pairs(body: str) -> str:
-    """Return ``body`` with the value of each secret-keyed flow-mapping pair masked.
+    """Return ``body`` with the value of each secret-keyed flow-collection pair masked.
 
     A line such as ``env: {API_KEY: sk-x, MODE: fast}`` has a benign key at its start, so
-    the ``key: value`` check does not mask it. Each pair after the first ``{`` whose key
-    looks secret-shaped (:data:`_SECRET_KEY_RE`) has its value replaced with the sentinel:
-    a quoted value up to its closing quote, a plain one up to the next ``,`` or ``}``, and
-    an unclosed quote to the end of the line. Linear: the values are disjoint, and each
+    the ``key: value`` check does not mask it. Each pair after the first ``{``, ``[`` or
+    ``,`` (a pair can continue a flow mapping from the line above) whose key looks
+    secret-shaped (:data:`_SECRET_KEY_RE`) has its value replaced with the sentinel: a
+    quoted value up to its closing quote, a plain one up to the next ``,``, ``}`` or ``]``,
+    and an unclosed quote or a nested ``{``/``[`` value to the end of the line, because a
+    bracket inside it could end the value early. Linear: the values are disjoint, and each
     scan stops at the first character that ends it.
     """
-    start = body.find("{")
-    if start == -1:
+    first = _FLOW_START_RE.search(body)
+    if first is None:
         return body
     out: list[str] = []
     prev = 0
-    for match in _FLOW_KEY_RE.finditer(body, start):
+    for match in _FLOW_KEY_RE.finditer(body, first.start()):
         if match.start() < prev or not _SECRET_KEY_RE.search(match.group("key")):
             continue  # inside a value masked already, or a benign key
         begin = match.end()
-        if body[begin : begin + 1] in ("'", '"'):
+        lead = body[begin : begin + 1]
+        if lead in ("'", '"'):
             quoted = _FLOW_QUOTED_RE.match(body, begin)
             end = len(body) if quoted is None else quoted.end()
+        elif lead in ("{", "["):
+            end = len(body)  # a nested value: masked to the end of the line
         else:
             stop = _FLOW_END_RE.search(body, begin)
             end = len(body) if stop is None else stop.start()
@@ -258,10 +266,12 @@ def _mask_flow_pairs(body: str) -> str:
     return "".join(out)
 
 
-#: A secret-keyed line whose value starts on the next lines: nothing after the ``:`` but a
-#: block indicator (``|``, ``>-``) or a comment. Matched after the indent and list markers.
+#: A secret-keyed line whose value starts on the next lines: nothing after the ``:`` but
+#: node properties (an ``&anchor``, a ``!tag``), a block indicator (``|``, ``>-``) and a
+#: comment. The key may be quoted. Matched after the indent and list markers.
 _BLOCK_OPENER_RE = re.compile(
-    r"(?P<key>[\w.\-]+)[ \t]*:(?:[ \t]+(?P<block>[|>][0-9+\-]*))?[ \t]*(?:#.*)?"
+    r"(?P<q>[\"']?)(?P<key>[\w.\-]+)(?P=q)[ \t]*:(?:[ \t]+[!&][^ \t]*)*"
+    r"(?:[ \t]+(?P<block>[|>][0-9+\-]*))?[ \t]*(?:#.*)?"
 )
 
 
@@ -658,13 +668,14 @@ def redact_secret_lines(text: str) -> str:
     * A ``key: value`` / ``key = value`` line whose key looks secret-shaped (the same
       :data:`_SECRET_KEY_RE` vocabulary) has its value replaced with the sentinel, also
       as a YAML list item (``- token: x``).
-    * In a flow mapping (``env: {API_KEY: x}``), the value of each pair with a
+    * In a flow collection (``env: {API_KEY: x}``), the value of each pair with a
       secret-shaped key is masked (:func:`_mask_flow_pairs`).
-    * A secret-keyed line whose value starts on the next lines (``api_key: |``, or
-      ``token:`` with nothing after it) masks those lines: each line that is indented
-      deeper than the key (or, after a bare ``token:``, a ``-`` item at the key's column)
-      shows its indent and the sentinel. A blank line stays blank. The first line that is
-      not part of the value ends it.
+    * A secret-keyed line whose value starts on the next lines (``api_key: |``,
+      ``token: &a |``, or ``token:`` with nothing after it) masks those lines: each line
+      that is indented deeper than the key (or, after a bare ``token:``, a ``- `` item at
+      the key's column) shows its indent and the sentinel. A blank line stays blank, and
+      so does a comment line that is not indented deeper; neither ends the value. The
+      first other line ends it.
 
     Deliberately conservative in the same direction as :func:`redact_secrets`:
     over-masking a non-secret line only costs a resend; under-masking would leak.
@@ -680,12 +691,16 @@ def redact_secret_lines(text: str) -> str:
         if block is not None:
             # Split at whatever ends the line (`\r` too), so the line count never changes.
             content = line.splitlines()[0]
-            if not content.strip():
-                out.append(line)  # a blank line inside the value stays blank
-                continue
             indent = _indent(content)
             column, items = block
-            if indent > column or (indent == column and items and content[indent] == "-"):
+            if not content.strip() or (indent <= column and content[indent] == "#"):
+                # A blank line stays blank. A comment that is not indented into the value
+                # (a deeper `#` line is text of a literal value, masked below) is not part of
+                # it, but the value can go on after it, so it does not end the value.
+                out.append(line)
+                continue
+            item = content[indent] == "-" and content[indent + 1 : indent + 2] in ("", " ", "\t")
+            if indent > column or (indent == column and items and item):
                 out.append(content[:indent] + REDACTION_SENTINEL + line[len(content) :])
                 continue
             block = None

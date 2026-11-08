@@ -204,11 +204,19 @@ def test_other_fields_are_shown_as_stored(tmp_path: Path, stored: str) -> None:
     assert sk.read_skill_file(tmp_path, "s")[0] == stored
 
 
-def test_a_header_with_only_the_field_name_is_not_skipped(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "stored",
+    [
+        "---\nmcpServers:\n  a:\n    env: {A: qv-noscheme}\n---\nb\n",
+        "---\nhooks:\n  Stop:\n    - hooks:\n        - type: command\n          command: x\n"
+        "          headers: {X-A: qv-nohost}\n---\nb\n",
+    ],
+)
+def test_a_header_with_only_the_field_name_is_not_skipped(tmp_path: Path, stored: str) -> None:
     # No `url`, no scheme and no backslash: the early return must not skip the field.
-    stored = "---\nmcpServers:\n  a:\n    env: {A: qv-noscheme}\n---\nb\n"
+    assert re.search(r"url|https?:|wss?:|\\", stored, re.IGNORECASE) is None
     _place(tmp_path, stored)
-    assert "qv-noscheme" not in sk.read_skill_file(tmp_path, "s")[0]
+    assert "qv-no" not in sk.read_skill_file(tmp_path, "s")[0]
 
 
 def test_an_alias_pyramid_under_a_field_is_walked_once_per_node(tmp_path: Path) -> None:
@@ -313,6 +321,29 @@ def test_a_masked_header_line_moved_to_another_server_is_refused(tmp_path: Path)
         ("a\rtoken:\r  qv-o\rb\r", f"a\rtoken:\r  {MASK}\rb\r"),
         # The value is on the key's own line, so the next line is not part of it.
         ("token: qv-p\n  indented: y\n", f"token: {MASK}\n  indented: y\n"),
+        # A comment does not end a value; a deeper one is text of a literal value.
+        ("auth:\n# note\n  user: qv-q\n", f"auth:\n# note\n  {MASK}\n"),
+        (
+            "api_key: |\n  qv-r\n  # qv-s\nnext: ok\n",
+            f"api_key: {MASK}\n  {MASK}\n  {MASK}\nnext: ok\n",
+        ),
+        # Node properties and a quoted key before the value on the next lines.
+        ("token: &a |\n  qv-t\n", f"token: {MASK}\n  {MASK}\n"),
+        ("token: !!binary |\n  qv-u\n", f"token: {MASK}\n  {MASK}\n"),
+        ("token: !!str\n  qv-v\n", f"token: {MASK}\n  {MASK}\n"),
+        ('"token": |\n  qv-w\n', f'"token": |\n  {MASK}\n'),
+        # Only a `- ` item continues a bare key at its column: not a fence, not `-foo`.
+        ("api_key:\n---\n", "api_key:\n---\n"),
+        ("token:\n-foo: v\n", "token:\n-foo: v\n"),
+        ("api_key: |\n  qv-x\n- item\n", f"api_key: {MASK}\n  {MASK}\n- item\n"),
+        # Flow sequences, a pair continued from the line above, nested values.
+        ("env: [TOKEN: qv-y]\n", f"env: [TOKEN: {MASK}]\n"),
+        ("env: [a, TOKEN: qv-z]\n", f"env: [a, TOKEN: {MASK}]\n"),
+        ("  a: 1, TOKEN: qv-aa}\n", f"  a: 1, TOKEN: {MASK}}}\n"),
+        ("env: {TOKEN: [x, qv-ab]}\n", f"env: {{TOKEN: {MASK}\n"),
+        ("env: {TOKEN: {a: x, b: qv-ac}}\n", f"env: {{TOKEN: {MASK}\n"),
+        ("env: {token: 'x, secret: qv-ad'}\n", f"env: {{token: {MASK}}}\n"),
+        ("plain text, token: qv-ae\n", f"plain text, token: {MASK}\n"),
     ],
 )
 def test_the_line_masker_masks_list_flow_and_block_shapes(text: str, view: str) -> None:
@@ -326,7 +357,6 @@ def test_the_line_masker_masks_list_flow_and_block_shapes(text: str, view: str) 
     [
         "- name: x\n",
         "env: {MODE: fast, LEVEL: 2}\n",
-        "plain text, token: x\n",  # a comma alone does not start a flow mapping
         "description: |\n  token words\n",
         "author:\n  - a name\n",  # `author` is not an `auth` key
     ],
