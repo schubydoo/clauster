@@ -866,6 +866,27 @@ def test_dashboard_hosted_view_token_guard(write_config):
     assert re.search(r"(?<![\w.])view\.ws\s*=\s*ws", hosted_code) is None  # ws now via the proxy
 
 
+def test_dashboard_hosted_view_reconnects_after_a_recovered_session(write_config):
+    # TASK-526 (Greptile on PR 1854): a retried session replaces the HostedSession, so an
+    # open View that read the retired one, and whose `lost` frame ended it, must reconnect.
+    # Two paths, both pinned: the server's `reattached` frame, handled BEFORE the lastSeq
+    # update (it carries no event_seq), and the poll's fallback for a socket that is gone.
+    page = _client(write_config).get("/").text
+    assert re.search(
+        r'if\s*\(e\.type\s*===\s*"reattached"\)\s*\{\s*if\s*\(v\.open\)\s*this\.openHosted\(id\);'
+        r"\s*return;",
+        page,
+    )
+    assert page.index('e.type === "reattached"') < page.index("v.lastSeq = e.event_seq")
+    assert re.search(
+        r"this\.hosted\s*=\s*await\s+hRes\.json\(\);\s*this\._reopenRecoveredHosted\(\);", page
+    )
+    # Only after a poll saw the row not live since the view ended: a stale poll computed
+    # before the `lost` frame still reads "running".
+    assert re.search(r"if\s*\(!live\)\s*\{\s*v\.deadSeen\s*=\s*true;\s*continue;\s*\}", page)
+    assert re.search(r"if\s*\(v\.deadSeen\)\s*this\.openHosted\(id\);", page)
+
+
 def test_dashboard_footer_credits_vendored_assets(write_config):
     # The footer must credit the bundled MIT front-end assets (Tabler + Alpine.js)
     # and link the third-party notices. This regressed once when a card redesign

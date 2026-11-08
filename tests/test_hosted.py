@@ -5640,8 +5640,9 @@ async def test_an_open_view_of_a_lost_session_is_told_to_reconnect(fake_claustru
         await _drain_until(view, "control_request")
         await client.close()
         await mgr.fail_unreachable("claustrum daemon connection lost and the reconnect failed")
-        await _drain_until(view, "lost")
+        lost = await _drain_until(view, "lost")
         last_seen = old.event_seq
+        assert lost["event_seq"] == last_seen  # what the browser holds as lastSeq
         fake.fail_after["process.reattach"] = (0, "hang")
         async with ClaustrumClient(fake.socket_path, fake.token) as slow:
             slow._request_timeout = 0.3
@@ -5657,10 +5658,12 @@ async def test_an_open_view_of_a_lost_session_is_told_to_reconnect(fake_claustru
             assert new is not old and new.status == "running"
             # The view reconnects with ?after=<its last seq> and finds the prompt.
             reopened = new.subscribe(after_seq=last_seen)
-            requests = []
+            replayed = []
             while not reopened.empty():
-                e = reopened.get_nowait()
-                if e["type"] == "control_request":
-                    requests.append(e["request_id"])
+                replayed.append(reopened.get_nowait())
+            # Exactly from the next number: nothing skipped, and no false gap marker.
+            assert replayed[0]["event_seq"] == last_seen + 1
+            assert all(e["type"] != "gap" for e in replayed)
+            requests = [e["request_id"] for e in replayed if e["type"] == "control_request"]
             assert requests == ["perm-1"]
             await mgr.stop(pid)

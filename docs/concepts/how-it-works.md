@@ -185,10 +185,11 @@ restart, so that **Resume** never starts a second agent beside it.
 
 When the connection itself caused the failure, the next daemon connection
 reattaches the session again. If the daemon still has the process, the card
-shows `Running` again, with its open permission prompts. A View that is open on
-the card connects to the session again by itself. If not, the card shows
-`Crashed` with `the daemon no longer has this session; session lost`, or the
-`orphan` badge if the `claude` process still runs. When that next connection
+shows `Running` again, with its open permission prompts, and a View that is
+open on the card connects to the session again by itself. If the daemon no
+longer has the process, the card shows `Crashed` with
+`the daemon no longer has this session; session lost`, or the `orphan` badge if
+the `claude` process still runs. When that next connection
 comes depends on the case:
 
 - If the new connection also ended during the reattach, Clauster reconnects at

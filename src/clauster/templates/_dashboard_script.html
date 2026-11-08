@@ -5063,7 +5063,7 @@
           if (CLAUSTRUM_ENABLED) {
             const hRes = await fetch(ROOT + "/api/hosted");
             if (this._authExpired(hRes)) return;
-            if (hRes.ok) this.hosted = await hRes.json();
+            if (hRes.ok) { this.hosted = await hRes.json(); this._reopenRecoveredHosted(); }
             else { ok = false; }
           }
         } catch (e) { ok = false; }
@@ -6801,6 +6801,22 @@
           setTimeout(() => { const w2 = self.hostedView[id]; if (w2 && w2.token === token && w2.open) self.openHosted(id); }, LOG_RECONNECT_MS);
         };
         this.hostedView[id].ws = ws;
+      },
+      // The poll's fallback for the `reattached` frame (TASK-526): that frame reaches only
+      // a socket that is still open, and after "the reconnect failed" the retry can come
+      // long after a phone dropped the socket. An open view that ended reconnects once the
+      // snapshot reads its row live again. Only after a poll saw the row NOT live since
+      // the view ended: a poll computed before the `lost` frame still says "running", and
+      // reopening on it would clear the ended banner on a session that is gone.
+      _reopenRecoveredHosted() {
+        for (const id of Object.keys(this.hostedView)) {
+          const v = this.hostedView[id];
+          if (!v || !v.open || !v.ended) continue;
+          const h = this.hosted.find((x) => x.claustrum_process_id === id);
+          const live = !!h && ["running", "starting"].includes(h.status);
+          if (!live) { v.deadSeen = true; continue; }
+          if (v.deadSeen) this.openHosted(id);
+        }
       },
       closeHosted(id) {
         const v = this.hostedView[id];
