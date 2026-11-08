@@ -2828,13 +2828,23 @@ the operator's login</code> or <code>logged out (no access token in ...) — re-
 `claude`</code> — or an operation fails with
 <code>access token has expired; re-authenticate with `claude`</code> or
 <code>no claudeAiOauth.accessToken in ...</code>.</p>
+<p>A bridge that starts without a login fails at once. A standard bridge card shows
+<code>Error: You must be logged in to use Remote Control.</code> An Interactive Session card
+shows "Session failed to start" with
+<code>claude is not logged in on this host, or its first-run setup is not finished</code>.
+For an Interactive Session, <code>claude</code> does not exit. It opens its first-run screens
+and waits for a keypress. The keeper reads those screens at the start of the
+session output, records the error, and stops the bridge about 5 seconds later.
+<code>claude</code> can also show these screens when its first-run setup was never finished
+on the host. In both cases, run <code>claude</code> interactively once as the service user.</p>
 <p><strong>Most likely cause:</strong> the account that runs Clauster has no usable <code>claude</code>
-credentials. Bridges inherit the <em>operator's</em> login, so a bridge can spawn
-and then hang unauthenticated.</p>
+credentials. Bridges inherit the <em>operator's</em> login, so a bridge cannot connect
+without one.</p>
 <p><strong>The fix:</strong> run <code>claude</code> interactively <strong>as the service user</strong> and complete
 login, or use the dashboard login flow
 (<a href="../reference/config/#login_shepherd-dashboard-driven-claude-account-login-loginshepherdconfig"><code>login_shepherd</code></a>).
-An <code>ANTHROPIC_API_KEY</code> in the service environment also satisfies the check.</p>
+An <code>ANTHROPIC_API_KEY</code> in the service environment also satisfies the <code>doctor</code>
+check.</p>
 <h3 id="a-login-flow-is-already-in-progress-cancel-it-first">"a login flow is already in progress; cancel it first"<a class="headerlink" href="#a-login-flow-is-already-in-progress-cancel-it-first" title="Permanent link">&para;</a></h3>
 <p><strong>What you see:</strong> the dashboard sign-in panel refuses to start, reporting that a
 login flow is already in progress.</p>
@@ -3152,7 +3162,7 @@ present in every run:</p>
 <tr>
 <td><code>claude-login</code></td>
 <td>usable <code>claude</code> credentials</td>
-<td>not logged in — bridges will spawn then hang</td>
+<td>not logged in — bridges fail to start</td>
 </tr>
 <tr>
 <td><code>projects_root</code></td>
