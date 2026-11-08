@@ -1263,10 +1263,15 @@ def test_project_readiness_pill_shows_not_run_instead_of_hiding(write_config):
     assert "@click=\"recheckPreflight('alpha')\"" in page
     assert "x-show=\"preflightState('alpha') === 'warning'\"" in page
     assert "Checks not run" in page
-    # Both loaders record why a run failed, and each request has a deadline.
-    assert 'this.preflightError[name] = "the server answered HTTP " + res.status;' in page
-    assert '_allPreflightFailed("the request failed or timed out");' in page
-    assert "setTimeout(() => ctrl.abort(), this.preflightTimeoutMs);" in page
+    # Both loaders record why a run failed, and each of the two has a deadline.
+    assert 'this._preflightFailed(name, "the server answered HTTP " + res.status);' in page
+    assert 'this._preflightFailed(name, "the request failed or timed out");' in page
+    assert 'this._allPreflightFailed(seqs, "the request failed or timed out");' in page
+    assert page.count("setTimeout(() => ctrl.abort(), this.preflightTimeoutMs);") == 2
+    # A failed run keeps the earlier result (the MCP soft-block fails closed), and the
+    # save paths also block when the re-check after a write failed.
+    assert "delete this.preflight[name]" not in page
+    assert page.count("if (this.preflightError[c.project] || !this.preflight[c.project])") == 2
     # The old silent-on-failure paths are gone.
     assert "advisory — pill hides on failure" not in page
     assert "advisory — leave per-project pills hidden" not in page

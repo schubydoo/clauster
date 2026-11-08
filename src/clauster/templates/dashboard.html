@@ -283,6 +283,9 @@
     .btn.readiness-pill.btn-outline-warning:is(:hover, :active, :focus-visible) {
       color: var(--tblr-black);
     }
+    /* TASK-489: the same emphasis token for a project row's "Checks not run" pill.
+       .bg-yellow-lt sets the plain yellow text with !important (~2.0:1 on white). */
+    .badge.preflight-not-run.bg-yellow-lt { color: var(--tblr-warning-text-emphasis) !important; }
     .inline-flex-center { display: inline-flex; align-items: center; }
     .input-group-narrow { max-width: 320px; }
     .modal-backdrop-dim { background: rgba(0, 0, 0, .4); }

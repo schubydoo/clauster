@@ -61,10 +61,10 @@
               <!-- TASK-489: the checks for this project did not run (a failed request, an
                    HTTP error, or a result with no rows). Shown, not silent, so it never
                    reads as launch-ready; click to run the checks again. -->
-              <button type="button" class="badge bg-yellow-lt border-0" x-cloak data-test="preflight-unavailable"
+              <button type="button" class="badge bg-yellow-lt border-0 preflight-not-run" x-cloak data-test="preflight-unavailable"
                       x-show="preflightState('{{ p.name }}') === 'unavailable'"
                       @click="recheckPreflight('{{ p.name }}')"
-                      :disabled="!!preflightRechecking['{{ p.name }}']"
+                      :aria-busy="preflightRechecking['{{ p.name }}'] ? 'true' : 'false'"
                       :title="preflightUnavailableTitle('{{ p.name }}')">
                 <svg class="ico me-1" aria-hidden="true"><use href="#ic-alert"/></svg><span x-text="preflightRechecking['{{ p.name }}'] ? 'Checking…' : 'Checks not run'">Checks not run</span>
               </button>
