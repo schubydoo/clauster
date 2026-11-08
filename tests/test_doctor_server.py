@@ -424,6 +424,14 @@ def _fake_sockets(monkeypatch, conns) -> None:
         ([_listener(5000, None)], "belongs to a process that this user cannot see"),
         ([], "cannot be checked (no listening socket)"),
         ([_listener(5001, 1)], "cannot be checked (no listening socket)"),
+        (
+            [
+                SimpleNamespace(
+                    status=psutil.CONN_ESTABLISHED, laddr=SimpleNamespace(port=5000), pid=1
+                )
+            ],
+            "cannot be checked (no listening socket)",
+        ),
         (psutil.AccessDenied(), "cannot be checked (AccessDenied)"),
     ],
 )
@@ -439,14 +447,19 @@ def test_owner_check_passes_for_this_users_listener(monkeypatch):
     assert _REAL_OWNER_CHECK(5000) is None
 
 
-def test_owner_check_refuses_when_a_process_cannot_be_read(monkeypatch):
+@pytest.mark.parametrize("platform", ["linux", "win32"])
+def test_owner_check_refuses_when_a_process_cannot_be_read(monkeypatch, platform):
     _fake_sockets(monkeypatch, [_listener(5000, 1)])
 
     class _Denied(_FakeProcess):
         def uids(self):
             raise psutil.AccessDenied(self.pid)
 
+        def username(self) -> str:
+            raise psutil.AccessDenied(self.pid)
+
     monkeypatch.setattr(ops_mod.psutil, "Process", _Denied)
+    monkeypatch.setattr(ops_mod.sys, "platform", platform)
     assert "cannot be checked (AccessDenied)" in (_REAL_OWNER_CHECK(5000) or "")
 
 
@@ -462,6 +475,18 @@ def test_owner_check_reads_the_real_sockets_on_linux():
     with _Doctor() as srv:
         assert _REAL_OWNER_CHECK(srv.port) is None
     assert "no listening socket" in (_REAL_OWNER_CHECK(_free_port()) or "")
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="unprivileged socket listing is Linux-only")
+def test_the_real_owner_check_lets_this_users_listener_have_the_token(
+    write_config, tmp_path, monkeypatch
+):
+    # End to end without the autouse stand-in: the real gate passes the token on.
+    monkeypatch.setattr(ops_mod, "_listener_owner_refusal", _REAL_OWNER_CHECK)
+    with _Doctor() as srv:
+        report = run_cli_doctor(_cfg(write_config, tmp_path, srv.port), token=TOKEN)
+    assert report.source.startswith("showing the results of the running server")
+    assert srv.doctor_requests() == [f"Bearer {TOKEN}"]
 
 
 def test_another_users_listener_never_receives_the_token(write_config, tmp_path, monkeypatch):
@@ -503,8 +528,12 @@ def test_tls_skips_the_owner_check(write_config, tmp_path, monkeypatch):
         f"auth:\n  enabled: true\n  api_token_hash: {token_hash}\n"
     )
     with _Doctor().tls(cert, key) as srv:
-        report = run_cli_doctor(_cfg(write_config, tmp_path, srv.port, extra), token=TOKEN)
+        cfg = _cfg(write_config, tmp_path, srv.port, extra)
+        report = run_cli_doctor(cfg, token=TOKEN)
+        checks, _ok = run_doctor(cfg)
     assert report.source.startswith("showing the results of the running server")
+    # The pin alone also proves the port holder, whatever the owner check says.
+    assert {c.name: c.status for c in checks}["port"] == OK
 
 
 @pytest.mark.parametrize(
