@@ -578,6 +578,8 @@ async def api_stop(
 
     A hosted ERROR row's agent is ended through the daemon first; when that cannot
     happen, or the row is still reattaching, the stop is refused with 409 (TASK-539).
+    A reconnect that retired the session while the stop waited also answers 409, since
+    the row still shows; only a row that is gone answers 404.
     """
     if hosted.get_instance(instance_id) is not None:
         # A live hosted session stops cleanly; one with no live session (an orphan
@@ -591,6 +593,12 @@ async def api_stop(
         except HostedAgentMayBeRunning as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except HostedSessionError as exc:
+            if hosted.get_instance(instance_id) is not None:
+                # The row stays, but a reconnect retired its session while the stop
+                # waited on the row's lock (local review of PR 1858): not a 404.
+                raise HTTPException(
+                    status_code=409, detail=f"stop refused: {_SESSION_RETIRED_MEANWHILE}"
+                ) from exc
             # The row vanished between the existence check and the awaited call
             # (concurrent stop/reattach) — treat as gone, not a 500.
             raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -677,6 +685,19 @@ _HOSTED_RESTART_POLL_SECONDS = 0.1
 # Names the replacement Direct Session on a restart that failed after the resume retired
 # the old row, so a client can attach the error to the card that still exists.
 _REPLACEMENT_HEADER = "X-Clauster-Replacement-Id"
+# The 409 of a hosted restart whose session failed while the restart prepared to stop it,
+# and whose kill the daemon confirmed: nothing runs, so Resume continues the conversation.
+_RESTART_SESSION_ENDED = (
+    "restart refused: the session failed while the restart prepared to stop it, so it is "
+    "no longer running; use Resume to continue the conversation"
+)
+# The 409 when a reconnect retired the session while a restart or stop waited (a failed
+# rebind, or a reconnect that failed). No kill may have reached the agent, so this names no
+# agent state: the card shows it, and Resume or Kill ends a surviving agent first.
+_SESSION_RETIRED_MEANWHILE = (
+    "the session lost its daemon connection while this request waited; the card shows its "
+    "state, and its agent may still run. Use Resume, or Kill for an orphan"
+)
 
 
 def _restart_failed(stage: str, exc: HTTPException) -> HTTPException:
@@ -748,12 +769,24 @@ async def _restart_hosted(
     except HostedAgentMayBeRunning as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except HostedSessionError as exc:
+        if hosted.get_instance(instance_id) is not None:
+            # A reconnect retired the session during the awaits above (a failed rebind or
+            # reconnect), so the stop found no session, but the row is still on the card.
+            raise HTTPException(
+                status_code=409, detail=f"restart refused: {_SESSION_RETIRED_MEANWHILE}"
+            ) from exc
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     # `HostedSession.stop` can return without the agent having exited: its last wait after
     # the kill timed out (still RUNNING), or the daemon link dropped during the signal
     # (ERROR, the signal may never have arrived). Resuming then would run a second agent on
     # the same conversation. Go on only from a terminal STOPPED or CRASHED.
     if stopped.status not in (InstanceStatus.STOPPED, InstanceStatus.CRASHED):
+        session = hosted.session(instance_id)
+        if stopped.status == InstanceStatus.ERROR and session is not None and session.agent_ended:
+            # The session failed during the awaits above, and the stop's kill-first path
+            # ended its agent (the daemon confirmed the kill). Nothing runs any more, but
+            # the row stays an ERROR row, so Resume, not this restart, continues it.
+            raise HTTPException(status_code=409, detail=_RESTART_SESSION_ENDED)
         raise HTTPException(
             status_code=502,
             detail="restart: the stop did not complete; the session may still be running",

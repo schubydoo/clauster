@@ -166,7 +166,11 @@ request id is redacted when it has the shape of a UUID.
 
 A prompt is saved with each dashboard poll, when you answer it, and when Clauster
 shuts down. If Clauster is killed before the next poll, a prompt that opened
-after the last save is not saved. While the agent can still wait on a saved
+after the last save is not saved, but it still comes back: the saved replay
+position is from before the prompt, so the reattach replays the prompt from the
+daemon and opens it again. The exception is a prompt that the daemon's replay
+buffer dropped. The view then shows the `· output lost (N frames) ·` marker, and
+the prompt does not come back. While the agent can still wait on a saved
 prompt (an `Error` card whose agent may still run, or an `orphan` card), the
 prompt stays saved, and the text comes back after each restart until you Resume,
 Kill or Forget the card. If the daemon no longer has the agent, the card names

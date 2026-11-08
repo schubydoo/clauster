@@ -441,6 +441,11 @@ class HostedSession:
             return ()
         return _merged_requests(self._pending.values(), self._answering.values())
 
+    @property
+    def agent_ended(self) -> bool:
+        """Whether a confirmed kill or an exit ended the agent (it runs no more)."""
+        return self._agent_ended
+
     def end_lost(self) -> None:
         """Record that a kill of the agent was confirmed: drop the prompts it waited on."""
         self.lost_requests = ()

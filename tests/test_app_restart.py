@@ -251,6 +251,7 @@ def test_restart_hosted_row_vanishing_at_stop_is_404(write_config, projects_root
     _seed(manager)
 
     async def _gone(hosted_id: str, *, connect):
+        manager.instances.pop(hosted_id, None)  # the row itself is gone (a concurrent forget)
         raise HostedSessionError(f"no such hosted session: {hosted_id}")
 
     monkeypatch.setattr(manager, "stop", _gone)
@@ -258,6 +259,28 @@ def test_restart_hosted_row_vanishing_at_stop_is_404(write_config, projects_root
     with TestClient(app) as client:
         r = client.post(f"/api/instances/{_HID}/restart")
     assert r.status_code == 404
+    assert manager.resumed == []
+
+
+def test_restart_hosted_running_after_an_accepted_kill_is_still_502(
+    write_config, projects_root, monkeypatch
+):
+    # The stop's SIGKILL was accepted but no exit frame came: the session still reads
+    # running with its agent ended. It did not fail, so the "session failed" 409 is not
+    # the answer; the existing 502 (the stop did not complete) stays.
+    _hosted_ready(monkeypatch)
+    manager = _StubManager()
+    inst = _seed(manager)
+
+    async def _no_exit(hosted_id: str, *, connect):
+        manager.sessions[hosted_id].agent_ended = True
+        return inst  # still RUNNING
+
+    monkeypatch.setattr(manager, "stop", _no_exit)
+    app = _app(write_config, manager=manager, daemon=_StubDaemon())
+    with TestClient(app) as client:
+        r = client.post(f"/api/instances/{_HID}/restart")
+    assert r.status_code == 502, r.text
     assert manager.resumed == []
 
 

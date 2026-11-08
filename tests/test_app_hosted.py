@@ -37,6 +37,7 @@ class _StubSession:
         self.events = [{"event_seq": 1, "type": "frame", "frame": {"type": "system"}}]
         self.unsubscribed = False
         self.status = InstanceStatus.RUNNING
+        self.agent_ended = False
 
     def subscribe(self, after_seq: int = 0) -> asyncio.Queue:
         queue: asyncio.Queue = asyncio.Queue()
@@ -987,11 +988,36 @@ def test_delete_hosted_race_returns_404(write_config, projects_root):
     manager = _StubManager()
     manager.seed()
     del manager.sessions[_HID]  # no live session → kill_orphan path
-    manager.kill_orphan_error = HostedSessionError("no such hosted session: gone")
+
+    async def _vanished(hosted_id, *, connect):
+        manager.instances.pop(hosted_id, None)  # the row itself is gone meanwhile
+        raise HostedSessionError("no such hosted session: gone")
+
+    manager.kill_orphan = _vanished
     app = _app(write_config, manager=manager)
     with TestClient(app) as client:
         r = client.delete(f"/api/instances/{_HID}")
     assert r.status_code == 404
+
+
+def test_delete_hosted_whose_session_a_reconnect_retired_meanwhile_is_409(write_config):
+    # Local review of PR 1858: the stop waited on the row's lock while a failed rebind
+    # retired the session. The row still shows, so "no such hosted session" (404) was
+    # untrue; the answer names no agent state, because no kill may have reached it.
+    manager = _StubManager()
+    manager.seed()  # with a session, so the route takes the stop branch
+
+    async def _retired(hosted_id, *, connect):
+        raise HostedSessionError(f"no such hosted session: {hosted_id}")
+
+    manager.stop = _retired
+    app = _app(write_config, manager=manager)
+    with TestClient(app) as client:
+        r = client.delete(f"/api/instances/{_HID}")
+    assert r.status_code == 409, r.text
+    detail = r.json()["detail"]
+    assert detail.startswith("stop refused: the session lost its daemon connection")
+    assert "may still run" in detail
 
 
 @pytest.mark.parametrize("op", ["delete", "forget"])
@@ -1378,3 +1404,50 @@ def test_restart_of_a_live_error_row_is_409_and_kills_nothing(
         assert fake.killed == []
         row = app.state.hosted.get_instance(pid)
         assert row.status is InstanceStatus.ERROR and not row.intentional_stop
+
+
+@_POSIX_ONLY
+@pytest.mark.parametrize("how", ["failed", "retired"])
+def test_a_restart_whose_session_fails_during_the_prereqs_is_a_truthful_409(
+    write_config, projects_root, monkeypatch, tmp_path, how
+):
+    # Local review of PR 1858: the session passed the running check, then failed while the
+    # restart awaited its prerequisites. "failed": it stays registered as ERROR, and the
+    # stop's kill-first path ends its agent, so a 502 "may still be running" was untrue.
+    # "retired": a failed rebind took it out of the registry, so the stop found no session
+    # and the route answered 404 "no such hosted session" for a card that still shows.
+    # Both are a 409 that points to Resume, and nothing is resumed (fail closed).
+    _LiveFakeDaemon.instances.clear()
+    app = _live_app(write_config, monkeypatch, tmp_path)
+    real_prereqs = instances_module._hosted_prereqs
+    with TestClient(app) as client:
+        r = client.post("/api/instances", json={"project": "alpha", "channel": "hosted"})
+        assert r.status_code == 201, r.text
+        pid = r.json()["claustrum_process_id"]
+        manager = app.state.hosted
+        session = manager.session(pid)
+        session.claude_session_uuid = "0b7a3c1e-2f4d-4e6a-9b8c-1d2e3f4a5b6c"  # restartable
+
+        async def _fail_during(*args, **kwargs):
+            result = await real_prereqs(*args, **kwargs)
+            session.status = InstanceStatus.ERROR  # the pump failed meanwhile
+            if how == "retired":
+                manager._synced(manager._instances[pid])
+                manager._sessions.pop(pid)  # what _retire_lost does after a failed rebind
+            return result
+
+        monkeypatch.setattr(instances_module, "_hosted_prereqs", _fail_during)
+        fake = _LiveFakeDaemon.instances[-1].fake
+        spawned = len(fake.spawned)
+        r = client.post(f"/api/instances/{pid}/restart")
+        assert r.status_code == 409, r.text
+        detail = r.json()["detail"]
+        assert detail.startswith("restart refused:") and "Resume" in detail
+        # A retired session's agent may still run (no kill reached it): say nothing else.
+        assert ("may still run" in detail) is (how == "retired")
+        assert len(fake.spawned) == spawned  # nothing was resumed
+        assert manager.get_instance(pid) is not None  # the card stays
+        if how == "failed":
+            # The stop's kill-first path ended the agent through the daemon.
+            assert {"id": pid, "signal": "KILL"} in fake.killed
+            assert session.agent_ended
