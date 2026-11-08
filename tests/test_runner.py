@@ -2233,6 +2233,293 @@ async def test_poll_attributes_starting_bridge_session_not_external(runner_confi
     assert inst is not None and inst.status is InstanceStatus.STARTING  # still starting, kept
 
 
+def _go_ready_during_agents_json(monkeypatch, inst, *, bridge_pid: int, sessions) -> None:
+    """Publish ``bridge_pid`` + RUNNING from inside the ``agents --json`` call (TASK-520).
+
+    This is what a pty spawn does: ``_apply_pty_info`` sets the pid and readiness in one
+    step, and it can land while the lock-free tick is suspended in that call — after the
+    liveness loop skipped the row (no pid yet), before the candidate lists are built.
+    """
+
+    def list_then_go_ready(*a, **k):
+        inst.bridge_pid = bridge_pid
+        inst.status = InstanceStatus.RUNNING
+        return sessions
+
+    monkeypatch.setattr(inspector, "list_working_sessions", list_then_go_ready)
+    # The roots themselves are owned (in-process flag-form pty), and nothing else is.
+    monkeypatch.setattr(procutil, "owned_pids", lambda roots: set(roots))
+
+
+async def test_poll_attributes_pty_bridge_that_went_ready_mid_tick(runner_config, monkeypatch):
+    # TASK-520: the tick measured liveness while the pty row had no bridge pid (STARTING,
+    # pre-sidecar), then the spawn published the pid and went RUNNING during the
+    # `agents --json` await. The row was neither live nor STARTING any more, so it fell out
+    # of every candidate list and its own bridge read EXTERNAL until the next tick.
+    config = runner_config[0]
+    runner = _make_runner(runner_config)
+    inst = RemoteControlInstance(
+        project="alpha",
+        label="alpha",
+        status=InstanceStatus.STARTING,
+        resume_mode="pty",
+        keeper_pid=843860,
+    )
+    runner._instances[inst.instance_id] = inst
+    sess = WorkingSession(
+        pid=843868,
+        cwd=config.projects_root / "alpha",
+        kind="interactive",
+        started_at=843868,
+        local_uuid="u-ready",
+    )
+    _go_ready_during_agents_json(monkeypatch, inst, bridge_pid=843868, sessions=[sess])
+    await runner.poll_once()
+    assert runner.external_sessions_by_project() == {}  # never its own EXTERNAL row
+    tracked = runner.tracked_sessions_by_instance()
+    assert [s.local_uuid for s in tracked.get(inst.instance_id, [])] == ["u-ready"]
+
+
+async def test_poll_keeps_hand_run_claude_external_beside_a_mid_tick_ready_bridge(
+    runner_config, monkeypatch
+):
+    # The #820 rule must survive the TASK-520 arm: the newly-ready row is a candidate AND
+    # keyed by its pid, so a hand-run `claude` at the same cwd that it does not own stays
+    # EXTERNAL instead of being absorbed by an ungated candidate.
+    config = runner_config[0]
+    runner = _make_runner(runner_config)
+    inst = RemoteControlInstance(
+        project="alpha",
+        label="alpha",
+        status=InstanceStatus.STARTING,
+        resume_mode="pty",
+        keeper_pid=843860,
+    )
+    runner._instances[inst.instance_id] = inst
+    cwd = config.projects_root / "alpha"
+    ours = WorkingSession(
+        pid=843868, cwd=cwd, kind="interactive", started_at=1, local_uuid="u-ours"
+    )
+    by_hand = WorkingSession(
+        pid=777001, cwd=cwd, kind="interactive", started_at=2, local_uuid="u-by-hand"
+    )
+    _go_ready_during_agents_json(monkeypatch, inst, bridge_pid=843868, sessions=[ours, by_hand])
+    await runner.poll_once()
+    tracked = runner.tracked_sessions_by_instance()
+    assert [s.local_uuid for s in tracked.get(inst.instance_id, [])] == ["u-ours"]
+    external = runner.external_sessions_by_project()
+    assert [s.local_uuid for s in external.get("alpha", [])] == ["u-by-hand"]
+
+
+async def test_poll_attributes_a_resume_that_published_a_new_pid_mid_tick(
+    runner_config, monkeypatch
+):
+    # The same race with a pid the tick DID judge: a stopped pty card still carries its old,
+    # dead bridge pid, and a Resume replaces the row (same instance_id, as
+    # `spawn_detailed(resume_target=...)` does), publishes a new pid and goes RUNNING during
+    # the await. The liveness verdict was about the old pid, so it must not speak for the new.
+    config = runner_config[0]
+    runner = _make_runner(runner_config)
+    old = RemoteControlInstance(
+        project="alpha",
+        label="alpha",
+        status=InstanceStatus.STOPPED,
+        resume_mode="pty",
+        bridge_pid=111111,
+        bridge_proc_start=111.0,
+    )
+    runner._instances[old.instance_id] = old
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: False)
+    sess = WorkingSession(
+        pid=222222,
+        cwd=config.projects_root / "alpha",
+        kind="interactive",
+        started_at=222222,
+        local_uuid="u-resumed",
+    )
+
+    def list_then_resume(*a, **k):
+        runner._instances[old.instance_id] = RemoteControlInstance(
+            instance_id=old.instance_id,
+            project="alpha",
+            label="alpha",
+            status=InstanceStatus.RUNNING,
+            resume_mode="pty",
+            keeper_pid=222200,
+            bridge_pid=222222,
+        )
+        return [sess]
+
+    monkeypatch.setattr(inspector, "list_working_sessions", list_then_resume)
+    monkeypatch.setattr(procutil, "owned_pids", lambda roots: set(roots))
+    await runner.poll_once()
+    assert runner.external_sessions_by_project() == {}
+    tracked = runner.tracked_sessions_by_instance()
+    assert [s.local_uuid for s in tracked.get(old.instance_id, [])] == ["u-resumed"]
+
+
+async def test_poll_attributes_worktree_bridge_registered_ready_mid_tick(
+    runner_config, monkeypatch
+):
+    # The worktree-containment arm reads the same candidate filter (TASK-520). A standard
+    # spawn publishes its pid at Popen, so its shape of the race is a row the liveness loop
+    # never saw at all: registered, and already RUNNING, while the tick was suspended.
+    config = runner_config[0]
+    runner = _make_runner(runner_config)
+    inst = RemoteControlInstance(
+        project="alpha",
+        label="alpha",
+        status=InstanceStatus.RUNNING,
+        spawn_mode="worktree",
+        bridge_pid=843900,
+    )
+    wt = config.projects_root / "alpha" / ".claude" / "worktrees" / "bridge-cse_y"
+    wt.mkdir(parents=True, exist_ok=True)
+    sess = WorkingSession(
+        pid=843950, cwd=wt, kind="interactive", started_at=843950, local_uuid="u-wt-ready"
+    )
+
+    def list_then_register(*a, **k):
+        runner._instances[inst.instance_id] = inst
+        return [sess]
+
+    monkeypatch.setattr(inspector, "list_working_sessions", list_then_register)
+    monkeypatch.setattr(procutil, "owned_pids", lambda roots: set(roots))
+    await runner.poll_once()
+    tracked = runner.tracked_sessions_by_instance()
+    assert [s.local_uuid for s in tracked.get(inst.instance_id, [])] == ["u-wt-ready"]
+
+
+async def test_poll_leaves_a_judged_pid_to_its_verdict_when_running_again_mid_tick(
+    runner_config, monkeypatch
+):
+    # Guard on the TASK-520 arm: it admits only a pid this tick NEVER judged. Here the loop
+    # judged pid X not ours and demoted the row; a writer then put the row back to RUNNING
+    # with the same X during the await. That unproven pid must not become a candidate.
+    config = runner_config[0]
+    runner = _make_runner(runner_config)
+    inst = RemoteControlInstance(
+        project="alpha",
+        label="alpha",
+        status=InstanceStatus.RUNNING,
+        resume_mode="standard",
+        bridge_pid=555001,
+        bridge_proc_start=1.0,
+    )
+    runner._instances[inst.instance_id] = inst
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: False)
+    sess = WorkingSession(
+        pid=555001,
+        cwd=config.projects_root / "alpha",
+        kind="interactive",
+        started_at=1,
+        local_uuid="u-judged",
+    )
+
+    def list_then_reraise(*a, **k):
+        assert inst.status is not InstanceStatus.RUNNING  # the loop demoted it
+        inst.status = InstanceStatus.RUNNING
+        return [sess]
+
+    monkeypatch.setattr(inspector, "list_working_sessions", list_then_reraise)
+    monkeypatch.setattr(procutil, "owned_pids", lambda roots: set(roots))
+    await runner.poll_once()
+    assert runner.tracked_sessions_by_instance().get(inst.instance_id) is None
+    external = runner.external_sessions_by_project()
+    assert [s.local_uuid for s in external.get("alpha", [])] == ["u-judged"]
+
+
+async def test_poll_does_not_admit_an_errored_row_that_got_a_pid_mid_tick(
+    runner_config, monkeypatch
+):
+    # Guard on the TASK-520 arm: only a RUNNING row gets in. A spawn that published a pid
+    # and then failed (keeper dead, trust rejected) during the await is ERROR, not ours yet.
+    config = runner_config[0]
+    runner = _make_runner(runner_config)
+    inst = RemoteControlInstance(
+        project="alpha",
+        label="alpha",
+        status=InstanceStatus.STARTING,
+        resume_mode="pty",
+        keeper_pid=600000,
+    )
+    runner._instances[inst.instance_id] = inst
+    sess = WorkingSession(
+        pid=600001,
+        cwd=config.projects_root / "alpha",
+        kind="interactive",
+        started_at=1,
+        local_uuid="u-error",
+    )
+
+    def list_then_error(*a, **k):
+        inst.bridge_pid = 600001
+        inst.status = InstanceStatus.ERROR
+        return [sess]
+
+    monkeypatch.setattr(inspector, "list_working_sessions", list_then_error)
+    monkeypatch.setattr(procutil, "owned_pids", lambda roots: set(roots))
+    await runner.poll_once()
+    assert runner.tracked_sessions_by_instance().get(inst.instance_id) is None
+
+
+async def test_poll_prune_does_not_use_a_resumed_rows_new_pid_as_evidence(
+    runner_config, monkeypatch
+):
+    # The prune's managed-pid exclusion has the same TOCTOU shape (TASK-520 hardening). The
+    # loop judged the stale pid of a stopped card dead, then a Resume published a new pid
+    # under the same instance_id during the await. Where the #820 gate cannot walk the tree,
+    # that bridge's own worker reads EXTERNAL; its NEW pid must still count as ours, or a
+    # sibling stopped card of the same project is deleted on the strength of our own bridge.
+    config = runner_config[0]
+    runner = _make_runner(runner_config)
+    resumed = RemoteControlInstance(
+        project="alpha",
+        label="alpha-resumed",
+        status=InstanceStatus.STOPPED,
+        resume_mode="standard",
+        bridge_pid=990001,
+        bridge_proc_start=1.0,
+        bridge_start_ticks=1,
+    )
+    sibling = RemoteControlInstance(
+        project="alpha", label="sibling", status=InstanceStatus.STOPPED, resume_mode="pty"
+    )
+    runner._instances[resumed.instance_id] = resumed
+    runner._instances[sibling.instance_id] = sibling
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: False)
+    sess = WorkingSession(
+        pid=990004,  # the SDK worker of the resumed bridge 990003
+        cwd=config.projects_root / "alpha",
+        kind="interactive",
+        started_at=1,
+        local_uuid="u-worker",
+    )
+
+    def list_then_resume(*a, **k):
+        runner._instances[resumed.instance_id] = RemoteControlInstance(
+            instance_id=resumed.instance_id,
+            project="alpha",
+            label="alpha-resumed",
+            status=InstanceStatus.RUNNING,
+            resume_mode="standard",
+            bridge_pid=990003,
+            bridge_proc_start=3.0,
+            bridge_start_ticks=3,
+        )
+        return [sess]
+
+    monkeypatch.setattr(inspector, "list_working_sessions", list_then_resume)
+    # The tree cannot be walked: each root owns only itself, so the worker reads EXTERNAL.
+    monkeypatch.setattr(procutil, "owned_pids", lambda roots: set(roots))
+    monkeypatch.setattr("clauster.runner.procutil.bridge_ancestor", lambda pid, **k: 990003)
+    await runner.poll_once()
+    assert "alpha" in runner.external_sessions_by_project()  # the premise held
+    assert runner.get_instance(sibling.instance_id) is not None, (
+        "our own resumed bridge must not be evidence for pruning our own card"
+    )
+
+
 async def test_poll_attributes_starting_worktree_bridge_session_not_external(
     runner_config, monkeypatch
 ):

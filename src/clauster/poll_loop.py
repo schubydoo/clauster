@@ -237,6 +237,11 @@ class PollLoop:
         # without a second psutil pass — and without blocking the event loop, where it has
         # to resolve its managed-pid exclusion post-await.
         pid_is_ours: dict[str, bool] = {}
+        # The bridge pid each instance had when this loop judged it (TASK-520). This tick is
+        # lock-free, so a spawn can publish a NEW pid and go RUNNING while it is suspended:
+        # a pty spawn learns `bridge_pid` and readiness in one step, after this loop skipped
+        # the row for having no pid. `live_projects` cannot speak for that pid; see `may_own`.
+        checked_pids: dict[str, int] = {}
         # Whether a pre-#1399 instance gained its `bridge_start_ticks` this tick (see the
         # stamp below): the only thing in this loop that must reach the store on its own,
         # because nothing else on the poll path writes and a restart would otherwise
@@ -261,6 +266,7 @@ class PollLoop:
                     await asyncio.to_thread(launcher.poll)
             if pid is None:
                 continue
+            checked_pids[instance.instance_id] = pid
             await asyncio.to_thread(procutil.reap_if_exited, pid)
             alive = await asyncio.to_thread(
                 procutil.is_live_bridge,
@@ -362,9 +368,34 @@ class PollLoop:
             _log.warning("agents --json cross-check failed (continuing): %s", exc)
             return
         discovered = self._discovered()
+
+        # The candidate filter shared by `managed`, `worktree_roots` and `roots_by_instance`
+        # below. Its third arm is TASK-520. `live_projects` was measured BEFORE the
+        # `agents --json` await, but `status` is read after it. A pty spawn that publishes its
+        # bridge pid and goes RUNNING in between was skipped above (no pid yet) and is no
+        # longer STARTING, so without this arm it drops out of every candidate list for the
+        # whole tick and its own bridge reads EXTERNAL until the next one. The arm takes only
+        # a RUNNING row whose pid this tick never judged. Its writer checked that pid just
+        # before (a live Popen; for pty, a live keeper and its sidecar's pid pair; adopt runs
+        # `is_live_bridge`), and the pid then keys the row in `roots_by_instance`, so the
+        # #820 gate still holds. A pid this tick DID judge is left to that verdict, and a
+        # row that is not RUNNING (ERROR, STOPPED) never gets in through this arm.
+        def may_own(i: RemoteControlInstance) -> bool:
+            """Whether ``i`` is live, starting, or went RUNNING on a pid this tick never judged."""
+            return i.project in discovered and (
+                i.project in live_projects
+                or i.status is InstanceStatus.STARTING
+                or (
+                    i.status is InstanceStatus.RUNNING
+                    and i.bridge_pid is not None
+                    and checked_pids.get(i.instance_id) != i.bridge_pid
+                )
+            )
+
         # A managed bridge owns the working sessions at its cwd if its PROCESS is alive
         # (computed above), or — the one status-based exception, see the explicit arm below
-        # (#713) — if it is still STARTING. Keying on a *live* process rather than a stale
+        # (#713) — if it is still STARTING (or, TASK-520, went RUNNING after the liveness
+        # loop judged it; see `may_own`). Keying on a *live* process rather than a stale
         # RUNNING status is what keeps a genuinely dead instance from hiding a real external
         # bridge: a `_stopped_from_persisted` phantom (no live process) is correctly absent
         # here, so a real flag-form/tmux bridge at its cwd still surfaces as external. The
@@ -380,11 +411,7 @@ class PollLoop:
         # picks the one owner out of the candidates by pid ownership.
         managed: dict[Path, list[str]] = {}
         for i in self._registry._instances.values():
-            if (
-                i.project in discovered
-                and (i.project in live_projects or i.status is InstanceStatus.STARTING)
-                and self._can_own_sessions(i)
-            ):
+            if may_own(i) and self._can_own_sessions(i):
                 managed.setdefault(Path(discovered[i.project].path), []).append(i.instance_id)
         # A worktree-spawn bridge runs each session in a per-session worktree under
         # `<root>/.claude/worktrees/` (`claude remote-control --spawn worktree`), so the
@@ -397,12 +424,7 @@ class PollLoop:
         # a given worktree session belongs to (#1020 A3).
         worktree_roots: dict[Path, list[str]] = {}
         for i in self._registry._instances.values():
-            if (
-                i.project in discovered
-                and (i.project in live_projects or i.status is InstanceStatus.STARTING)
-                and i.spawn_mode == "worktree"
-                and self._can_own_sessions(i)
-            ):
+            if may_own(i) and i.spawn_mode == "worktree" and self._can_own_sessions(i):
                 worktree_roots.setdefault(Path(discovered[i.project].path), []).append(
                     i.instance_id
                 )
@@ -445,7 +467,7 @@ class PollLoop:
         # bridge's tracked sessions. A managed session's worker pid descends from its
         # bridge (or pty keeper) process, so a bridge's own live pid(s) plus their
         # descendants are the authoritative "we spawned this" set cwd containment can't
-        # give. Same live/STARTING + discovered filter as `managed`, keeping only bridges
+        # give. Same `may_own` filter as `managed`, keeping only bridges
         # with at least one resolvable pid: a bridge with no known pid yet (STARTING pty,
         # pre-sidecar) is left unkeyed → cwd-only, preserving the #713 startup-window
         # attribution. Never root ownership at a dead instance's stale pid (it could be
@@ -460,9 +482,10 @@ class PollLoop:
         # when it can.
         roots_by_instance: dict[str, tuple[int, ...]] = {}
         for i in self._registry._instances.values():
-            if i.project in discovered and (
-                i.project in live_projects or i.status is InstanceStatus.STARTING
-            ):
+            # The SAME `may_own` as `managed`, and load-bearing (TASK-520): a row that is a
+            # candidate there but unkeyed here would be the ungated candidate that absorbs
+            # a hand-run `claude` at its cwd (#820).
+            if may_own(i):
                 roots = tuple(p for p in (i.bridge_pid, i.keeper_pid) if p is not None)
                 if roots:
                     roots_by_instance[i.instance_id] = roots
@@ -556,11 +579,15 @@ class PollLoop:
         # its pair, so it stays excluded and cannot prune its own project. Default True for an
         # instance the loop above never saw — one adopted DURING the walk — which is the
         # post-await TOCTOU case; assuming ours there is the non-destructive direction.
+        # The same holds for a row whose bridge pid CHANGED since the loop judged it (a
+        # Resume that published a new pid meanwhile, TASK-520): the verdict was about the
+        # old pid, so it must not make the new one evidence against this project's cards.
         #
         managed_pids = {
             pid
             for inst in self._registry._instances.values()
             if pid_is_ours.get(inst.instance_id, True)
+            or checked_pids.get(inst.instance_id) != inst.bridge_pid
             for pid in (inst.bridge_pid, inst.keeper_pid)
             if pid is not None
         }
