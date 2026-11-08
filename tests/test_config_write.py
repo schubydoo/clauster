@@ -1778,6 +1778,13 @@ def test_redact_secret_lines_is_linear_on_every_hostile_shape():
         "alphanumeric run": "a" * 256_000,
         "internal whitespace run": "token: a" + " " * 64_000 + "b",
         "minified blob": "a." * 500_000,
+        # TASK-497: list markers, flow-mapping pairs, and a block value under a secret key.
+        "list marker run": "- " * 200_000 + "token: x",
+        "flow pair flood": "{" + ", token: a" * 50_000,
+        "unclosed flow quotes": "{" + ', token: "a' * 50_000,
+        "flow key run": "{," + "a" * 256_000,
+        "block opener spaces": "token: |" + " " * 128_000 + "x",
+        "block value lines": "token: |\n" + "  x\n" * 200_000,
     }
     for label, payload in shapes.items():
         start = time.perf_counter()
@@ -2572,3 +2579,72 @@ def test_the_check_wrapper_passes_a_refusal_through_unchanged() -> None:
     with pytest.raises(cw.InvalidCandidateError, match="^the original$"):
         with cw.refuse_check_failures("frontmatter"):
             raise cw.InvalidCandidateError("the original")
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        ('"a\\"b" , x', 6),
+        ("'it''s' , x", 7),
+        ('"open', None),
+        ("'open''", None),
+        ('"ends in \\', None),
+    ],
+)
+def test_quoted_end_reads_yaml_escapes(body: str, expected: int | None) -> None:
+    assert cw._quoted_end(body, 0) == expected
+
+
+def test_quoted_end_is_linear_on_many_escaped_quotes() -> None:
+    # The CodeQL polynomial-regex shape: an unclosed quote then many `\"` pairs.
+    body = '"' + '\\"' * 200_000
+    start = time.perf_counter()
+    assert cw._quoted_end(body, 0) is None
+    assert time.perf_counter() - start < 2.0
+
+
+def test_a_comment_inside_a_secret_block_still_masks_a_credential_url() -> None:
+    text = "token:\n# deploy https://user:password@example.com\n  value\n"
+    shown = cw.redact_secret_lines(text)
+    assert "password" not in shown
+    assert "value" not in shown
+    assert shown.count("\n") == text.count("\n")
+    restored, _lines = cw.restore_masked_lines(
+        shown, text, what="SKILL.md", view=cw.redact_secret_lines
+    )
+    assert restored == text
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        'env: {token: &a "first, secret-tail"}\n',
+        "env: {token: !!str first, secret-tail}\n",
+        "env: {token: &a [first, secret-tail]}\n",
+    ],
+)
+def test_a_flow_value_behind_an_anchor_or_tag_is_masked_to_the_end(line: str) -> None:
+    shown = cw.redact_secret_lines(line)
+    assert "secret-tail" not in shown
+    assert "first" not in shown
+    restored, _lines = cw.restore_masked_lines(
+        shown, line, what="SKILL.md", view=cw.redact_secret_lines
+    )
+    assert restored == line
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "token:\n# ${SECRET_LEAK}\n  v\n",
+        "token:\n# {api_key: sk-live-LEAK}\n  v\n",
+        "token: |\n  a\n# {token: LEAK}\n  b\n",
+    ],
+)
+def test_a_comment_inside_a_secret_block_gets_every_line_mask(text: str) -> None:
+    shown = cw.redact_secret_lines(text)
+    assert "LEAK" not in shown
+    restored, _lines = cw.restore_masked_lines(
+        shown, text, what="SKILL.md", view=cw.redact_secret_lines
+    )
+    assert restored == text

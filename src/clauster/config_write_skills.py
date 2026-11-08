@@ -73,7 +73,8 @@ elsewhere, so every read path here runs its content through
 :func:`read_skill_file` for a file body, and :func:`list_skills` for the surfaced
 ``description`` / ``frontmatter_error`` metadata. This is a deliberate, DIFFERENT
 choice than CLAUDE.md's, not an oversight. A ``url`` value in the frontmatter of any member
-is also given the URL view the MCP and Hooks tabs use (:func:`_member_view`, TASK-525).
+is also given the URL view the MCP and Hooks tabs use, and each ``mcpServers`` and hook
+value those tabs mask whole is masked (:func:`_member_view`, TASK-525, TASK-529).
 
 **Frontmatter: what the CLI reads (TASK-449.6).** The key set follows the frontmatter
 reference at https://code.claude.com/docs/en/skills#frontmatter-reference. The accepted
@@ -1754,10 +1755,80 @@ def _url_nodes(root: yaml.Node) -> list[yaml.ScalarNode]:
     return list(found.values())
 
 
-#: Text that may spell a destination URL in a header: a ``url`` key, an http(s) or ws(s)
-#: scheme (WHATWG needs no ``//`` after it), or a backslash, which can escape either one in
-#: a double-quoted scalar. A header without any of them holds no ``url`` value.
-_MAY_HOLD_URL_RE = re.compile(r"url|https?:|wss?:|\\", re.IGNORECASE)
+#: The top-level fields whose values the editor masks by their place in the field, and,
+#: for each, the keys anywhere under it whose values are masked whole. The MCP tab masks
+#: every ``env`` and ``headers`` value and a ``headersHelper`` (``_redact_entry``), and the
+#: Hooks tab every hook ``headers`` value (TASK-529). ``args`` is masked here as well.
+_MASKED_UNDER = {
+    "mcpServers": frozenset({"env", "headers", "headersHelper", "args"}),
+    "hooks": frozenset({"headers"}),
+}
+
+_MERGE_TAG = "tag:yaml.org,2002:merge"
+
+
+def _masked_value_nodes(root: yaml.Node) -> list[yaml.ScalarNode]:
+    """Return each non-empty scalar the editor masks whole by its place in the header.
+
+    These are the scalars under a :data:`_MASKED_UNDER` key (``headers``, ``env``,
+    ``args``, ``headersHelper``) anywhere in the value of a top-level ``mcpServers`` or
+    ``hooks`` field, also one that a top-level merge key brings in. The key of a mapping
+    (a header name, an ``env`` variable name) is not masked, and an empty value hides
+    nothing. Three iterative walks, each with a visited set, so an alias or a merge key
+    that reuses a node costs one visit and a cyclic node graph ends.
+    """
+    fields: list[tuple[yaml.Node, frozenset[str]]] = []
+    seen: set[int] = set()
+    stack: list[yaml.Node] = [root]
+    while stack:  # the top-level mapping, and every mapping a top-level merge key brings
+        node = stack.pop()
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        if isinstance(node, yaml.SequenceNode):
+            stack += node.value  # a merge key's list of mappings
+        elif isinstance(node, yaml.MappingNode):
+            for key, value in node.value:
+                if key.tag == _MERGE_TAG:
+                    stack.append(value)
+                elif isinstance(key, yaml.ScalarNode) and key.value in _MASKED_UNDER:
+                    fields.append((value, _MASKED_UNDER[key.value]))
+    holders: list[yaml.Node] = []
+    visited: set[tuple[int, frozenset[str]]] = set()
+    while fields:  # the values of the masked keys under each field
+        node, keys = fields.pop()
+        if (id(node), keys) in visited:
+            continue
+        visited.add((id(node), keys))
+        if isinstance(node, yaml.MappingNode):
+            for key, value in node.value:
+                fields += ((key, keys), (value, keys))
+                if isinstance(key, yaml.ScalarNode) and key.value in keys:
+                    holders.append(value)
+        elif isinstance(node, yaml.SequenceNode):
+            fields += ((item, keys) for item in node.value)
+    found: dict[int, yaml.ScalarNode] = {}
+    seen.clear()
+    while holders:  # every scalar value inside them
+        node = holders.pop()
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        if isinstance(node, yaml.ScalarNode):
+            if node.value:
+                found[id(node)] = node
+        elif isinstance(node, yaml.MappingNode):
+            holders += (value for _key, value in node.value)
+        else:  # a sequence, the only other node kind
+            holders += node.value
+    return list(found.values())
+
+
+#: Text that may spell a value the header view masks: a ``url`` key, an http(s) or ws(s)
+#: scheme (WHATWG needs no ``//`` after it), a ``mcpServers`` or ``hooks`` field
+#: (:data:`_MASKED_UNDER`), or a backslash, which can escape any of them in a
+#: double-quoted scalar. A header without any of them holds no such value.
+_MAY_HOLD_MASKED_RE = re.compile(r"url|https?:|wss?:|mcpServers|hooks|\\", re.IGNORECASE)
 
 
 def _yaml12_may_refuse(source: str, root: yaml.Node | None) -> bool:
@@ -1773,36 +1844,40 @@ def _yaml12_may_refuse(source: str, root: yaml.Node | None) -> bool:
         return True
 
 
-def _mask_header_urls(header: str, *, readable: bool) -> str:
-    """Return a frontmatter ``header`` with each ``url`` value shown as :func:`mask_url` shows it.
+def _mask_header_values(header: str, *, readable: bool) -> str:
+    """Return a frontmatter ``header`` with each ``url`` and each server or hook secret masked.
 
-    Found by its node in the composed YAML, so a ``url`` in a flow mapping, behind an
-    alias, or under a merge key is found as well as a plain ``url:`` line. Where the
-    value's source text is one line and reads as the value (a plain scalar, or a quoted one
-    with no escape), only that text is replaced by its URL view: the scheme, host, port,
-    plain path and plain query keys stay visible (TASK-525). Any other spelling (a
-    multi-line or block value, an escape, an anchor or tag before the value) has every line
-    of the value masked whole.
+    A ``url`` value is shown as :func:`mask_url` shows it. A value the MCP or Hooks tab masks
+    whole (:func:`_masked_value_nodes`: an ``mcpServers`` ``headers``, ``env``, ``args`` or
+    ``headersHelper`` value, a hook ``headers`` value) shows as the sentinel (TASK-529);
+    that wins when a value is both. Each is found by its node in the composed YAML, so a
+    value in a flow mapping, behind an alias, or under a merge key is found as well as a
+    plain ``key: value`` line. Where the value's source text is one line and reads as the
+    value (a plain scalar, or a quoted one with no escape), only that text is replaced: for
+    a ``url``, the scheme, host, port, plain path and plain query keys stay visible
+    (TASK-525), and a quote around a masked value stays. Any other spelling (a multi-line
+    or block value, an escape, an anchor or tag before the value) has every line of the
+    value masked whole.
 
     The node positions are trusted only where PyYAML reads the structure Claude Code reads.
     Every non-blank line is masked whole where it may not: a header that does not compose
     (Claude Code's YAML 1.2 can still read it, for example a tab before a comment), one
     that holds ``---`` (Claude Code ends the header there), one with a YAML 1.1-only line
     break, a fence only Claude Code reads (``readable`` false), and a header that may hold a
-    URL (:data:`_MAY_HOLD_URL_RE`) and either composes only through Claude Code's
-    re-quoting retry (the CLI may not need the retry and read it as written) or holds
+    masked value (:data:`_MAY_HOLD_MASKED_RE`) and either composes only through Claude
+    Code's re-quoting retry (the CLI may not need the retry and read it as written) or holds
     syntax YAML 1.2 refuses (the CLI then reads the retry, :func:`_yaml12_may_refuse`). A
     save of ``SKILL.md`` refuses all but the retry case, so masking them whole costs a
     retype at most. The line count never changes.
 
-    Two checks on the text come first. A header with no text a ``url`` key can be spelled
-    with (:data:`_MAY_HOLD_URL_RE`: ``url`` in any case, or a backslash escape) holds no
-    ``url`` value and is returned as it is. A header longer than :data:`MAX_FILE_BYTES`,
-    which no save can write, is masked whole without being parsed, so a large member on
-    disk costs one pass to show.
+    Two checks on the text come first. A header with no text that a ``url``, an
+    ``mcpServers`` or a ``hooks`` key can be spelled with (:data:`_MAY_HOLD_MASKED_RE`: one
+    of them in any case, or a backslash escape) holds no such value and is returned as it
+    is. A header longer than :data:`MAX_FILE_BYTES`, which no save can write, is masked
+    whole without being parsed, so a large member on disk costs one pass to show.
     """
     lines = header.splitlines(keepends=True)
-    if _MAY_HOLD_URL_RE.search(header) is None:
+    if _MAY_HOLD_MASKED_RE.search(header) is None:
         return header
     if len(header.encode("utf-8")) > MAX_FILE_BYTES:
         return "".join(_masked_whole(line) for line in lines)
@@ -1828,8 +1903,13 @@ def _mask_header_urls(header: str, *, readable: bool) -> str:
         return "".join(_masked_whole(line) for line in lines)
     spans: dict[int, list[tuple[int, int, str]]] = {}
     whole: set[int] = set()
+    masked = _masked_value_nodes(root)
+    taken = {id(node) for node in masked}
+    views = [(node, cw.REDACTION_SENTINEL) for node in masked]
     for node in _url_nodes(root):
-        shown = mask_url(node.value)
+        if id(node) not in taken:
+            views.append((node, mask_url(node.value)))
+    for node, shown in views:
         if shown == node.value:
             continue
         begin, end = node.start_mark.index, node.end_mark.index
@@ -1883,8 +1963,9 @@ def _member_view(text: str) -> str:
     """Return the editor's read view of one skill member holding ``text``.
 
     Every member is masked line by line (:func:`~clauster.config_write.redact_secret_lines`),
-    and each ``url`` value in a leading frontmatter block is masked first
-    (:func:`_mask_header_urls`), as the MCP and Hooks tabs mask a URL (TASK-525). Decided
+    and each ``url`` value and each server or hook secret in a leading frontmatter block is
+    masked first (:func:`_mask_header_values`), as the MCP and Hooks tabs mask them
+    (TASK-525, TASK-529). Decided
     from the text alone, never from the member's name or file identity: a request can reach
     a ``SKILL.md`` as ``./SKILL.md``, through a link to any skill's ``SKILL.md`` or through a
     hard link, and a save breaks a hard link while it keeps the text. A member without a
@@ -1902,7 +1983,7 @@ def _member_view(text: str) -> str:
         # the header the CLI reads is masked whole.
         cli = _CLI_FENCE_RE.match(core)
         header, start = (cli.group(1), cli.start(1)) if cli else ("", 0)
-    masked = _mask_header_urls(header, readable=match is not None)
+    masked = _mask_header_values(header, readable=match is not None)
     text = bom + core[:start] + masked + core[start + len(header) :]
     return cw.redact_secret_lines(text)
 

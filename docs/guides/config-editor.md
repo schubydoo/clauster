@@ -560,10 +560,16 @@ the frontmatter are not masked either. Do not put a secret in the body or in a
 comment. If the frontmatter is not valid YAML, the editor cannot read its
 fields. It then masks the frontmatter line by line, as the Skills editor does,
 and that misses a secret under a key that does not look secret. A masked value
-in such a file cannot be kept, so type the real values when you repair it. The
-file keeps its line endings. If the file holds masked values and its frontmatter is
-valid YAML only after Claude Code adds quotes to some values, the editor shows
-those values with the quotes, and a save writes them with the quotes.
+in such a file cannot be kept, so type the real values when you repair it. If
+the file holds masked values and its frontmatter is valid YAML only after Claude
+Code adds quotes to some values, the editor shows those values with the quotes,
+and a save writes them with the quotes.
+
+Clauster writes the text of a save as it receives it. Before the Subagents
+editor in the dashboard sends a save, it changes each CRLF line ending to LF and
+removes a byte order mark at the start of the file. After a save from the
+dashboard, a file that had CRLF line endings or a byte order mark therefore has
+LF line endings and no byte order mark.
 
 If you leave a mask in place, the save keeps the stored value. The save is
 refused, and nothing is written, in these cases:
@@ -583,10 +589,34 @@ editor cannot mask it in place. It then shows a note and not the file. Edit
 that file on the host.
 
 The Skills editor masks each file line by line: a `key: value` line with a
-secret-shaped key, a `${...}` reference, or a URL with a user name or password.
-The body of `SKILL.md` is masked too, because skills often hold commands.
+secret-shaped key, also as a list item (`- token: ...`), a `${...}` reference,
+or a URL with a user name or password. In a flow mapping or list, such as
+`env: {API_KEY: ..., MODE: fast}`, the value of each pair with a secret-shaped
+key is masked. If that value is itself a `{...}` or `[...]`, the rest of the
+line shows as `********`. If a line with a secret-shaped key has its value on
+the next lines (`api_key: |`, `token: &a |`, or `token:` with nothing after
+it), each of those lines shows its indent and `********`. The value ends at the
+first line that is not indented deeper. A blank line and a comment line that is
+not indented deeper stay visible and do not end the value. After a bare
+`token:`, a list item at the column of the key (a `-` followed by a space, a
+tab, or the end of the line) is part of the value too. In the body of
+`SKILL.md`, a bullet list under a line such as `Tokens:` therefore also shows
+as `********`. The body of `SKILL.md` is masked too, because skills often hold
+commands.
 
-In the frontmatter of `SKILL.md`, the editor also masks every `url` value, for
+In the frontmatter of `SKILL.md`, the Skills editor also masks each value that
+the MCP and Hooks tabs mask, whatever its key name, and every `args` value. In
+`mcpServers`, every `headers`, `env` and `args` value and a `headersHelper`
+command show as `********`. For example, `headers: {X-Custom: abc}` shows as
+`headers: {X-Custom: ********}`. The MCP tab shows an `args` item unless it
+holds a `${...}` reference or is a URL with a user name or password, but the
+Skills editor masks every `args` value. In `hooks`, every `headers` value shows as
+`********`.
+The key names stay visible, and so does an empty value. If such a value covers
+more than one line, holds an escape, or has an anchor or a tag in front of it,
+each line of the value shows as one `********`.
+
+The editor also masks every `url` value in the frontmatter, for
 example the `url` of a server in `mcpServers` or of an `http` hook in `hooks`.
 It masks the value as the [Hooks tab](#the-hooks-tab) masks a URL. Each query
 value, the fragment, and each token-like path segment show as `********`. The
@@ -612,7 +642,8 @@ letters, or only digits. Do not put a secret in them.
 
 If Clauster cannot read a frontmatter block the way Claude Code reads it, every
 line of the block shows as `********`. This applies only to a block that holds
-the text `url` (in any case), `http:`, `https:`, `ws:`, `wss:` or a backslash.
+the text `url`, `mcpServers` or `hooks` (in any case), `http:`, `https:`,
+`ws:`, `wss:` or a backslash.
 A block without any of them gets only the line masks. These are the cases:
 
 - The block is not valid YAML to Clauster.
