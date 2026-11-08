@@ -22,9 +22,10 @@ running ones (:func:`stop_background_job`). Conventions applied on the way in:
   are this job's own resume/cloud handles, not foreign secrets.
 * **PID-reuse defense** — a roster worker counts as alive only when the pid's
   start time matches the roster's ``procStart`` (boot-relative jiffies, compared
-  exactly where ``/proc`` is readable; ``ps -o lstart=`` text to the second on macOS),
-  the same posture as :class:`~clauster.models.BridgePointer` liveness. Fail-closed: an unparsable
-  ``procStart`` reads as not-alive rather than trusting a bare pid.
+  exactly where ``/proc`` is readable; ``ps -o lstart=`` text to the second on
+  macOS), the same posture as :class:`~clauster.models.BridgePointer` liveness.
+  Fail-closed: an unparsable ``procStart`` reads as not-alive rather than
+  trusting a bare pid.
 """
 
 from __future__ import annotations

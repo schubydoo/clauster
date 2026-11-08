@@ -6,6 +6,7 @@ import logging
 import os
 import signal
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -371,6 +372,20 @@ def test_lstart_to_epoch_reads_the_cli_format():
     assert procutil.lstart_to_epoch(_LSTART) == _LSTART_EPOCH
     assert procutil.lstart_to_epoch(f"  {_LSTART}\n") == _LSTART_EPOCH  # untrimmed ps output
     assert procutil.lstart_to_epoch("Tue Nov 10 01:02:03 2026") == 1_794_272_523  # 2-digit day
+
+
+@pytest.mark.skipif(not hasattr(time, "tzset"), reason="time.tzset is POSIX-only")
+def test_lstart_to_epoch_ignores_the_host_time_zone(monkeypatch):
+    # The text is UTC (the CLI sets TZ=UTC), so the host zone must not shift the parse. CI
+    # hosts run in UTC, where a naive local-time parse would also pass.
+    monkeypatch.setenv("TZ", "America/New_York")
+    time.tzset()
+    try:
+        assert time.localtime(_LSTART_EPOCH).tm_hour != 19  # the zone really is not UTC
+        assert procutil.lstart_to_epoch(_LSTART) == _LSTART_EPOCH
+    finally:
+        monkeypatch.undo()
+        time.tzset()
 
 
 @pytest.mark.parametrize(
