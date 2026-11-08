@@ -162,6 +162,38 @@ _REDACT_LINE_INPUTS = [
     "token: a\r\nplain\r\n${X}\rmid\x0bvtab: b\n",
     "data=" + "a" * 64 + "://b@c",
     "*" * 8,
+    # PR 1852: a list item, flow pairs (quoted, plain, nested, unclosed), a block value.
+    "- password: hunter2\n",
+    "  - - api_key: 'x'  \n",
+    "env: {API_KEY: x, MODE: fast}\n",
+    'h: {"Authorization": "Bearer x, y", n: 1}\n',
+    "e: {token: 'it''s, x: y}\n",
+    "env: {TOKEN: [x, y]}\vnext\v",
+    "api_key: |\n  x\n\n  # y\nnext: ok\n",
+    "token:\n- x\n-foo: v\n---\n",
+    "token: &a !!str\n  x\n",
+    "auth:\n# note\n  user: x\n",
+    # TASK-536: a secret value that goes on past its line.
+    "env: {token:\n  x}\n",
+    'env: {token: "x\n  y"}\nnext: ok\n',
+    "env: {token: &a\n  x}\n",
+    "env: {token: x\n  y}\n",
+    "- env: {token:\n  x}\n- b\n",
+    'token: "x\n  y"\n',
+    'token: &a "x\n  y"\n',
+    "token: {a: x,\n  b: y}\n",
+    "token: x\n  indented: y\n",
+    'token: "x\n  y"\n  z\n',
+    "- token: 'x\n  it''s\n  y'\n  name: z\n",
+    "token: x\n  y\n  # c\n  - d\n",
+    # A secret flow pair after a closed or plain secret value on the same line goes on.
+    'm: {\n  token: "a", password: "b\n    LEAK"}\n',
+    "m: {\n  token: 'a', password: 'b\n    k: LEAK'}\n",
+    'm: {\n  token: a, password: "b\n    k: LEAK"}\n',
+    'm: {\n  token: &a, password: "b\n    k: LEAK"}\n',
+    '  token: "a", mode: "b\n    , c: d"}\n',
+    # A `- ` marker and then a `:` with no key: not a mapping key, so the plain value goes on.
+    'token: a\n  - : "\n',
 ]
 
 

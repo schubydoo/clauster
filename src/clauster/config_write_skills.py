@@ -110,6 +110,7 @@ makes to a kept member in the instant between the copy and the swap is lost.
 
 from __future__ import annotations
 
+import base64
 import bisect
 import itertools
 import math
@@ -1758,24 +1759,24 @@ def _url_nodes(root: yaml.Node) -> list[yaml.ScalarNode]:
 #: The top-level fields whose values the editor masks by their place in the field, and,
 #: for each, the keys anywhere under it whose values are masked whole. The MCP tab masks
 #: every ``env`` and ``headers`` value and a ``headersHelper`` (``_redact_entry``), and the
-#: Hooks tab every hook ``headers`` value (TASK-529). ``args`` is masked here as well.
+#: Hooks tab every hook ``headers`` value (TASK-529). ``args`` is not here: an ``args`` item
+#: is masked only when its loaded value is secret-shaped, as the MCP tab shows it
+#: (:func:`_secret_shaped_nodes`, TASK-535).
 _MASKED_UNDER = {
-    "mcpServers": frozenset({"env", "headers", "headersHelper", "args"}),
+    "mcpServers": frozenset({"env", "headers", "headersHelper"}),
     "hooks": frozenset({"headers"}),
 }
 
 _MERGE_TAG = "tag:yaml.org,2002:merge"
+_BINARY_TAG = "tag:yaml.org,2002:binary"
 
 
-def _masked_value_nodes(root: yaml.Node) -> list[yaml.ScalarNode]:
-    """Return each non-empty scalar the editor masks whole by its place in the header.
+def _field_values(root: yaml.Node) -> list[tuple[yaml.Node, frozenset[str]]]:
+    """Return the value of each top-level :data:`_MASKED_UNDER` field, with its masked keys.
 
-    These are the scalars under a :data:`_MASKED_UNDER` key (``headers``, ``env``,
-    ``args``, ``headersHelper``) anywhere in the value of a top-level ``mcpServers`` or
-    ``hooks`` field, also one that a top-level merge key brings in. The key of a mapping
-    (a header name, an ``env`` variable name) is not masked, and an empty value hides
-    nothing. Three iterative walks, each with a visited set, so an alias or a merge key
-    that reuses a node costs one visit and a cyclic node graph ends.
+    A field of the top-level mapping, or of a mapping that a top-level merge key brings in.
+    Iterative, with a visited set, so a merge key that names one mapping twice costs one
+    visit and a cyclic node graph ends.
     """
     fields: list[tuple[yaml.Node, frozenset[str]]] = []
     seen: set[int] = set()
@@ -1793,6 +1794,21 @@ def _masked_value_nodes(root: yaml.Node) -> list[yaml.ScalarNode]:
                     stack.append(value)
                 elif isinstance(key, yaml.ScalarNode) and key.value in _MASKED_UNDER:
                     fields.append((value, _MASKED_UNDER[key.value]))
+    return fields
+
+
+def _masked_value_nodes(root: yaml.Node) -> list[yaml.ScalarNode]:
+    """Return each non-empty scalar the editor masks whole by its place in the header.
+
+    These are the scalars under a :data:`_MASKED_UNDER` key (``headers``, ``env``,
+    ``headersHelper``) anywhere in the value of a top-level ``mcpServers`` or ``hooks``
+    field (:func:`_field_values`), also one that a top-level merge key brings in. The key
+    of a mapping (a header name, an ``env`` variable name) is not masked, and an empty
+    value hides nothing. Three iterative walks, each with a visited set, so an alias or a
+    merge key that reuses a node costs one visit and a cyclic node graph ends.
+    """
+    fields = _field_values(root)
+    seen: set[int] = set()
     holders: list[yaml.Node] = []
     visited: set[tuple[int, frozenset[str]]] = set()
     while fields:  # the values of the masked keys under each field
@@ -1824,11 +1840,137 @@ def _masked_value_nodes(root: yaml.Node) -> list[yaml.ScalarNode]:
     return list(found.values())
 
 
+def _loaded_text(node: yaml.ScalarNode) -> str | None:
+    """Return the text ``node`` loads as, for its shape check; None if it does not load.
+
+    A ``!!binary`` value loads as the bytes its base64 text decodes to, as PyYAML decodes
+    it (:func:`base64.decodebytes`), read as UTF-8 as the browser would show them. Any other
+    scalar is read as its text.
+    """
+    if node.tag != _BINARY_TAG:
+        return node.value
+    try:
+        return base64.decodebytes(node.value.encode("ascii")).decode("utf-8", "replace")
+    except ValueError:  # a non-ASCII character, or a broken base64 text
+        return None
+
+
+def _secret_shaped_nodes(root: yaml.Node, source: str) -> list[tuple[yaml.ScalarNode, bool]]:
+    r"""Return each scalar of the header ``source`` that is masked by its loaded value.
+
+    The MCP and Hooks tabs mask a value through :func:`~clauster.config_write.redact_secrets`,
+    which reads the loaded value: a ``${...}`` reference, a URL with a user name or a
+    password, and any value under a key that looks secret (``clientSecret``) at any depth.
+    The line masker reads the source text, so it misses such a value written with an escape
+    (``"https://u:pw\u0040h"``) or as ``!!binary``, and a value under a key that looks
+    secret only once its escape is read (TASK-535). Returned:
+
+    * a value whose loaded text the line masker masks (:func:`_shaped`: a ``${...}``
+      reference, a URL with a user name or a password, a ``key=value`` or ``key: value``
+      with a secret key, and the other line shapes), where its source holds a backslash or
+      it is ``!!binary``, anywhere in the header. The loaded text is read as lines of its
+      own, so such a value can be masked where the same text written plainly in its place
+      shows (``args: ["--api\x2dkey=x"]``). Any other value reads in its source as it
+      loads, so the line masker masks it there, as before, except a ``${...}`` that is
+      split across source lines (best effort, documented);
+    * a value under a key that looks secret, under an ``mcpServers`` or ``hooks`` field
+      (:func:`_field_values`), as on the tab, and elsewhere under such a key whose source
+      holds a backslash. Elsewhere the line masker reads any other key;
+    * a ``!!binary`` ``url`` value: the ``url`` view (:func:`mask_url`) cannot read its
+      base64 text;
+    * a ``!!binary`` value that does not load (fail closed).
+
+    Each pair is a node and whether it shows as the mask (``True``: a key above it, a
+    ``!!binary`` ``url``, or a loaded value on more than one line) or is masked in place by
+    its shape (``False``). Any other
+    ``url`` value is left to the ``url`` view, as on the MCP tab. One iterative walk with a
+    visited set of (node, under a secret key, under ``url``, in a field), so each node
+    costs eight visits at most and a cyclic node graph ends.
+    """
+    stack = [(value, False, False, True) for value, _keys in _field_values(root)]
+    stack.append((root, False, False, False))
+    seen: set[tuple[int, bool, bool, bool]] = set()
+    found: dict[int, tuple[yaml.ScalarNode, bool]] = {}
+    while stack:
+        node, secret, under_url, keyed = stack.pop()
+        if (id(node), secret, under_url, keyed) in seen:
+            continue
+        seen.add((id(node), secret, under_url, keyed))
+        if isinstance(node, yaml.ScalarNode):
+            whole = node.value != "" and (secret or (under_url and node.tag == _BINARY_TAG))
+            text = _loaded_text(node)
+            hidden = node.tag == _BINARY_TAG or "\\" in _source_of(node, source)
+            shaped = hidden and not under_url and text is not None and _shaped(text)
+            if whole or text is None or shaped:
+                # Belt and braces: a loaded value on more than one line never reaches the
+                # in-place view anyway (its source is not one line that reads as the value).
+                whole = whole or text is None or "\n" in text or "\r" in text
+                by_key = whole or (id(node) in found and found[id(node)][1])
+                found[id(node)] = (node, by_key)
+        elif isinstance(node, yaml.MappingNode):
+            for key, value in node.value:
+                name = key.value if isinstance(key, yaml.ScalarNode) else ""
+                hint = cw._SECRET_KEY_RE.search(name) is not None and (
+                    keyed or "\\" in _source_of(key, source)
+                )
+                stack.append((value, secret or hint, name == "url", keyed))
+        else:  # a sequence, the only other node kind
+            stack += ((item, secret, False, keyed) for item in node.value)
+    return list(found.values())
+
+
+def _shaped(text: str) -> bool:
+    """Whether the line masker masks ``text``, read as lines or as one whole text.
+
+    :func:`~clauster.config_write.redact_secret_lines` reads each line alone, so a loaded
+    ``${...}`` that spans a line break is found only by its scan of the whole text (the
+    ``${...}`` and URL scans, as :func:`~clauster.config_write.redact_secrets` reads a
+    value). Both run, each in one pass.
+    """
+    if cw.redact_secret_lines(text) != text:
+        return True
+    sentinel = cw.REDACTION_SENTINEL
+    return cw._mask_url_creds(cw._mask_interps(text, sentinel), f"{sentinel}@") != text
+
+
+def _source_of(node: yaml.Node, source: str) -> str:
+    """Return the text of ``source`` that ``node`` was composed from."""
+    return source[node.start_mark.index : node.end_mark.index]
+
+
+def _shape_view(value: str) -> str:
+    """Return ``value`` masked in place as the line masker masks it, or the mask if it does not.
+
+    A ``${...}`` reference shows as the mask, a URL keeps its host
+    (``[REDACTED]@h.example.com``) and a ``--api-key=x`` keeps its key, as when the value is
+    written without an escape. The in-place view is used only for a value on one line, so
+    the line count stays.
+    """
+    shown = cw.redact_secret_lines(value)
+    return shown if shown != value else cw.REDACTION_SENTINEL
+
+
 #: Text that may spell a value the header view masks: a ``url`` key, an http(s) or ws(s)
 #: scheme (WHATWG needs no ``//`` after it), a ``mcpServers`` or ``hooks`` field
-#: (:data:`_MASKED_UNDER`), or a backslash, which can escape any of them in a
-#: double-quoted scalar. A header without any of them holds no such value.
-_MAY_HOLD_MASKED_RE = re.compile(r"url|https?:|wss?:|mcpServers|hooks|\\", re.IGNORECASE)
+#: (:data:`_MASKED_UNDER`), a backslash, which can escape any of them in a double-quoted
+#: scalar, and a ``binary`` tag, whose base64 text can hold a secret-shaped value
+#: (:func:`_secret_shaped_nodes`). Fixed words only, so a search costs one pass.
+_MAY_HOLD_MASKED_RE = re.compile(r"url|https?:|wss?:|mcpServers|hooks|binary|\\", re.IGNORECASE)
+
+
+def _may_hold_masked(text: str) -> bool:
+    r"""Whether ``text`` may spell a value the header view masks.
+
+    Each word of :data:`_MAY_HOLD_MASKED_RE`, and a tag with a ``%`` escape, which can spell
+    ``binary`` (``!!%62inary``): one word with a ``%`` after its first ``!``. A header with
+    none of them holds no such value: any secret-shaped value in it reads in its source as
+    it loads, so the line masker masks it. Linear: one regex search of fixed words, then
+    one split and one forward look at each word (a regex such as ``![^\s]*%`` scans the
+    rest of a run of ``!`` again from each ``!``).
+    """
+    if _MAY_HOLD_MASKED_RE.search(text) is not None:
+        return True
+    return any("%" in word[word.index("!") :] for word in text.split() if "!" in word)
 
 
 def _yaml12_may_refuse(source: str, root: yaml.Node | None) -> bool:
@@ -1848,9 +1990,14 @@ def _mask_header_values(header: str, *, readable: bool) -> str:
     """Return a frontmatter ``header`` with each ``url`` and each server or hook secret masked.
 
     A ``url`` value is shown as :func:`mask_url` shows it. A value the MCP or Hooks tab masks
-    whole (:func:`_masked_value_nodes`: an ``mcpServers`` ``headers``, ``env``, ``args`` or
+    whole (:func:`_masked_value_nodes`: an ``mcpServers`` ``headers``, ``env`` or
     ``headersHelper`` value, a hook ``headers`` value) shows as the sentinel (TASK-529);
-    that wins when a value is both. Each is found by its node in the composed YAML, so a
+    that wins when a value is both. A value that is masked by its loaded value
+    (:func:`_secret_shaped_nodes`: a value written with an escape or as ``!!binary``
+    anywhere whose loaded text the line masker masks, a value under a secret key in those
+    fields, a ``!!binary`` ``url``) is masked as well: as the sentinel under a key that looks
+    secret and for such a ``url``, else in place as the line masker masks it
+    (:func:`_shape_view`, TASK-535). Each is found by its node in the composed YAML, so a
     value in a flow mapping, behind an alias, or under a merge key is found as well as a
     plain ``key: value`` line. Where the value's source text is one line and reads as the
     value (a plain scalar, or a quoted one with no escape), only that text is replaced: for
@@ -1864,23 +2011,24 @@ def _mask_header_values(header: str, *, readable: bool) -> str:
     (Claude Code's YAML 1.2 can still read it, for example a tab before a comment), one
     that holds ``---`` (Claude Code ends the header there), one with a YAML 1.1-only line
     break, a fence only Claude Code reads (``readable`` false), and a header that may hold a
-    masked value (:data:`_MAY_HOLD_MASKED_RE`) and either composes only through Claude
+    masked value (:func:`_may_hold_masked`) and either composes only through Claude
     Code's re-quoting retry (the CLI may not need the retry and read it as written) or holds
     syntax YAML 1.2 refuses (the CLI then reads the retry, :func:`_yaml12_may_refuse`). A
     save of ``SKILL.md`` refuses all but the retry case, so masking them whole costs a
     retype at most. The line count never changes.
 
-    Two checks on the text come first. A header with no text that a ``url``, an
-    ``mcpServers`` or a ``hooks`` key can be spelled with (:data:`_MAY_HOLD_MASKED_RE`: one
-    of them in any case, or a backslash escape) holds no such value and is returned as it
-    is. A header longer than :data:`MAX_FILE_BYTES`, which no save can write, is masked
-    whole without being parsed, so a large member on disk costs one pass to show.
+    Two checks on the text come first. A header longer than :data:`MAX_FILE_BYTES`, which
+    no save can write, is masked whole without being scanned or parsed, so a large member
+    on disk costs one pass to show. A header with no text that a masked value can be
+    spelled with (:func:`_may_hold_masked`: a ``url``, an ``mcpServers`` or a ``hooks`` key
+    in any case, a scheme, a backslash escape or a binary tag) holds no such value and is
+    returned as it is.
     """
     lines = header.splitlines(keepends=True)
-    if _MAY_HOLD_MASKED_RE.search(header) is None:
-        return header
     if len(header.encode("utf-8")) > MAX_FILE_BYTES:
         return "".join(_masked_whole(line) for line in lines)
+    if not _may_hold_masked(header):
+        return header
     try:
         source = cw.cli_frontmatter_text(header)
         root = yaml.compose(source, Loader=yaml.SafeLoader)
@@ -1906,6 +2054,10 @@ def _mask_header_values(header: str, *, readable: bool) -> str:
     masked = _masked_value_nodes(root)
     taken = {id(node) for node in masked}
     views = [(node, cw.REDACTION_SENTINEL) for node in masked]
+    for node, by_key in _secret_shaped_nodes(root, source):
+        if id(node) not in taken:
+            taken.add(id(node))
+            views.append((node, cw.REDACTION_SENTINEL if by_key else _shape_view(node.value)))
     for node in _url_nodes(root):
         if id(node) not in taken:
             views.append((node, mask_url(node.value)))

@@ -604,14 +604,58 @@ tab, or the end of the line) is part of the value too. In the body of
 as `********`. The body of `SKILL.md` is masked too, because skills often hold
 commands.
 
+A secret value can also go on past the end of its line. The editor then masks
+the next lines too. Each of those lines shows only its indent and `********`.
+A blank line stays blank. A comment line that is not indented deeper stays
+visible and does not end the value. These values go on past their line:
+
+- In a flow mapping or list: a value that is empty at the end of the line
+  (`env: {token:`), a quoted value with no closing quote on the line, a value
+  behind an anchor or a tag, a `{...}` or `[...]` value, or a plain value with
+  no `,`, `}` or `]` after it. The value goes on in the lines that are indented
+  deeper than its line.
+- After a secret-shaped key: a quoted value with no closing quote on the line,
+  or a `{...}` or `[...]` value, also behind an anchor or a tag. The value goes
+  on in the lines that are indented deeper than its line. In a list item such as
+  `- token: "abc`, its line starts at the `-`. The same applies to any value
+  after a secret-shaped key when a flow value of the first kind comes after it on
+  the line, as in `token: "a", password: "b`.
+- After a secret-shaped key: a plain value, as in `token: abc`. The value goes
+  on in the lines that are indented deeper than the key. A line that starts with
+  a key, a `:` and then a space or the end of the line (also in a list item, as
+  in `- key:`), or with a `#`, is not part of the value, so the value ends there.
+
+A value of the first two kinds ends at the first line that is not indented
+deeper, also after
+the line that closes a quote, because the rest of that line can hold another
+secret value. The lines after the value that are indented deeper therefore also
+show as `********`. A line of the value that is not indented deeper is not
+detected and shows in clear.
+
 In the frontmatter of `SKILL.md`, the Skills editor also masks each value that
-the MCP and Hooks tabs mask, whatever its key name, and every `args` value. In
-`mcpServers`, every `headers`, `env` and `args` value and a `headersHelper`
-command show as `********`. For example, `headers: {X-Custom: abc}` shows as
-`headers: {X-Custom: ********}`. The MCP tab shows an `args` item unless it
-holds a `${...}` reference or is a URL with a user name or password, but the
-Skills editor masks every `args` value. In `hooks`, every `headers` value shows as
-`********`.
+the MCP and Hooks tabs mask, whatever its key name. In `mcpServers`, every
+`headers` and `env` value and a `headersHelper` command show as `********`. For
+example, `headers: {X-Custom: abc}` shows as `headers: {X-Custom: ********}`.
+An `args` item is not masked by its place in the file. It shows in clear unless
+the line masking above masks it, for example a `${...}` reference, a URL with a
+user name or password, or a list item such as `- --token=abc`. In a flow list,
+`[--token=abc]` shows in clear, as it does on the MCP tab. In `hooks`, every
+`headers` value shows as `********`.
+The editor also reads each frontmatter value as YAML loads it, as the MCP and
+Hooks tabs do. A value that is written with an escape (such as `\x40` for `@`
+or `\x2d` for `-`, also an escaped line break) or as `!!binary` is masked when
+its loaded text, read on its own, holds what the line masking above masks: a
+`${...}` reference, a URL with a user name or password, or a line such as
+`--api-key=abc`. Such a value can therefore be masked where the same text,
+written without the escape, shows in clear, such as `[--token=abc]` above.
+A `url` value written as `!!binary` shows
+as `********`. In `mcpServers` and `hooks`, a
+value under a key that looks secret shows as `********`, also when the key looks
+secret only after its escapes are read (such as `"client\x53ecret"`). Elsewhere
+such an escaped key masks its value too. A `${...}` reference that is split
+across lines without an escape is not detected and shows in clear. Outside
+`mcpServers` and `hooks`, the same is true for the value of a key written as
+`? token`, or with an anchor, a tag or an alias in front of it.
 The key names stay visible, and so does an empty value. If such a value covers
 more than one line, holds an escape, or has an anchor or a tag in front of it,
 each line of the value shows as one `********`.
