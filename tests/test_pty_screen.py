@@ -46,7 +46,7 @@ def test_find_session_id_recovers_cursor_fragmented_url():
     # the cursor move reconstructs the logical line. This mirrors the captured failure: write
     # "...cod" + a wrong char, reposition the cursor back over it, then overwrite with "e/...".
     scr = PtyScreen(cols=120, rows=4)
-    scr.feed(b"https://claude.ai/codX\x1b[22Ge/session_01TESTpty665ABC")
+    scr.feed(b"https://claude.ai/codX\x1b[22Ge/session_01TESTpty665ABC\r\n")
     # The raw bytes the keeper's _RE_CONNECT_URL would scan: the escape splits "code/session_"
     # AND ANSI-stripping leaves "codXe/session_" — both miss. pyte renders the line whole.
     assert scr.find_session_id() == "session_01TESTpty665ABC"
@@ -56,9 +56,41 @@ def test_find_session_id_reads_unredacted_screen():
     # find_session_id is server-side only — it must return the REAL id so the keeper can build
     # the connect URL, even though frame() (what reaches the browser) redacts that same id.
     scr = PtyScreen(cols=80, rows=2)
-    scr.feed(b"  https://claude.ai/code/session_01ABCDEFGHIJKLMNOP")
+    scr.feed(b"  https://claude.ai/code/session_01ABCDEFGHIJKLMNOP\r\n")
     assert scr.find_session_id() == "session_01ABCDEFGHIJKLMNOP"
     assert "session_01ABCDEFGHIJKLMNOP" not in "".join(scr.frame()["rows"])  # frame stays redacted
+
+
+def test_find_session_id_waits_while_the_cursor_is_just_after_the_id():
+    # TASK-469: a read can end inside the id. The rest of the row is blank cells, so the part
+    # drawn so far looks finished; the cursor on the next cell says it may not be.
+    scr = PtyScreen(cols=120, rows=4)
+    scr.feed(b"Continue at https://claude.ai/code/session_01PART")
+    assert scr.find_session_id() is None
+    scr.feed(b"IALLYDRAWN")
+    assert scr.find_session_id() is None  # the whole id, but the cursor has not moved on yet
+    scr.feed(b"\r\n")
+    assert scr.find_session_id() == "session_01PARTIALLYDRAWN"
+
+
+def test_find_session_id_waits_with_a_wide_character_earlier_on_the_row():
+    # A wide character takes two cells but one `display` character, so a cursor check made on
+    # the `display` index would miss the cursor by one. The check reads the cells.
+    scr = PtyScreen(cols=120, rows=4)
+    scr.feed("❯ 日本 https://claude.ai/code/session_01WIDE".encode())
+    assert scr.find_session_id() is None
+    scr.feed(b"PREFIX\x1b[K\r\n")
+    assert scr.find_session_id() == "session_01WIDEPREFIX"
+
+
+def test_find_session_id_skips_an_id_that_ends_at_the_right_edge():
+    # An id that fills the row to the edge can wrap onto the next row, so it may be cut short.
+    url = b"https://claude.ai/code/session_01EDGE"
+    scr = PtyScreen(cols=len(url) + 2, rows=4)
+    scr.feed(b"  " + url + b"\r\n")
+    assert scr.find_session_id() is None
+    scr.feed(b"  https://claude.ai/code/session_01FIT\r\n")  # a later one that stops short
+    assert scr.find_session_id() == "session_01FIT"
 
 
 def test_find_session_id_none_when_absent():

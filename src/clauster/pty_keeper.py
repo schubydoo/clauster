@@ -53,7 +53,13 @@ from .pty_screen import SCREEN_COLS, SCREEN_ROWS, PtyScreen, PyteUnavailableErro
 
 # The flag form prints its connect URL as a session path, NOT the subcommand's
 # `?environment=env_<ULID>` query form (verified, claude 2.1.159).
-_RE_CONNECT_URL = re.compile(rb"https?://claude\.ai/code/(session_[A-Za-z0-9]+)")
+#
+# The lookahead demands a byte AFTER the id (TASK-469). The scrape runs on the bytes read so
+# far, and a read can end inside the id: without it, a URL split across two reads matched
+# its first half, and the keeper published a truncated id that broke the deep link and
+# taught the exact-value redactor a wrong value. With it, an id at the end of the buffer
+# matches nothing until the next read shows where it stops.
+_RE_CONNECT_URL = re.compile(rb"https?://claude\.ai/code/(session_[A-Za-z0-9]+)(?=[^A-Za-z0-9])")
 
 # How long to wait for the bridge to print its connect URL before giving up on
 # discovery (the bridge stays running regardless; this only bounds URL capture).
@@ -87,6 +93,53 @@ _SEQUENCE_FAULT_NOTE = (
     "Connect link unavailable — part of this session's output was skipped by the terminal "
     "emulator."
 )
+
+#: The sidecar ``error`` when the bridge stopped at claude's first-run login screen (TASK-533).
+#: A standard bridge that is not logged in exits at once with "You must be logged in to use
+#: Remote Control", and its card reads "Failed to start". The flag form does not exit: it
+#: opens the first-run screens (a theme picker, then "Select login method:") and waits for a
+#: keypress nobody sends. Before this, the URL timeout promoted that bridge to ``ready`` with
+#: no link, and the card read "Running · Preparing connect link…" for as long as it ran
+#: (invariant 1). Fixed text, like the notes above: it is rendered on the card as written.
+_LOGIN_SCREEN_ERROR = (
+    "claude is not logged in on this host: the session stopped at claude's first-run login "
+    "screen. Run `claude` once on this host as the user Clauster runs as, log in, then start "
+    "the session again."
+)
+
+#: How much of the bridge's first output is searched for the login screen. claude draws it
+#: first, in under 3 KiB (2.1.319 at 80x24 and at the 120x40 TUI size). The bound keeps a
+#: logged-in `--continue` resume, which re-draws the old conversation, from matching on a
+#: conversation that quotes these screens.
+_LOGIN_SCREEN_WINDOW = 8192
+
+#: Text that only the first-run screens print, as phrases that must ALL appear for one screen
+#: to count (verified against claude 2.1.319 with a throwaway HOME and no login). Each screen
+#: is matched by two lines, not one, so a single quoted line in early output is not enough.
+_LOGIN_SCREEN_PHRASES: tuple[tuple[bytes, ...], ...] = (
+    # The theme picker, which claude shows first when it is not logged in.
+    (b"Let's get started.", b"Choose the text style that looks best with your terminal"),
+    # The login method menu, which follows the theme picker.
+    (b"Select login method:", b"Claude account with subscription"),
+)
+
+# Terminal control sequences, replaced by one space each before the phrase search. claude
+# positions each word with a cursor move (`Let's\x1b[8Gget\x1b[12Gstarted.`), so the raw
+# bytes never hold the phrase. CSI, then OSC (BEL- or ST-terminated), then any other escape,
+# then a lone C0 control.
+_RE_TERMINAL_CONTROL = re.compile(
+    rb"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?|\x1b[ -/]*[0-~]|[\x00-\x1f\x7f]"
+)
+_RE_SPACE_RUN = re.compile(rb"\s+")
+
+#: Seconds a bridge stopped at the login screen gets to exit after SIGTERM before SIGKILL.
+_LOGIN_STOP_GRACE = 5.0
+
+
+def _shows_login_screen(head: bytes | bytearray) -> bool:
+    """Return True when ``head`` (the bridge's first output) draws claude's first-run screens."""
+    text = _RE_SPACE_RUN.sub(b" ", _RE_TERMINAL_CONTROL.sub(b" ", head))
+    return any(all(p in text for p in phrases) for phrases in _LOGIN_SCREEN_PHRASES)
 
 
 def _worktree_from_argv(bridge_argv: list[str]) -> str | None:
@@ -286,6 +339,10 @@ class _KeeperDrain:
         # deadline treats this like the two latches above. One-way, like `_screen_feed_failed`:
         # the dropped bytes do not come back.
         self._screen_sequence_fault = False
+        # Set by :meth:`feed` when the bridge's first output is claude's first-run login screen
+        # (TASK-533). The backend reads it to stop the bridge, which cannot get past a screen
+        # that waits for a keypress. One-way: the sidecar already says `error`.
+        self.login_required = False
         self._deadline = time.monotonic() + _URL_TIMEOUT
 
     def _scan_session_id(self) -> str | None:
@@ -397,9 +454,15 @@ class _KeeperDrain:
                     flush=True,
                 )
         if not self._url_found:
+            # Measured before the extend: the window search runs on every chunk that adds bytes
+            # inside the window, and on no chunk after.
+            in_window = len(self._buf) < _LOGIN_SCREEN_WINDOW
             self._buf.extend(chunk)
             session_id = self._scan_session_id()
-            if session_id is not None:
+            if session_id is None:
+                if in_window and _shows_login_screen(self._buf[:_LOGIN_SCREEN_WINDOW]):
+                    self._fail_at_login_screen()
+            else:
                 # This process renders the screen frames, so it stores the id it learned:
                 # from the next frame on, the keeper's own sidecar masks it exactly (#1621).
                 redact.remember_known_values("pty-keeper", session_id)
@@ -411,6 +474,33 @@ class _KeeperDrain:
                 _write_sidecar(self._sidecar, self._base)
                 self._url_found = True
                 self._buf = bytearray()  # keep draining, stop accumulating
+
+    def _fail_at_login_screen(self) -> None:
+        """Publish the login-screen failure (TASK-533) and ask the backend to stop the bridge.
+
+        Fail closed, the way a standard bridge does when it is not logged in: the sidecar goes
+        to ``error`` with the reason, so the runner shows an ERROR row that names the login
+        problem instead of promoting the bridge to RUNNING at the URL timeout. The runner
+        reads ``state == "error"`` as ERROR whether the keeper is still up or already gone
+        (``SpawnCoordinator._apply_pty_info``).
+
+        The bridge is stopped, not left at the screen. It cannot get past it: the screen waits
+        for a keypress, and nothing sends one. Left running, it would hold its keeper on an
+        ERROR row that Forget refuses (the keeper is live) and that Resume would launch a
+        second keeper beside.
+
+        Ends URL capture as the URL timeout does, so :meth:`tick` neither promotes the row
+        nor writes a screen-fault note over this error.
+        """
+        self.login_required = True
+        self._url_found = True
+        self._buf = bytearray()
+        self._base.update(state="error", error=_LOGIN_SCREEN_ERROR)
+        _write_sidecar(self._sidecar, self._base)
+        _report_keeper_fault(
+            "the bridge stopped at claude's first-run login screen (claude is not logged in); "
+            "stopping it"
+        )
 
     def tick(self) -> None:
         """Between reads: throttle the live-screen frame and handle the URL timeout."""
@@ -506,6 +596,24 @@ def _report_keeper_fault(message: str) -> None:
     reaches here, so nothing unredacted rides out (invariant 4).
     """
     print(f"clauster.pty_keeper: {message}", file=sys.stderr, flush=True)
+
+
+def _stop_login_bridge(proc: subprocess.Popen, sent_at: float | None) -> float:
+    """Stop a POSIX bridge held at the login screen: SIGTERM once, SIGKILL after a grace.
+
+    Returns when SIGTERM was sent, which the drain loop passes back on its next turn. The
+    loop keeps draining and leaves when the bridge exits, so :meth:`_KeeperDrain.finish`
+    still publishes the terminal sidecar, with the login error on it.
+    """
+    now = time.monotonic()
+    if sent_at is None:
+        with contextlib.suppress(OSError):
+            proc.terminate()
+        return now
+    if now - sent_at >= _LOGIN_STOP_GRACE:
+        with contextlib.suppress(OSError):
+            proc.kill()
+    return sent_at
 
 
 def _conpty_alive(proc: Any) -> tuple[bool, str | None]:
@@ -624,6 +732,7 @@ def _run_keeper_conpty(
     # is DESCRIBED; the `finally` decides that it gets written at all, including for faults
     # nothing here anticipates.
     loop_error: str | None = None
+    login_stopped = False
     rc = 73  # "no bridge exit status available"; replaced on every path that reaps one
     try:
         while True:
@@ -652,6 +761,12 @@ def _run_keeper_conpty(
                 break
             if data:
                 drain.feed(data.encode("utf-8", "replace"))
+                if drain.login_required and not login_stopped:
+                    # The bridge is at claude's login screen (TASK-533): stop it, and keep
+                    # draining until the ConPTY reports it gone, as for any other exit.
+                    login_stopped = True
+                    with contextlib.suppress(Exception):
+                        proc.terminate()
             else:
                 alive, loop_error = _conpty_alive(proc)
                 if not alive:
@@ -854,6 +969,7 @@ def run_keeper(
     # Inert off the binary, which unpacks nothing.
     bundle_guard = frozen_bundle.BundleGuard(frozen_bundle.unpack_dir())
     next_stamp = time.monotonic() + frozen_bundle.REFRESH_INTERVAL_SECONDS
+    login_stop_at: float | None = None
     while proc.poll() is None:
         try:
             if poller.poll(500):  # ms; truthy when the master fd has data (no FD_SETSIZE limit)
@@ -863,6 +979,8 @@ def run_keeper(
         except (OSError, BlockingIOError):
             time.sleep(0.2)
         drain.tick()
+        if drain.login_required:
+            login_stop_at = _stop_login_bridge(proc, login_stop_at)
         if bundle_guard.root is not None and time.monotonic() >= next_stamp:
             bundle_guard.refresh()
             next_stamp = time.monotonic() + frozen_bundle.REFRESH_INTERVAL_SECONDS

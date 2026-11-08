@@ -412,9 +412,17 @@ the operator's login`` or ``logged out (no access token in ...) — re-run
 ``access token has expired; re-authenticate with `claude` `` or
 `no claudeAiOauth.accessToken in ...`.
 
+A bridge that starts without a login fails at once. A standard bridge card shows
+`Error: You must be logged in to use Remote Control.` An Interactive Session card
+shows "Session failed to start" with
+``claude is not logged in on this host: the session stopped at claude's first-run
+login screen.`` For an Interactive Session, `claude` does not exit. It opens its
+first-run screens and waits for a keypress. The keeper reads those screens in the
+first output of the session, stops the bridge, and records the error.
+
 **Most likely cause:** the account that runs Clauster has no usable `claude`
-credentials. Bridges inherit the *operator's* login, so a bridge can spawn
-and then hang unauthenticated.
+credentials. Bridges inherit the *operator's* login, so a bridge cannot connect
+without one.
 
 **The fix:** run `claude` interactively **as the service user** and complete
 login, or use the dashboard login flow
@@ -799,7 +807,7 @@ present in every run:
 | --- | --- | --- |
 | `config` | `clauster.yml` found and valid | `no config found: ...` / `config unreadable: ...` / `config is not valid YAML ...` / `invalid config: ...` (the "no config found" section above breaks these down) |
 | `claude` | binary found, version ≥ `min_version` | not on PATH, too old, or a version that cannot be compared — see above |
-| `claude-login` | usable `claude` credentials | not logged in — bridges will spawn then hang |
+| `claude-login` | usable `claude` credentials | not logged in — bridges fail to start |
 | `projects_root` | the directory exists | wrong path in config |
 | `git` | `git` on PATH | create/clone features unavailable |
 | `state_dir` | writable | permissions — see above |

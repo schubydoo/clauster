@@ -806,10 +806,40 @@ class PtyScreen:
         up; :meth:`frame` stays redacted. Scanning the rendered ``display`` (not a redacted
         copy) is what makes the match possible — a redacted frame's mask token carries no
         ``session_`` prefix, so it could never yield the real id anyway.
+
+        A match can be an id that is still being drawn (TASK-469). The keeper scans after
+        every read, and a read can end inside the id, but on the screen the rest of the row is
+        blank cells, so the id looks finished. Two cases are skipped as unfinished: the cursor
+        sits on the cell just after the id, where the next character would go, or the id ends
+        at the right edge, where it can wrap onto the next row. A skipped id is found again
+        once the cursor moves on. Both checks read the cells, not the ``display`` string,
+        whose index is not a column once a wide or combining character comes first on the row.
+        The URL is ASCII, one cell per character, so its cells spell it exactly.
         """
         with self._lock:
-            match = _RE_CONNECT_URL.search("\n".join(self._screen.display))
-        return match.group(1) if match else None
+            screen = self._screen
+            for y, row in enumerate(screen.display):
+                for match in _RE_CONNECT_URL.finditer(row):
+                    if not self._url_may_be_unfinished(y, match.group(0)):
+                        return match.group(1)
+        return None
+
+    def _url_may_be_unfinished(self, y: int, url: str) -> bool:
+        """Return True when ``url`` on row ``y`` ends at the cursor or at the right edge.
+
+        The caller holds ``self._lock``. Either place is where a part-drawn URL stops: the
+        cursor is where its next character would go, and a URL at the edge can wrap.
+        """
+        screen = self._screen
+        line = screen.buffer[y]
+        width = len(url)
+
+        def ends_at(x: int) -> bool:
+            """Return True when the cells just left of column ``x`` spell ``url``."""
+            return x >= width and "".join(line[i].data for i in range(x - width, x)) == url
+
+        cursor = screen.cursor
+        return ends_at(screen.columns) or (cursor.y == y and ends_at(cursor.x))
 
     def find_authorize_url(self) -> str | None:
         r"""Scan the reassembled screen for the best OAuth authorize URL, or None.

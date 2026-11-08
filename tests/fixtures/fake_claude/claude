@@ -8,6 +8,8 @@ Behaviour is selected via env vars so tests can drive each branch:
                   bridge doesn't re-log it) -> exercises pointer session backfill
   - stderr_error: writes a failure reason to STDERR (not --debug-file) and exits 1
                   -> exercises clauster's stderr capture into error_detail
+  - pty_not_logged_in: the flag form draws claude's first-run login screen and waits
+                  (TASK-533) -> exercises the keeper's not-logged-in ERROR
   FAKE_CLAUDE_SLOW = seconds to delay before writing markers (mode=slow)
   FAKE_CLAUDE_AGENTS = JSON string returned by `agents --json`        (default [])
   FAKE_CLAUDE_AGENTS_FILE = path re-read on EVERY `agents --json` call (wins over
@@ -68,6 +70,17 @@ def run_flag_bridge(args):
         return 1
     if mode == "pty_no_url":
         # Alive but never prints a connect URL -> exercises the STARTING/ERROR path.
+        return _idle_until_signal()
+    if mode == "pty_not_logged_in":
+        # Not logged in: the real flag form (2.1.319) draws its first-run theme picker,
+        # one cursor move per word, and waits for a keypress (TASK-533). These are its bytes.
+        sys.stdout.buffer.write(
+            b"\x1b[2GWelcome\x1b[10Gto\x1b[13GClaude\x1b[20GCode\r\r\n\r\r\n"
+            b"\x1b[2GLet's\x1b[8Gget\x1b[12Gstarted.\r\r\n\r\r\n"
+            b"\x1b[2G\x1b[1mChoose\x1b[9Gthe\x1b[13Gtext\x1b[18Gstyle\x1b[24Gthat"
+            b"\x1b[29Glooks\x1b[35Gbest\x1b[40Gwith\x1b[45Gyour\x1b[50Gterminal\r\r\n"
+        )
+        sys.stdout.flush()
         return _idle_until_signal()
     if mode == "pty_slow":
         # Print the URL only after a delay so the bridge is STARTING past the

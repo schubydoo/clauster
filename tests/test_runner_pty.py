@@ -1354,6 +1354,30 @@ async def test_spawn_pty_no_url_does_not_falsely_run(runner_config, monkeypatch)
 
 
 @_POSIX_ONLY
+async def test_spawn_pty_not_logged_in_is_an_error_naming_the_login(runner_config, monkeypatch):
+    """TASK-533: a flag-form bridge at claude's first-run login screen is an ERROR row.
+
+    It used to go STARTING then RUNNING at the keeper's URL timeout, and the card read
+    "Running · Preparing connect link…" while claude waited at a screen nobody can answer.
+    """
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "pty_not_logged_in")
+    runner, _ = _pty_runner(runner_config)
+    inst = await runner.spawn("alpha")
+    try:
+        assert inst.status is InstanceStatus.ERROR
+        assert inst.url is None
+        assert "not logged in" in (inst.error_detail or "")
+        # The keeper stops the bridge rather than leave it at the screen.
+        for _ in range(100):
+            if procutil.proc_create_time(inst.bridge_pid) is None:
+                break
+            await asyncio.sleep(0.05)
+        assert procutil.proc_create_time(inst.bridge_pid) is None
+    finally:
+        await runner.stop(inst.instance_id)
+
+
+@_POSIX_ONLY
 async def test_spawn_pty_promoted_by_startup_watch(runner_config, monkeypatch) -> None:
     """A pty bridge slow to print its URL is promoted to RUNNING by the startup-watch."""
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "pty_slow")
