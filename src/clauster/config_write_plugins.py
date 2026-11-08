@@ -1062,11 +1062,25 @@ def _read_marketplace_plugin_names(location: Any) -> list[str] | None:
     ]
 
 
-#: The ``marketplace list --json`` source types that have no checkout of their own: the CLI
-#: reads the local directory or file in place (claude 2.1.319: ``installLocation`` is that
-#: source, and ``marketplace update`` only validates it). A read before an update of one
-#: already sees what the update reads, so it is no before-state (TASK-532).
-LIVE_MARKETPLACE_SOURCES = frozenset({"directory", "file"})
+#: The ``marketplace list --json`` source types whose ``marketplace update`` rewrites a copy
+#: of their own (a git checkout, or the downloaded file of a ``url`` source), so a read
+#: before the update is a real before-state. Every other type is not compared (TASK-532):
+#: claude 2.1.319 reads a ``directory`` or ``file`` source in place and its update only
+#: validates it, so the read before already sees what the update reads. A type that a
+#: newer CLI adds is not compared either, until it is known to keep a copy.
+CHECKOUT_MARKETPLACE_SOURCES = frozenset({"github", "git", "url"})
+
+
+def _marketplace_list_location(entry: dict[str, Any]) -> Any:
+    """Return where to read a listed marketplace's plugin list from.
+
+    A ``file`` source is the file in ``path``: claude 2.1.319 lists its ``installLocation``
+    as two directories above that file, which holds the file only when it is named
+    ``.claude-plugin/marketplace.json``. Every other source reads ``installLocation``.
+    """
+    if entry.get("source") == "file" and isinstance(entry.get("path"), str):
+        return entry["path"]
+    return entry.get("installLocation")
 
 
 def marketplace_plugin_names(
@@ -1076,8 +1090,9 @@ def marketplace_plugin_names(
 
     Reads ``marketplace list --json`` for each ``installLocation``, then that checkout's
     ``marketplace.json`` (:func:`_read_marketplace_plugin_names`). The second value names
-    the marketplaces whose source the CLI reads in place
-    (:data:`LIVE_MARKETPLACE_SOURCES`). A failed list raises :class:`PluginCliError`, as
+    the marketplaces whose source is not a known copy
+    (:data:`CHECKOUT_MARKETPLACE_SOURCES`): a read of one before an update is no
+    before-state. A failed list raises :class:`PluginCliError`, as
     :func:`cli_list_marketplaces` does.
     """
     out: dict[str, list[str] | None] = {}
@@ -1087,8 +1102,11 @@ def marketplace_plugin_names(
             continue
         if name is not None and entry["name"] != name:
             continue
-        out[entry["name"]] = _read_marketplace_plugin_names(entry.get("installLocation"))
-        if entry.get("source") in LIVE_MARKETPLACE_SOURCES:
+        out[entry["name"]] = _read_marketplace_plugin_names(_marketplace_list_location(entry))
+        source = entry.get("source")
+        # A non-string source (a nested object, as settings files store it) is not a known
+        # copy either, and must not reach the set lookup: a dict is unhashable.
+        if not isinstance(source, str) or source not in CHECKOUT_MARKETPLACE_SOURCES:
             live.add(entry["name"])
     return out, frozenset(live)
 
@@ -1124,8 +1142,8 @@ def describe_marketplace_update(
     One sentence group per marketplace: the plugin list did not change (with its count),
     or it now offers N plugins with the names added and removed. A side that could not be
     read (``None``, or ``after`` as a whole when the read after the refresh failed) says so
-    instead of claiming a result. A marketplace in ``live`` (its source is read in place,
-    :data:`LIVE_MARKETPLACE_SOURCES`) has no before-state, so it gets only its current
+    instead of claiming a result. A marketplace in ``live`` (its source is not a known copy,
+    :data:`CHECKOUT_MARKETPLACE_SOURCES`) has no before-state, so it gets only its current
     count, never "did not change" (TASK-532). The message is masked line by line before it
     leaves.
     """
@@ -1139,8 +1157,8 @@ def describe_marketplace_update(
         if new is not None and target in live:
             parts.append(
                 f"Refreshed marketplace {target}. It offers {_plugins_text(len(new))}. "
-                "Claude Code reads its local source in place, so Clauster has no earlier "
-                "list to compare."
+                "Clauster has no copy of its list from before the update, so it cannot say "
+                "what changed."
             )
         elif old is None or new is None:
             parts.append(

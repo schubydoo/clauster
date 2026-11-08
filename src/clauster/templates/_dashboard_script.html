@@ -4444,15 +4444,16 @@
           const d = await res.json();
           if (c.gen !== myGen) return;
           pl.list = d.plugins || [];
+          // The declared reads run beside the marketplace list (they never reject), and
+          // are set with its rows, so no row shows a Remove (or a note) from another read.
+          const declaredRead = this._loadDeclared(myGen);
           const mres = await fetch(ROOT + "/api/config-write/marketplaces?" + this._configMgmtQuery());
           if (c.gen !== myGen) return;
           if (this._authExpired(mres)) return;
           if (mres.ok) {
             const md = await mres.json();
             if (c.gen !== myGen) return;
-            // Read before the rows show, and set with them, so no row shows a Remove (or a
-            // note) from another read.
-            const declared = await this._loadDeclared(myGen);
+            const declared = await declaredRead;
             if (c.gen !== myGen) return;
             pl.declared = declared;
             pl.marketplaces = md.marketplaces || [];
@@ -4794,8 +4795,13 @@
           return "Clauster could not read which marketplaces " + here + " scope declares, so Remove is not offered.";
         }
         const there = this._configMgmtMarketScopesElsewhere(m).map((s) => this._configMgmtScopeWord(s));
-        if (there.length) return "Declared at " + there.join(" and ") + " scope, not at " + here + " scope. Remove it there.";
-        return "Not declared at " + here + " scope, so Remove is not offered here. Remove it where it is declared.";
+        if (there.length) {
+          const scopes = there.length === 1 ? " scope" : " scopes";
+          return "Declared at " + there.join(" and ") + scopes + ", not at " + here + " scope. Remove it there.";
+        }
+        const none = "Not declared at " + here + " scope, so Remove is not offered here.";
+        if (c.scope === "user") return none + " A project can declare it at Project or Local scope.";
+        return none + " No other scope of this project that Clauster reads declares it.";
       },
       configMgmtMarketScopeLink(m) {
         const [s] = this._configMgmtMarketScopesElsewhere(m);

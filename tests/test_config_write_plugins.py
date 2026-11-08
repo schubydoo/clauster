@@ -2264,6 +2264,44 @@ def test_marketplace_plugin_names_reads_each_install_location(tmp_path: Path) ->
     assert calls[0]["argv"][1:] == ["plugin", "marketplace", "list", "--json"]
 
 
+def test_marketplace_plugin_names_compares_only_a_known_copy(tmp_path: Path) -> None:
+    # Only a git checkout or a downloaded url file is a before-state. A type a newer CLI
+    # adds, a missing source, and a nested source object (unhashable) are not compared.
+    listing = [
+        {"name": "gh", "source": "github"},
+        {"name": "g", "source": "git"},
+        {"name": "u", "source": "url"},
+        {"name": "fut", "source": "future-kind"},
+        {"name": "none"},
+        {"name": "obj", "source": {"source": "github", "repo": "o/r"}},
+        {"name": "lst", "source": ["github"]},
+    ]
+    run, _calls = _fake_run(stdout=json.dumps(listing))
+    _names, live = plugins.marketplace_plugin_names(str(FAKE_CLAUDE), tmp_path, None, run=run)
+    assert live == frozenset({"fut", "none", "obj", "lst"})
+
+
+def test_marketplace_plugin_names_reads_a_file_source_at_its_path(tmp_path: Path) -> None:
+    # claude 2.1.319 lists a file source's installLocation two directories above the file,
+    # which holds it only when it is `.claude-plugin/marketplace.json`.
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "my-market.json").write_bytes(b'{"plugins": [{"name": "q1"}]}')
+    _write_marketplace(tmp_path, ["wrong"])  # what installLocation would read
+    listing = [
+        {
+            "name": "f",
+            "source": "file",
+            "path": str(tmp_path / "sub" / "my-market.json"),
+            "installLocation": str(tmp_path),
+        }
+    ]
+    run, _calls = _fake_run(stdout=json.dumps(listing))
+    assert plugins.marketplace_plugin_names(str(FAKE_CLAUDE), tmp_path, "f", run=run) == (
+        {"f": ["q1"]},
+        frozenset({"f"}),
+    )
+
+
 def test_describe_marketplace_update_unchanged_and_changed() -> None:
     same = plugins.describe_marketplace_update(
         "m", {"m": ["a", "b"]}, {"m": ["b", "a"]}, live=frozenset()
@@ -2650,19 +2688,20 @@ def test_route_marketplace_update_reports_the_plugin_list(
 def test_route_marketplace_update_of_a_live_source_that_gained_a_plugin(
     write_config, tmp_path, monkeypatch, kind
 ) -> None:
-    # TASK-532: the CLI reads a directory (or file) source in place, as claude 2.1.319
-    # lists it (`installLocation` is the source). A plugin added before the click is already
-    # in the read before the update, so a compare said "did not change (3 plugins)".
+    # TASK-532: the CLI reads a directory (or file) source in place. A plugin added before
+    # the click is already in the read before the update, so a compare said "did not change
+    # (3 plugins)". The listing is the shape claude 2.1.319 prints for each type.
     source = tmp_path / "local-mkt"
     _write_marketplace(source, ["a", "b"])
-    listing = [{"name": "m", "source": kind, "path": str(source), "installLocation": str(source)}]
+    path = source if kind == "directory" else source / ".claude-plugin" / "marketplace.json"
+    listing = [{"name": "m", "source": kind, "path": str(path), "installLocation": str(source)}]
     monkeypatch.setenv("FAKE_CLAUDE_PLUGIN_MARKETPLACE_LIST_STDOUT", json.dumps(listing))
     _write_marketplace(source, ["a", "b", "c"])  # the operator adds a plugin, then clicks
     with _client(write_config, tmp_path, _ON) as c:
         body = _update_marketplace(c)
     assert body["message"] == (
-        "Refreshed marketplace m. It offers 3 plugins. Claude Code reads its local source in "
-        "place, so Clauster has no earlier list to compare."
+        "Refreshed marketplace m. It offers 3 plugins. Clauster has no copy of its list "
+        "from before the update, so it cannot say what changed."
     )
     assert "did not change" not in body["message"]
 
@@ -2671,8 +2710,8 @@ def test_describe_marketplace_update_never_compares_a_live_source() -> None:
     live = frozenset({"d"})
     same = plugins.describe_marketplace_update("d", {"d": ["a"]}, {"d": ["a"]}, live=live)
     assert same == (
-        "Refreshed marketplace d. It offers 1 plugin. Claude Code reads its local source in "
-        "place, so Clauster has no earlier list to compare."
+        "Refreshed marketplace d. It offers 1 plugin. Clauster has no copy of its list "
+        "from before the update, so it cannot say what changed."
     )
     # No read before is needed for a live source; an unread list after still says so.
     assert "It offers 2 plugins." in plugins.describe_marketplace_update(
@@ -2685,8 +2724,8 @@ def test_describe_marketplace_update_never_compares_a_live_source() -> None:
         None, {"d": ["a"], "g": ["x"]}, {"d": ["a"], "g": ["x"]}, live=live
     )
     assert every == (
-        "Refreshed marketplace d. It offers 1 plugin. Claude Code reads its local source in "
-        "place, so Clauster has no earlier list to compare. Refreshed marketplace g. Its "
+        "Refreshed marketplace d. It offers 1 plugin. Clauster has no copy of its list "
+        "from before the update, so it cannot say what changed. Refreshed marketplace g. Its "
         "plugin list did not change (1 plugin)."
     )
 
@@ -2722,6 +2761,18 @@ def test_route_marketplace_update_failed_read_after_is_reported_not_400(
     with _client(write_config, tmp_path, _ON) as c:
         body = _update_marketplace(c)
     assert "could not read its plugin list" in body["message"]
+
+
+def test_route_marketplace_update_takes_live_from_the_read_after_too(
+    write_config, tmp_path, monkeypatch
+) -> None:
+    # A marketplace the read after names as live is never compared, even if the read
+    # before did not name it so.
+    reads = iter([({"m": ["a"]}, frozenset()), ({"m": ["a"]}, frozenset({"m"}))])
+    monkeypatch.setattr(plugins, "marketplace_plugin_names", lambda *a, **k: next(reads))
+    with _client(write_config, tmp_path, _ON) as c:
+        body = _update_marketplace(c)
+    assert body["message"].startswith("Refreshed marketplace m. It offers 1 plugin. Clauster")
 
 
 # --- the plugins one marketplace offers (TASK-516): `plugin list --available --json` ---

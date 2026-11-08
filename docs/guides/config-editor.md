@@ -955,11 +955,14 @@ The scope rules and the update results below were checked against Claude Code
   Update reads the marketplace's own plugin list (the `marketplace.json` file in
   its checkout) before and after. It then shows whether that list changed, how
   many plugins the marketplace now offers, and which names were added or
-  removed. A `directory` or `file` marketplace has no checkout: Claude Code
-  reads the local source in place, so the read before the update already shows
-  the current list. For these sources the message gives only the number of
-  plugins that the marketplace offers now, and says that Clauster has no
-  earlier list to compare. If a read after the update fails, the message says
+  removed. Clauster compares the two lists only for a `github`, `git` or `url`
+  source, whose update rewrites a copy of the list. A `directory` or `file`
+  marketplace has no copy: Claude Code reads the local source in place, so the
+  read before the update already shows the current list. For these sources, and
+  for any other source type, the message gives only the number of plugins that
+  the marketplace offers now, and says that Clauster cannot say what changed.
+  For a `file` source, Clauster reads the file that the source names. If a read
+  after the update fails, the message says
   that the update ran and that Clauster could not read the result. If the read
   before the update fails, Clauster does not run the update and shows the error.
 - **Install and update never accept a marketplace command for you.** Some

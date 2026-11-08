@@ -2823,6 +2823,37 @@ def test_config_mgmt_marketplaces_remove_only_where_the_scope_declares(
     browser.expect_visible('[data-test="cm-market-remove-market"]')
 
 
+def test_config_mgmt_marketplaces_unreadable_declarations_offer_no_remove(
+    browser: AgentBrowser, config_mgmt_plugins_server: Server
+) -> None:
+    """A scope whose settings file cannot be read offers no Remove, and says why (TASK-527).
+
+    alpha's ``settings.local.json`` is not valid JSON, so the declared read for Local scope
+    fails. Local scope then offers no Remove at all. Project scope still reads its own file
+    and keeps the Remove of the marketplace it declares.
+    """
+    server = config_mgmt_plugins_server
+    cfg = yaml.safe_load((server.state_dir.parent / "clauster.yml").read_text(encoding="utf-8"))
+    local = Path(cfg["projects_root"]) / "alpha" / ".claude" / "settings.local.json"
+    local.write_bytes(b"{not json\n")
+    _open_modal(browser, server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-plugins"]')
+    browser.expect_visible('[data-test="cm-market-remove-market"]')
+    browser.click('[data-test="cm-scope-local"]')
+    browser.expect_attr('[data-test="cm-scope-local"]', "aria-pressed", "true")
+    browser.expect_text(
+        '[data-test="cm-market-readonly-market"]',
+        "Clauster could not read which marketplaces Local scope declares",
+    )
+    browser.expect_text(
+        '[data-test="cm-market-readonly-empty"]',
+        "Clauster could not read which marketplaces Local scope declares",
+    )
+    assert browser.get_count('[data-test="cm-market-remove-market"]') == 0
+    assert browser.get_count('[data-test="cm-market-remove-empty"]') == 0
+
+
 def test_config_mgmt_mcp_approvals_round_trip(
     browser: AgentBrowser, config_mgmt_server: Server
 ) -> None:
