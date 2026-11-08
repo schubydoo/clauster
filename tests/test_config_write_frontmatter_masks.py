@@ -942,7 +942,9 @@ def test_a_stored_member_that_cannot_be_read_safely_is_refused(
 
     def broken(target, *args, **kwargs):
         if func == "fstat":
-            return other
+            # Only the script's descriptor: the stored SKILL.md is read with fstat too.
+            got = real(target, *args, **kwargs)
+            return other if (got.st_dev, got.st_ino) == (fields[2], fields[1]) else got
         if Path(target) == script:
             raise PermissionError("denied")
         return real(target, *args, **kwargs)

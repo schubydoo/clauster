@@ -2051,6 +2051,49 @@ def _yaml12_refuses(text: str, root: yaml.Node | None) -> tuple[int, int] | None
     return None
 
 
+#: The tokens after which a ``?`` in a flow collection starts an entry.
+_FLOW_ENTRY_STARTS = (yaml.FlowMappingStartToken, yaml.FlowSequenceStartToken, yaml.FlowEntryToken)
+#: What may follow a ``?`` that starts a flow entry for YAML 1.2 to read it as a key marker.
+_FLOW_KEY_FOLLOWERS = frozenset(" \t\r\n,[]{}")
+
+
+def _flow_question_mark(text: str) -> tuple[int, int] | None:
+    """Return the (line, column) of a ``?`` in a flow collection that YAML 1.1 and 1.2 split.
+
+    PyYAML (YAML 1.1) reads every ``?`` inside ``{...}`` or ``[...]`` as the marker of an
+    explicit key, so an unquoted value ends there. YAML 1.2 reads it as a key marker only
+    where it starts an entry and a space, a line break or a flow indicator follows it.
+    Anywhere else the ``?`` is text. So ``{url: https://h/p?k=v}`` is one url to YAML 1.2
+    and not valid YAML to PyYAML, and ``[a, ?b]`` is ``['a', '?b']`` to YAML 1.2 and
+    ``['a', {'b': None}]`` to PyYAML (both checked against eemeli/yaml). Either way the CLI
+    and this tier would read different documents. Scans tokens only, never composes. A
+    scanner error before such a ``?`` ends the scan with None, and the parse reports that
+    error itself.
+    """
+    depth = 0
+    previous: yaml.Token | None = None
+    try:
+        for token in yaml.scan(text, Loader=yaml.SafeLoader):
+            if isinstance(token, (yaml.FlowMappingStartToken, yaml.FlowSequenceStartToken)):
+                depth += 1
+            elif isinstance(token, (yaml.FlowMappingEndToken, yaml.FlowSequenceEndToken)):
+                depth -= 1
+            elif (
+                depth
+                and isinstance(token, yaml.KeyToken)
+                and token.end_mark.index > token.start_mark.index  # a `?`, not an implicit key
+            ):
+                after = text[token.end_mark.index : token.end_mark.index + 1]
+                if not isinstance(previous, _FLOW_ENTRY_STARTS) or (
+                    after and after not in _FLOW_KEY_FOLLOWERS
+                ):
+                    return token.start_mark.line, token.start_mark.column
+            previous = token
+    except yaml.YAMLError:
+        return None
+    return None
+
+
 def cli_frontmatter_text(header: str) -> str:
     """Return the frontmatter text Claude Code actually parses: ``header``, or its retry text.
 
@@ -2417,16 +2460,18 @@ def load_frontmatter_yaml(header: str, *, what: str, line_offset: int = 0) -> An
     the JSON response path cannot represent (:func:`_first_json_unsafe`), because that
     scalar would 500 the route where this tier's contract is 422 (#1415).
 
-    Four more rejections come from the CLI, not from PyYAML (TASK-449.6). PyYAML reads YAML
+    Five more rejections come from the CLI, not from PyYAML (TASK-449.6). PyYAML reads YAML
     1.1 and the CLI's loader (2.1.318) reads YAML 1.2, behind its own fence regex. A header
     the two would read differently is refused, because this tier would then check one
-    document while Claude Code runs another. The fourth is a nested boolean or number with a
-    YAML 1.1-only spelling (:func:`_first_nested_yaml11_number`); the other three are:
+    document while Claude Code runs another. The fifth is a nested boolean or number with a
+    YAML 1.1-only spelling (:func:`_first_nested_yaml11_number`); the other four are:
 
     * a NEL, LINE SEPARATOR or PARAGRAPH SEPARATOR (:data:`_YAML11_ONLY_LINE_BREAKS`), a line
       break to YAML 1.1 only;
     * the text ``---`` anywhere in the header: the CLI ends the frontmatter at the first
       ``---`` it finds, even mid-line, where :data:`FRONTMATTER_RE` needs a fence line;
+    * a ``?`` inside a flow collection that YAML 1.2 reads as text and PyYAML as a key
+      marker (:func:`_flow_question_mark`), such as an unquoted url with a query string;
     * an alias to a node that encloses it, through a merge key (``a: &a {<<: *a}``). PyYAML
       drops that merge without a word; the CLI's loader refuses the whole header and then
       reads every field from a re-quoted copy.
@@ -2448,6 +2493,16 @@ def load_frontmatter_yaml(header: str, *, what: str, line_offset: int = 0) -> An
             f"{what} contains '---' before its closing fence. Claude Code ends the "
             "frontmatter at the first '---', even in the middle of a line or in quotes. "
             "Reword it"
+        )
+    if (where := _flow_question_mark(header)) is not None:
+        # Before the retry text: the CLI reads such a header as written when YAML 1.2 can,
+        # and only YAML 1.2 can tell. So refuse it, even where the CLI would take the retry
+        # and read it alike (TASK-530). Positions only — invariant 4.
+        raise InvalidCandidateError(
+            f"{what} has a '?' at line {where[0] + 1 + line_offset}, column {where[1] + 1} "
+            "inside a '{...}' or '[...]' value. YAML 1.1 reads it as the start of a key and "
+            "the YAML 1.2 that Claude Code reads as text, for example in a url with a query "
+            "such as '?k=v'. Put the value in quotes"
         )
     # The text the CLI parses: the header itself, or its re-quoted, tab-fixed retry when the
     # header is not valid YAML (TASK-449.6). Every check below reads that same text. Line
