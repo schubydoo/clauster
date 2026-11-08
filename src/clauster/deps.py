@@ -526,7 +526,7 @@ _SHAWL_VERSION = "v1.9.0"
 # are the release's checksums.txt asset digests (refreshed by scripts/check_binary_dep_pins.py and
 # fail-closed at install, exactly like Shawl above). Same `# renovate:` customManager pattern.
 # renovate: datasource=github-releases depName=schubydoo/claustrum
-_CLAUSTRUM_VERSION = "v1.19.0"
+_CLAUSTRUM_VERSION = "v1.20.0"
 _CLAUSTRUM_VER_BARE = _CLAUSTRUM_VERSION.removeprefix("v")  # tag "v1.7.1" -> asset infix "1.7.1"
 
 # (platform_marker, GoReleaser OS token, arch_marker, archive ext, sha256 of the archive)
@@ -536,42 +536,42 @@ _CLAUSTRUM_VARIANTS: tuple[tuple[str, str, str, str, str], ...] = (
         "Linux",
         "x86_64",
         "tar.gz",
-        "96cc0b9b8a4a7aaf6e3eda42a777070af646d1a9af7a407244a8af3d160e55a7",
+        "c081e1d20896bd2927594a06772fa877b91483e48a0ec5e69d9b8bfda4ab0f39",
     ),
     (
         "linux",
         "Linux",
         "arm64",
         "tar.gz",
-        "3f80b2f48545fb39a8204c26da35f355db4b6436f6453bbc8b19101d299672a9",
+        "8820a2db78730392f1b6bc874bcc4b560e2e511db706365a2d4f76e5db99cdd1",
     ),
     (
         "darwin",
         "Darwin",
         "x86_64",
         "tar.gz",
-        "09f068ece13f8022355e531d6ae5101c2917c4f1d1212860573e2d31b902b203",
+        "e0598d9b155f57b53ff041296e190137cec4ac67ca25d4c1ee6a47cff788fa8e",
     ),
     (
         "darwin",
         "Darwin",
         "arm64",
         "tar.gz",
-        "72d718cbe0c83169af6b30dc0a78b255890ca46141b09f3ec54969d6d0051810",
+        "8598c18d718f73fb9721fc973d6cd45f84a409c5e3d56d76043f472f5a35ea6e",
     ),
     (
         "win32",
         "Windows",
         "x86_64",
         "zip",
-        "454a9a1ad20b2d34ea4b20eb92c1e7d890f69cd566931d60e2362f245ae8902a",
+        "441a6b93ffaa648b9052255b54d9b4b261bbaab5d82e382130956e2a1d86ec78",
     ),
     (
         "win32",
         "Windows",
         "arm64",
         "zip",
-        "6c942a5158dd915f9ab42cebc850f94abd37ebbf4136c274470ec8e1508d00c1",
+        "4eeb71b5d8c14ba5ade582cf4d12d1486458cd5b3807037beb34037314b52e43",
     ),
 )
 
