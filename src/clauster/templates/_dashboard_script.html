@@ -6795,6 +6795,9 @@
           // the bridge-log tail's give-up `lost` banner.
           if (w.attempts >= MAX_LOG_RECONNECTS) {
             self._markHostedEnded(id);
+            // A give-up against a "starting" row (a restore pass still reattaching it) counts as
+            // seen not live, so the row's later "running" reopens the view.
+            if (h.status !== "running") w.deadSeen = true;
             return;
           }
           w.attempts += 1;
@@ -6818,7 +6821,9 @@
           const h = this.hosted.find((x) => x.claustrum_process_id === id);
           const live = !!h && h.status === "running";
           if (!live) { v.deadSeen = true; continue; }
-          if (v.deadSeen) this.openHosted(id);
+          // A fresh retry budget: a view that gave up at the reconnect cap would otherwise
+          // re-trip the cap on the reopened socket's first close.
+          if (v.deadSeen) { v.attempts = 0; this.openHosted(id); }
         }
       },
       closeHosted(id) {

@@ -890,7 +890,16 @@ def test_dashboard_hosted_view_reconnects_after_a_recovered_session(write_config
     # stale poll computed before the `lost` frame still reads "running".
     assert re.search(r"if\s*\(!live\)\s*\{\s*v\.deadSeen\s*=\s*true;\s*continue;\s*\}", page)
     assert re.search(r"self\._markHostedEnded\(id\);\s*w\.deadSeen\s*=\s*true;", page)
-    assert re.search(r"if\s*\(v\.deadSeen\)\s*this\.openHosted\(id\);", page)
+    # The reopen gets a fresh retry budget, and a give-up at the reconnect cap against a
+    # row that is not running counts as seen not live (Greptile's second round).
+    assert re.search(
+        r"if\s*\(v\.deadSeen\)\s*\{\s*v\.attempts\s*=\s*0;\s*this\.openHosted\(id\);\s*\}", page
+    )
+    assert re.search(
+        r"w\.attempts\s*>=\s*MAX_LOG_RECONNECTS\)\s*\{\s*self\._markHostedEnded\(id\);"
+        r"(?:\s*//[^\n]*)*\s*if\s*\(h\.status\s*!==\s*\"running\"\)\s*w\.deadSeen\s*=\s*true;",
+        page,
+    )
 
 
 def test_dashboard_footer_credits_vendored_assets(write_config):
