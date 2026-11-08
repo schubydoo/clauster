@@ -1778,6 +1778,13 @@ def test_redact_secret_lines_is_linear_on_every_hostile_shape():
         "alphanumeric run": "a" * 256_000,
         "internal whitespace run": "token: a" + " " * 64_000 + "b",
         "minified blob": "a." * 500_000,
+        # TASK-497: list markers, flow-mapping pairs, and a block value under a secret key.
+        "list marker run": "- " * 200_000 + "token: x",
+        "flow pair flood": "{" + ", token: a" * 50_000,
+        "unclosed flow quotes": "{" + ', token: "a' * 50_000,
+        "flow key run": "{," + "a" * 256_000,
+        "block opener spaces": "token: |" + " " * 128_000 + "x",
+        "block value lines": "token: |\n" + "  x\n" * 200_000,
     }
     for label, payload in shapes.items():
         start = time.perf_counter()

@@ -428,6 +428,7 @@ def test_hooks_without_a_mask_pass_through_a_masked_save(tmp_path: Path) -> None
     )
     path = _place(tmp_path, text)
     doc = _load(tmp_path)
+    assert MASK in doc["content"] and "fake-H" not in doc["content"]
     _save(tmp_path, doc["content"].replace("echo done", "echo finished"), doc["hash"])
     assert path.read_text(encoding="utf-8") == text.replace("echo done", "echo finished")
 
@@ -435,6 +436,7 @@ def test_hooks_without_a_mask_pass_through_a_masked_save(tmp_path: Path) -> None
 def test_a_mask_inside_an_ordered_map_is_refused(tmp_path: Path) -> None:
     path = _place(tmp_path, "---\nname: my-agent\ndescription: d\napi_token: fake-A\n---\nb\n")
     doc = _load(tmp_path)
+    assert MASK in doc["content"] and "fake-A" not in doc["content"]
     omap = f"---\nname: my-agent\ndescription: d\nextra: !!omap\n  - token: {QUOTED}\n---\nb\n"
     with pytest.raises(cw.InvalidCandidateError, match="ordered map"):
         _save(tmp_path, omap, doc["hash"])
@@ -478,6 +480,7 @@ def test_a_subagent_that_fails_its_checks_once_restored_names_no_size(tmp_path: 
 def test_a_masked_save_over_a_changed_file_is_stale(tmp_path: Path) -> None:
     path = _place(tmp_path, _STDIO)
     doc = _load(tmp_path)
+    assert MASK in doc["content"] and "fake-pat-SECRET" not in doc["content"]
     path.write_bytes(_STDIO.replace("fake-pat-SECRET", "fake-pat-OTHER").encode("utf-8"))
     with pytest.raises(cw.StaleConfigWriteError):
         _save(tmp_path, doc["content"], doc["hash"])
@@ -616,6 +619,7 @@ def test_skill_edit_elsewhere_keeps_the_masked_lines(tmp_path: Path) -> None:
     stored = "---\ndescription: d\n---\nRun it.\napi_key: fake-SECRET\n"
     path = _skill(tmp_path, stored)
     view, file_hash = _skill_view(tmp_path)
+    assert MASK in view and "fake-SECRET" not in view
     edited = view.replace("description: d", "description: e") + "More.\n"
     sk.write_skill(tmp_path, "s", {sk.SKILL_FILENAME: edited}, expected_hash=file_hash)
     assert path.read_text(encoding="utf-8") == stored.replace("d\n", "e\n", 1) + "More.\n"

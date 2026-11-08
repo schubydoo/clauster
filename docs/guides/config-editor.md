@@ -560,8 +560,12 @@ the frontmatter are not masked either. Do not put a secret in the body or in a
 comment. If the frontmatter is not valid YAML, the editor cannot read its
 fields. It then masks the frontmatter line by line, as the Skills editor does,
 and that misses a secret under a key that does not look secret. A masked value
-in such a file cannot be kept, so type the real values when you repair it. The
-file keeps its line endings. If the file holds masked values and its frontmatter is
+in such a file cannot be kept, so type the real values when you repair it.
+Clauster writes the line endings that a save sends. Before the dashboard
+editor sends a save, it changes each CRLF line ending to LF and removes a byte
+order mark at the start of the file. So after a save from the dashboard, a file
+that had CRLF line endings or a byte order mark has LF line endings and no byte
+order mark. If the file holds masked values and its frontmatter is
 valid YAML only after Claude Code adds quotes to some values, the editor shows
 those values with the quotes, and a save writes them with the quotes.
 
@@ -583,10 +587,24 @@ editor cannot mask it in place. It then shows a note and not the file. Edit
 that file on the host.
 
 The Skills editor masks each file line by line: a `key: value` line with a
-secret-shaped key, a `${...}` reference, or a URL with a user name or password.
-The body of `SKILL.md` is masked too, because skills often hold commands.
+secret-shaped key, also as a list item (`- token: ...`), a `${...}` reference,
+or a URL with a user name or password. In a flow mapping, such as
+`env: {API_KEY: ..., MODE: fast}`, the value of each pair with a secret-shaped
+key is masked. If a line with a secret-shaped key has its value on the next
+lines (`api_key: |`, or `token:` with nothing after it), each of those lines
+shows its indent and `********`. The body of `SKILL.md` is masked too, because
+skills often hold commands.
 
-In the frontmatter of `SKILL.md`, the editor also masks every `url` value, for
+In the frontmatter of `SKILL.md`, the editor also masks each value that the MCP
+and Hooks tabs mask, whatever its key name. In `mcpServers`, every `headers`,
+`env` and `args` value and a `headersHelper` command show as `********`, for
+example `headers: {X-Custom: ********}`. The MCP tab shows `args`, but this
+editor masks them too. In `hooks`, every `headers` value shows as `********`.
+The key names stay visible, and so does an empty value. If such a value covers
+more than one line, holds an escape, or has an anchor or a tag in front of it,
+each line of the value shows as one `********`.
+
+The editor also masks every `url` value in the frontmatter, for
 example the `url` of a server in `mcpServers` or of an `http` hook in `hooks`.
 It masks the value as the [Hooks tab](#the-hooks-tab) masks a URL. Each query
 value, the fragment, and each token-like path segment show as `********`. The
@@ -612,7 +630,8 @@ letters, or only digits. Do not put a secret in them.
 
 If Clauster cannot read a frontmatter block the way Claude Code reads it, every
 line of the block shows as `********`. This applies only to a block that holds
-the text `url` (in any case), `http:`, `https:`, `ws:`, `wss:` or a backslash.
+the text `url`, `mcpServers` or `hooks` (in any case), `http:`, `https:`,
+`ws:`, `wss:` or a backslash.
 A block without any of them gets only the line masks. These are the cases:
 
 - The block is not valid YAML to Clauster.

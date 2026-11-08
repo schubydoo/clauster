@@ -195,6 +195,81 @@ def _split_kv_line(body: str) -> tuple[str, str] | None:
     return kv.group("prefix"), rest[len(value) :]
 
 
+def _list_item_end(body: str) -> int:
+    """Return where the text of ``body`` starts after its indent and any ``- `` list markers.
+
+    A YAML list item (``- token: x``, ``- - token: x``) holds a ``key: value`` after its
+    markers. Scanned by hand, each index moving forward once, so a long run of markers or
+    spaces costs one pass.
+    """
+    i, n = 0, len(body)
+    while i < n and body[i] in " \t":
+        i += 1
+    while i + 1 < n and body[i] == "-" and body[i + 1] in " \t":
+        i += 2
+        while i < n and body[i] in " \t":
+            i += 1
+    return i
+
+
+#: A key in a flow mapping (``{API_KEY: x}``, ``{"token": "x"}``): after the ``{`` or the
+#: ``,`` that opens the pair, an optionally quoted key and its ``:``. The value follows.
+_FLOW_KEY_RE = re.compile(r"[{,][ \t]*(?P<q>[\"']?)(?P<key>[\w.\-]+)(?P=q)[ \t]*:[ \t]*")
+#: Where a plain flow value ends: the next ``,`` or ``}``.
+_FLOW_END_RE = re.compile(r"[,}]")
+#: A quoted flow value that is closed on its line.
+_FLOW_QUOTED_RE = re.compile(r"\"(?:[^\"\\]|\\.)*\"|'(?:[^']|'')*'")
+
+
+def _mask_flow_pairs(body: str) -> str:
+    """Return ``body`` with the value of each secret-keyed flow-mapping pair masked.
+
+    A line such as ``env: {API_KEY: sk-x, MODE: fast}`` has a benign key at its start, so
+    the ``key: value`` check does not mask it. Each pair after the first ``{`` whose key
+    looks secret-shaped (:data:`_SECRET_KEY_RE`) has its value replaced with the sentinel:
+    a quoted value up to its closing quote, a plain one up to the next ``,`` or ``}``, and
+    an unclosed quote to the end of the line. Linear: the values are disjoint, and each
+    scan stops at the first character that ends it.
+    """
+    start = body.find("{")
+    if start == -1:
+        return body
+    out: list[str] = []
+    prev = 0
+    for match in _FLOW_KEY_RE.finditer(body, start):
+        if match.start() < prev or not _SECRET_KEY_RE.search(match.group("key")):
+            continue  # inside a value masked already, or a benign key
+        begin = match.end()
+        if body[begin : begin + 1] in ("'", '"'):
+            quoted = _FLOW_QUOTED_RE.match(body, begin)
+            end = len(body) if quoted is None else quoted.end()
+        else:
+            stop = _FLOW_END_RE.search(body, begin)
+            end = len(body) if stop is None else stop.start()
+            while end > begin and body[end - 1] in " \t":
+                end -= 1
+        if end == begin:
+            continue  # an empty value hides nothing
+        out += (body[prev:begin], REDACTION_SENTINEL)
+        prev = end
+    if not out:
+        return body
+    out.append(body[prev:])
+    return "".join(out)
+
+
+#: A secret-keyed line whose value starts on the next lines: nothing after the ``:`` but a
+#: block indicator (``|``, ``>-``) or a comment. Matched after the indent and list markers.
+_BLOCK_OPENER_RE = re.compile(
+    r"(?P<key>[\w.\-]+)[ \t]*:(?:[ \t]+(?P<block>[|>][0-9+\-]*))?[ \t]*(?:#.*)?"
+)
+
+
+def _indent(body: str) -> int:
+    """Return the number of spaces and tabs that ``body`` starts with."""
+    return len(body) - len(body.lstrip(" \t"))
+
+
 # Character classification for the URL scheme, delegated to the regex ENGINE rather than
 # reimplemented, because `[a-z]` under `re.IGNORECASE` is Unicode-aware and matches more
 # than ASCII: U+212A KELVIN SIGN case-folds to `k`, U+017F LONG S to `s`, and U+0130/U+0131
@@ -581,16 +656,39 @@ def redact_secret_lines(text: str) -> str:
     * Any credential-bearing URL (``scheme://user@host``) occurring anywhere in the
       line is masked in place.
     * A ``key: value`` / ``key = value`` line whose key looks secret-shaped (the same
-      :data:`_SECRET_KEY_RE` vocabulary) has its value replaced with the sentinel.
+      :data:`_SECRET_KEY_RE` vocabulary) has its value replaced with the sentinel, also
+      as a YAML list item (``- token: x``).
+    * In a flow mapping (``env: {API_KEY: x}``), the value of each pair with a
+      secret-shaped key is masked (:func:`_mask_flow_pairs`).
+    * A secret-keyed line whose value starts on the next lines (``api_key: |``, or
+      ``token:`` with nothing after it) masks those lines: each line that is indented
+      deeper than the key (or, after a bare ``token:``, a ``-`` item at the key's column)
+      shows its indent and the sentinel. A blank line stays blank. The first line that is
+      not part of the value ends it.
 
     Deliberately conservative in the same direction as :func:`redact_secrets`:
     over-masking a non-secret line only costs a resend; under-masking would leak.
     Preserves the original line endings and count exactly (a caller diffing line
-    numbers against the source never sees a shift).
+    numbers against the source never sees a shift). One pass over the lines.
     """
     lines = text.splitlines(keepends=True)
     out: list[str] = []
+    # The column of the secret key whose value the next lines hold, and whether a `-` item
+    # at that column belongs to it (a bare `token:`, never a block scalar).
+    block: tuple[int, bool] | None = None
     for line in lines:
+        if block is not None:
+            # Split at whatever ends the line (`\r` too), so the line count never changes.
+            content = line.splitlines()[0]
+            if not content.strip():
+                out.append(line)  # a blank line inside the value stays blank
+                continue
+            indent = _indent(content)
+            column, items = block
+            if indent > column or (indent == column and items and content[indent] == "-"):
+                out.append(content[:indent] + REDACTION_SENTINEL + line[len(content) :])
+                continue
+            block = None
         body, eol = line, ""
         if body.endswith("\r\n"):
             body, eol = body[:-2], "\r\n"
@@ -598,9 +696,15 @@ def redact_secret_lines(text: str) -> str:
             body, eol = body[:-1], "\n"
         masked = _mask_interps(body, REDACTION_SENTINEL)
         masked = _mask_url_creds(masked, f"{REDACTION_SENTINEL}@")
-        kv = _split_kv_line(masked)
+        lead = _list_item_end(masked)
+        opener = _BLOCK_OPENER_RE.fullmatch(masked.rstrip(), lead)
+        if opener and _SECRET_KEY_RE.search(opener.group("key")):
+            block = (lead, opener.group("block") is None)
+        kv = _split_kv_line(masked[lead:])
         if kv and _SECRET_KEY_RE.search(kv[0]):
-            masked = f"{kv[0]}{REDACTION_SENTINEL}{kv[1]}"
+            masked = f"{masked[:lead]}{kv[0]}{REDACTION_SENTINEL}{kv[1]}"
+        else:
+            masked = _mask_flow_pairs(masked)
         out.append(masked + eol)
     return "".join(out)
 
