@@ -1579,6 +1579,17 @@
   
 </li>
         
+          <li class="md-nav__item">
+  <a href="#a-direct-session-names-a-lost-permission-prompt" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A Direct Session names a lost permission prompt
+      
+    </span>
+  </a>
+  
+</li>
+        
       </ul>
     </nav>
   
@@ -2391,6 +2402,17 @@
   
 </li>
         
+          <li class="md-nav__item">
+  <a href="#a-direct-session-names-a-lost-permission-prompt" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A Direct Session names a lost permission prompt
+      
+    </span>
+  </a>
+  
+</li>
+        
       </ul>
     </nav>
   
@@ -3099,7 +3121,32 @@ conversation in a new agent. If it offers <strong>Kill</strong>, the old <code>c
 still running: kill it first. Resume on an <code>Error</code> card first ends the old agent
 through the daemon. If the daemon refuses or does not answer that kill, Resume
 refuses with <code>cannot resume: the old agent may still be running</code>. Read
-<code>daemon.log</code> for the reason, and try again.</p>
+<code>daemon.log</code> for the reason, and try again. Forget on an <code>Error</code> card does the
+same. It refuses with <code>cannot forget: the agent may still be running, and the
+claustrum daemon cannot be reached to end it</code> when Clauster cannot connect, and
+with <code>cannot forget: the old agent may still be running, and the daemon refused
+or did not answer the kill</code> when the daemon does not take the kill. A Stop or
+Kill of an <code>Error</code> row through the API refuses the same way, with <code>cannot stop</code>
+or <code>cannot kill</code>. With <code>claustrum.enabled: false</code> the text ends <code>no claustrum
+daemon is connected to end it</code>. After the daemon kill, Resume, Forget, Stop and
+Kill also end the agent by its process id when Clauster has one, so an agent
+that outlived a daemon restart ends too.</p>
+<h3 id="a-direct-session-names-a-lost-permission-prompt">A Direct Session names a lost permission prompt<a class="headerlink" href="#a-direct-session-names-a-lost-permission-prompt" title="Permanent link">&para;</a></h3>
+<p><strong>What you see:</strong> after a Clauster restart or a dropped daemon connection, a
+Direct Session card shows an error that ends with <code>the agent was waiting on a permission prompt that Clauster could
+not restore, so it cannot be answered here: Bash (request ...)</code>.</p>
+<p><strong>Most likely cause:</strong> the agent was waiting on that prompt when Clauster
+stopped, and the reattach did not find the agent running. The daemon no longer
+had the process, it refused the reattach, or the connection dropped. If the card
+offers <strong>Kill</strong>, the <code>claude</code> process may still run and wait on the prompt: kill
+it, then Resume the conversation. After a dropped connection, the next daemon
+connection reattaches the session and opens the prompt again. On an <code>Error</code>
+card whose agent may still run, or an <code>orphan</code> card, the text comes back after
+each restart until you Resume, Kill or Forget the card. The same text can show
+after a reconnect, with no restart. On a <code>Crashed</code> card with no <code>orphan</code> badge,
+or a card that reads <code>claustrum connection dropped and the daemon no longer has
+this session</code> with no <code>orphan</code> badge, the agent is gone, so the text shows once. See
+<a href="../concepts/how-it-works/#a-direct-sessions-view-after-a-restart">A Direct Session's view after a restart</a>.</p>
 <h2 id="getting-more-detail">Getting more detail<a class="headerlink" href="#getting-more-detail" title="Permanent link">&para;</a></h2>
 <h3 id="raising-the-log-level">Raising the log level<a class="headerlink" href="#raising-the-log-level" title="Permanent link">&para;</a></h3>
 <blockquote>
