@@ -74,6 +74,8 @@ def run_flag_bridge(args):
     if mode == "pty_not_logged_in":
         # Not logged in: the real flag form (2.1.319) draws its first-run theme picker,
         # one cursor move per word, and waits for a keypress (TASK-533). These are its bytes.
+        # FAKE_CLAUDE_SLOW delays the draw past the spawn's readiness wait.
+        time.sleep(float(os.environ.get("FAKE_CLAUDE_SLOW", "0")))
         sys.stdout.buffer.write(
             b"\x1b[2GWelcome\x1b[10Gto\x1b[13GClaude\x1b[20GCode\r\r\n\r\r\n"
             b"\x1b[2GLet's\x1b[8Gget\x1b[12Gstarted.\r\r\n\r\r\n"

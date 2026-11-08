@@ -83,14 +83,22 @@ def test_find_session_id_waits_with_a_wide_character_earlier_on_the_row():
     assert scr.find_session_id() == "session_01WIDEPREFIX"
 
 
-def test_find_session_id_skips_an_id_that_ends_at_the_right_edge():
-    # An id that fills the row to the edge can wrap onto the next row, so it may be cut short.
+def test_find_session_id_reads_an_id_that_ends_exactly_at_the_right_edge():
+    # The id fills the row to the edge and the next row starts blank: it did not wrap.
     url = b"https://claude.ai/code/session_01EDGE"
     scr = PtyScreen(cols=len(url) + 2, rows=4)
-    scr.feed(b"  " + url + b"\r\n")
+    scr.feed(b"  " + url)
+    assert scr.find_session_id() is None  # the cursor waits at the edge: it may still wrap
+    scr.feed(b"\r\n")
+    assert scr.find_session_id() == "session_01EDGE"
+
+
+def test_find_session_id_never_returns_an_id_that_wrapped():
+    # An id that wraps onto the next row is cut short on its first row, so it is never read.
+    scr = PtyScreen(cols=36, rows=4)
+    scr.feed(b"  https://claude.ai/code/session_01WRAPPED\r\n")
+    assert scr._screen.display[0].endswith("session_01W")  # precondition: it did wrap
     assert scr.find_session_id() is None
-    scr.feed(b"  https://claude.ai/code/session_01FIT\r\n")  # a later one that stops short
-    assert scr.find_session_id() == "session_01FIT"
 
 
 def test_find_session_id_none_when_absent():

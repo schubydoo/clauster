@@ -94,24 +94,35 @@ _SEQUENCE_FAULT_NOTE = (
     "emulator."
 )
 
-#: The sidecar ``error`` when the bridge stopped at claude's first-run login screen (TASK-533).
+#: The sidecar ``error`` when the bridge stopped at claude's first-run screens (TASK-533).
 #: A standard bridge that is not logged in exits at once with "You must be logged in to use
 #: Remote Control", and its card reads "Failed to start". The flag form does not exit: it
 #: opens the first-run screens (a theme picker, then "Select login method:") and waits for a
 #: keypress nobody sends. Before this, the URL timeout promoted that bridge to ``ready`` with
 #: no link, and the card read "Running · Preparing connect link…" for as long as it ran
-#: (invariant 1). Fixed text, like the notes above: it is rendered on the card as written.
+#: (invariant 1). claude 2.1.319 showed the theme picker with no login even when its config
+#: said onboarding was done, and a login made without an interactive run may still leave the
+#: setup unfinished, so the text names both. Fixed text, like the notes above: it is rendered
+#: on the card as written.
 _LOGIN_SCREEN_ERROR = (
-    "claude is not logged in on this host: the session stopped at claude's first-run login "
-    "screen. Run `claude` once on this host as the user Clauster runs as, log in, then start "
-    "the session again."
+    "claude is not logged in on this host, or its first-run setup is not finished: the "
+    "session stopped at claude's first-run login screen. Run `claude` once on this host as "
+    "the user Clauster runs as, log in and finish the setup, then start the session again."
 )
 
 #: How much of the bridge's first output is searched for the login screen. claude draws it
-#: first, in under 3 KiB (2.1.319 at 80x24 and at the 120x40 TUI size). The bound keeps a
-#: logged-in `--continue` resume, which re-draws the old conversation, from matching on a
-#: conversation that quotes these screens.
+#: first, in under 3 KiB (2.1.319 at 80x24 and at the 120x40 TUI size).
 _LOGIN_SCREEN_WINDOW = 8192
+
+#: The first-run screen is the first thing claude draws, so its text, with the escapes taken
+#: out, starts with this. It is the anchor that keeps a logged-in `--continue` resume, which
+#: re-draws an old conversation, from matching a conversation that quotes these screens.
+_LOGIN_SCREEN_START = b"Welcome to Claude Code"
+
+#: How far into that text the phrases of a screen may sit (2.1.319 at 120x40 draws a logo
+#: first, and the login menu follows the theme picker: the last phrase measured ends near
+#: character 1110).
+_LOGIN_SCREEN_SPAN = 2048
 
 #: Text that only the first-run screens print, as phrases that must ALL appear for one screen
 #: to count (verified against claude 2.1.319 with a throwaway HOME and no login). Each screen
@@ -132,13 +143,21 @@ _RE_TERMINAL_CONTROL = re.compile(
 )
 _RE_SPACE_RUN = re.compile(rb"\s+")
 
+#: Seconds between publishing the login error and stopping the bridge. The runner's startup
+#: watch reads the sidecar every 2 s. While the bridge is alive it reads ``error`` as ERROR,
+#: and once it is gone the poll loop can see the dead bridge first and mark the row CRASHED.
+_LOGIN_STOP_DELAY = 5.0
+
 #: Seconds a bridge stopped at the login screen gets to exit after SIGTERM before SIGKILL.
 _LOGIN_STOP_GRACE = 5.0
 
 
 def _shows_login_screen(head: bytes | bytearray) -> bool:
     """Return True when ``head`` (the bridge's first output) draws claude's first-run screens."""
-    text = _RE_SPACE_RUN.sub(b" ", _RE_TERMINAL_CONTROL.sub(b" ", head))
+    text = _RE_SPACE_RUN.sub(b" ", _RE_TERMINAL_CONTROL.sub(b" ", head)).lstrip()
+    if not text.startswith(_LOGIN_SCREEN_START):
+        return False
+    text = text[:_LOGIN_SCREEN_SPAN]
     return any(all(p in text for p in phrases) for phrases in _LOGIN_SCREEN_PHRASES)
 
 
@@ -230,9 +249,16 @@ def _scan_connect_url(buf: bytes | bytearray, screen: PtyScreen | None) -> str |
     default-winsize case), then the pyte-reassembled screen, which recovers the URL when the
     TUI winsize makes claude fragment it with cursor-positioning escapes the raw regex can't
     follow (#665). The id is returned UN-redacted for the keeper's private discovery sidecar.
+
+    A raw hit that an escape sequence ends is left to the screen when there is one: an escape
+    can sit inside the id (a colour change, a cursor move), so the raw bytes may end the id
+    early while the rendered row shows all of it (TASK-469). With no screen, the raw hit is
+    all there is, and the TUI usually ends the id line with an erase or colour escape.
     """
     raw_hit = _RE_CONNECT_URL.search(buf)
-    if raw_hit is not None:
+    if raw_hit is not None and (
+        screen is None or buf[raw_hit.end() : raw_hit.end() + 1] != b"\x1b"
+    ):
         return raw_hit.group(1).decode()
     if screen is not None:
         return screen.find_session_id()
@@ -343,6 +369,7 @@ class _KeeperDrain:
         # (TASK-533). The backend reads it to stop the bridge, which cannot get past a screen
         # that waits for a keypress. One-way: the sidecar already says `error`.
         self.login_required = False
+        self._login_seen_at = 0.0
         self._deadline = time.monotonic() + _URL_TIMEOUT
 
     def _scan_session_id(self) -> str | None:
@@ -480,9 +507,12 @@ class _KeeperDrain:
 
         Fail closed, the way a standard bridge does when it is not logged in: the sidecar goes
         to ``error`` with the reason, so the runner shows an ERROR row that names the login
-        problem instead of promoting the bridge to RUNNING at the URL timeout. The runner
-        reads ``state == "error"`` as ERROR whether the keeper is still up or already gone
-        (``SpawnCoordinator._apply_pty_info``).
+        problem instead of promoting the bridge to RUNNING at the URL timeout. The readiness
+        wait and the startup watch read the sidecar's ``error`` as ERROR
+        (``SpawnCoordinator._apply_pty_info``, and the watch's dead-keeper branch). The poll
+        loop reads only whether the bridge is alive, and a dead STARTING bridge is CRASHED
+        there, so the backend stops the bridge only after :data:`_LOGIN_STOP_DELAY`
+        (:meth:`login_stop_due`), once the 2 s watch has had time to read the live error.
 
         The bridge is stopped, not left at the screen. It cannot get past it: the screen waits
         for a keypress, and nothing sends one. Left running, it would hold its keeper on an
@@ -490,17 +520,22 @@ class _KeeperDrain:
         second keeper beside.
 
         Ends URL capture as the URL timeout does, so :meth:`tick` neither promotes the row
-        nor writes a screen-fault note over this error.
+        nor writes a screen-fault note over this error, and no later chunk comes back here.
         """
         self.login_required = True
+        self._login_seen_at = time.monotonic()
         self._url_found = True
         self._buf = bytearray()
         self._base.update(state="error", error=_LOGIN_SCREEN_ERROR)
         _write_sidecar(self._sidecar, self._base)
         _report_keeper_fault(
-            "the bridge stopped at claude's first-run login screen (claude is not logged in); "
-            "stopping it"
+            "the bridge stopped at claude's first-run login screen (claude is not logged in, or "
+            "its setup is not finished); stopping it"
         )
+
+    def login_stop_due(self) -> bool:
+        """Return True once the bridge held at the login screen is due to be stopped."""
+        return self.login_required and time.monotonic() - self._login_seen_at >= _LOGIN_STOP_DELAY
 
     def tick(self) -> None:
         """Between reads: throttle the live-screen frame and handle the URL timeout."""
@@ -614,6 +649,19 @@ def _stop_login_bridge(proc: subprocess.Popen, sent_at: float | None) -> float:
         with contextlib.suppress(OSError):
             proc.kill()
     return sent_at
+
+
+def _stop_login_conpty(proc: Any) -> None:
+    """Stop a ConPTY bridge held at the login screen, and report a stop that failed.
+
+    ``force=True`` so pywinpty goes on past its first signal when the bridge outlives it.
+    A failure is reported rather than retried: the sidecar already carries the login error,
+    so the row is ERROR either way, and ``<sidecar>.log`` says why the bridge is still up.
+    """
+    try:
+        proc.terminate(force=True)
+    except Exception as exc:  # noqa: BLE001 — any pywinpty fault; report it, never raise
+        _report_keeper_fault(f"could not stop the bridge held at the login screen: {exc}")
 
 
 def _conpty_alive(proc: Any) -> tuple[bool, str | None]:
@@ -761,18 +809,17 @@ def _run_keeper_conpty(
                 break
             if data:
                 drain.feed(data.encode("utf-8", "replace"))
-                if drain.login_required and not login_stopped:
-                    # The bridge is at claude's login screen (TASK-533): stop it, and keep
-                    # draining until the ConPTY reports it gone, as for any other exit.
-                    login_stopped = True
-                    with contextlib.suppress(Exception):
-                        proc.terminate()
             else:
                 alive, loop_error = _conpty_alive(proc)
                 if not alive:
                     break  # no buffered output, and the bridge exited or went unobservable
                 time.sleep(0.05)  # alive but idle; yield before re-polling
             drain.tick()
+            if not login_stopped and drain.login_stop_due():
+                # The bridge is at claude's login screen (TASK-533): stop it, and keep
+                # draining until the ConPTY reports it gone, as for any other exit.
+                login_stopped = True
+                _stop_login_conpty(proc)
 
         if loop_error is not None:
             # The stream broke, or liveness stopped answering. Terminate the (possibly still
@@ -979,7 +1026,7 @@ def run_keeper(
         except (OSError, BlockingIOError):
             time.sleep(0.2)
         drain.tick()
-        if drain.login_required:
+        if drain.login_stop_due():
             login_stop_at = _stop_login_bridge(proc, login_stop_at)
         if bundle_guard.root is not None and time.monotonic() >= next_stamp:
             bundle_guard.refresh()

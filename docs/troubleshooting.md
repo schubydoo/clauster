@@ -415,10 +415,12 @@ the operator's login`` or ``logged out (no access token in ...) — re-run
 A bridge that starts without a login fails at once. A standard bridge card shows
 `Error: You must be logged in to use Remote Control.` An Interactive Session card
 shows "Session failed to start" with
-``claude is not logged in on this host: the session stopped at claude's first-run
-login screen.`` For an Interactive Session, `claude` does not exit. It opens its
-first-run screens and waits for a keypress. The keeper reads those screens in the
-first output of the session, stops the bridge, and records the error.
+``claude is not logged in on this host, or its first-run setup is not finished``.
+For an Interactive Session, `claude` does not exit. It opens its first-run screens
+and waits for a keypress. The keeper reads those screens at the start of the
+session output, records the error, and stops the bridge about 5 seconds later.
+`claude` can also show these screens when its first-run setup was never finished
+on the host, so the same fix applies.
 
 **Most likely cause:** the account that runs Clauster has no usable `claude`
 credentials. Bridges inherit the *operator's* login, so a bridge cannot connect
