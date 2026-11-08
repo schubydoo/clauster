@@ -1550,6 +1550,83 @@ def _merge_expands_beyond(root: yaml.Node, limit: int) -> bool:
     return False
 
 
+#: The deepest nesting this tier reads: ``[...]``/``{...}`` flow collections in a frontmatter
+#: header, and dicts and lists in a Settings candidate or a ``claude plugin`` list read
+#: (TASK-502, TASK-528). Every level counts, the outermost included. Far above any real file,
+#: which nests a handful of levels. PyYAML's scanner keeps one possible key per open flow
+#: collection and walks them all at every token, so a parse costs the token count times the
+#: flow depth: a 6.9 KB header nested 400 deep took 3.9 s to save. Below this cap that factor
+#: stays a constant. It also keeps a plugin read under the depth FastAPI's response encoder
+#: can take (about 250), where a deeper one was a 500.
+MAX_NESTING_DEPTH = 64
+
+
+class FlowNestingTooDeepError(yaml.YAMLError):
+    """PyYAML's scanner reached a flow collection nested past :data:`MAX_NESTING_DEPTH`."""
+
+    def __init__(self, mark: yaml.Mark) -> None:
+        """Record where the collection that went past the cap opens."""
+        super().__init__(f"flow collections nested more than {MAX_NESTING_DEPTH} levels deep")
+        self.mark = mark
+
+
+class _FlowDepthLoader(yaml.SafeLoader):
+    """``SafeLoader`` whose scanner stops at a flow collection past :data:`MAX_NESTING_DEPTH`.
+
+    The stop is in the scanner, so it reads quotes, comments and block scalars exactly as
+    the parse does, and the cost of reaching it is linear. Raises
+    :class:`FlowNestingTooDeepError`, a :class:`yaml.YAMLError`, so a caller that already
+    treats a YAML error as "does not parse" fails closed on it unchanged.
+    """
+
+    def fetch_flow_collection_start(self, TokenClass: type[yaml.Token]) -> None:  # noqa: N803
+        """Refuse the collection that would open past the cap, then scan as PyYAML does."""
+        if self.flow_level >= MAX_NESTING_DEPTH:
+            raise FlowNestingTooDeepError(self.get_mark())
+        super().fetch_flow_collection_start(TokenClass)
+
+
+def refuse_deep_flow(header: str, *, what: str, line_offset: int) -> None:
+    """Refuse (422) a header whose flow collections nest past :data:`MAX_NESTING_DEPTH`.
+
+    One forward pass of the scanner (:class:`_FlowDepthLoader`), before anything parses the
+    header. A syntax error ends the pass, as it ends every parse of the same text at the
+    same place, so the parse reports that error itself. Positions only in the message.
+    """
+    try:
+        for _token in yaml.scan(header, Loader=_FlowDepthLoader):
+            pass
+    except FlowNestingTooDeepError as exc:
+        raise InvalidCandidateError(
+            f"{what} is nested too deeply: its '[...]' or '{{...}}' values go more than "
+            f"{MAX_NESTING_DEPTH} levels deep (line {exc.mark.line + 1 + line_offset}). "
+            "Flatten them"
+        ) from exc
+    except yaml.YAMLError:
+        return
+
+
+def exceeds_nesting_depth(value: Any) -> bool:
+    """Whether ``value`` nests dicts and lists more than :data:`MAX_NESTING_DEPTH` deep.
+
+    The outermost container is level 1. Iterative, so it answers for any depth
+    ``json.loads`` builds, and it stops at the first container past the cap.
+    """
+    stack: list[tuple[Any, int]] = [(value, 1)]
+    while stack:
+        item, depth = stack.pop()
+        if isinstance(item, dict):
+            children: Any = item.values()
+        elif isinstance(item, list):
+            children = item
+        else:
+            continue
+        if depth > MAX_NESTING_DEPTH:
+            return True
+        stack.extend((child, depth + 1) for child in children)
+    return False
+
+
 #: Line breaks to YAML 1.1 (PyYAML) but ordinary characters to YAML 1.2 (the CLI): NEL,
 #: LINE SEPARATOR and PARAGRAPH SEPARATOR. A header with one reads as different keys in the
 #: two: ``tools: Read # c<LS>disallowedTools: Bash`` hides the denylist from the CLI.
@@ -1898,14 +1975,15 @@ def _is_yaml_list(text: str) -> bool:
     Composes only, never constructs, so a merge-key pyramid in the value costs nothing here
     (the seam's pair cap runs later, on the whole header). A duplicate anchor counts as a
     list, as it is to YAML 1.2: the value then stays unquoted, the retry text fails to
-    compose, and the seam refuses the header as written.
+    compose, and the seam refuses the header as written. A value nested past
+    :data:`MAX_NESTING_DEPTH` raises :class:`FlowNestingTooDeepError`: no answer is safe.
     """
     try:
-        return isinstance(yaml.compose(text, Loader=yaml.SafeLoader), yaml.SequenceNode)
+        return isinstance(yaml.compose(text, Loader=_FlowDepthLoader), yaml.SequenceNode)
+    except FlowNestingTooDeepError:
+        raise
     except yaml.YAMLError as exc:
         return _is_yaml11_only_syntax_error(exc)
-    except RecursionError:
-        return False
 
 
 def _cli_retry_text(header: str) -> str:
@@ -2112,18 +2190,25 @@ def cli_frontmatter_text(header: str) -> str:
     Known and not handled (follow-ups): a duplicate key, which a strict YAML 1.2 parser may
     refuse, and a flow collection that continues at column 0. Other differences may exist:
     this is a port checked against a stand-in parser, not Bun.YAML itself.
+
+    A header whose flow collections nest past :data:`MAX_NESTING_DEPTH` raises
+    :class:`FlowNestingTooDeepError` (a :class:`yaml.YAMLError`), so the caller's compose
+    of the returned text never pays for that depth (TASK-502). A retry text, or a value in
+    it, nested that deep returns the header, which then fails its parse where it did here.
     """
     try:
-        yaml.compose(header, Loader=yaml.SafeLoader)
+        yaml.compose(header, Loader=_FlowDepthLoader)
         return header
     except RecursionError:
         return header  # too deep to check; the seam maps the same error on its own parse
+    except FlowNestingTooDeepError:
+        raise
     except yaml.YAMLError as exc:
         if _is_yaml11_only_syntax_error(exc):
             return header
-    retry = _cli_retry_text(header)
     try:
-        yaml.compose(retry, Loader=yaml.SafeLoader)
+        retry = _cli_retry_text(header)
+        yaml.compose(retry, Loader=_FlowDepthLoader)
     except (yaml.YAMLError, RecursionError):
         return header
     return retry
@@ -2431,7 +2516,8 @@ def load_frontmatter_yaml(header: str, *, what: str, line_offset: int = 0) -> An
     each escape used to reach the route as a 500 on a path documented to fail as a 422:
 
     * ``RecursionError`` — deeply-nested flow collections overflow the composer before it
-      can raise ``YAMLError`` (#1326).
+      can raise ``YAMLError`` (#1326). Flow nesting is now refused before the parse, so
+      deep block nesting is what can still reach it.
     * A resolvable **explicit tag** whose scalar does not fit it (#1354): ``!!int x`` and
       ``!!float x`` raise ``ValueError``, ``!!bool x`` a ``KeyError``, ``!!timestamp x``
       an ``AttributeError`` (``construct_yaml_timestamp`` calls ``.groupdict()`` on an
@@ -2451,6 +2537,10 @@ def load_frontmatter_yaml(header: str, *, what: str, line_offset: int = 0) -> An
     All of them are the same structural verdict — we could not parse the header, so we
     refuse to act on it. Fails closed: this only ever converts a crash into a rejection,
     never a rejection into an accept.
+
+    One rejection comes before any parse: flow collections nested past
+    :data:`MAX_NESTING_DEPTH` (:func:`refuse_deep_flow`), because each parse of such a
+    header costs its size times its depth, and one save parses it many times (TASK-502).
 
     Three rejections are NOT parse failures. A header that parses fine but builds a
     self-referential structure (:func:`_is_self_referential`) is refused after the load,
@@ -2481,6 +2571,7 @@ def load_frontmatter_yaml(header: str, *, what: str, line_offset: int = 0) -> An
     ``parse_frontmatter`` implementations pass ``1``: they hand us ``FRONTMATTER_RE.group(1)``,
     which begins after the opening ``---`` fence — exactly one line in.
     """
+    refuse_deep_flow(header, what=what, line_offset=line_offset)
     for char in _YAML11_ONLY_LINE_BREAKS:
         if char in header:
             # The code point only, never the text around it — invariant 4.

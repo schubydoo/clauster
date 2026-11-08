@@ -596,13 +596,23 @@ def cli_list_plugins(
         raise PluginCliError(f"claude plugin list returned invalid JSON: {exc}") from exc
     if not isinstance(data, list):
         raise PluginCliError("claude plugin list returned a non-list JSON value")
-    try:
-        return [_redact_plugin_entry(entry) for entry in data]
-    except RecursionError as exc:
-        # `json.loads` parses nesting well past the depth the recursive redaction walk can
-        # take (1500 levels parse on 3.12+). Uncaught, a committed `plugin update`
-        # whose read after the update hit it returned a 500 (PR 1838 review).
-        raise PluginCliError("claude plugin list returned output nested too deeply") from exc
+    _refuse_deep_output("claude plugin list", data)
+    return [_redact_plugin_entry(entry) for entry in data]
+
+
+def _refuse_deep_output(command: str, data: list[Any]) -> None:
+    """Raise :class:`PluginCliError` when ``data`` nests past the tier's depth cap.
+
+    ``json.loads`` parses nesting well past what the recursive redaction walk can take
+    (1500 levels on 3.12+), and FastAPI's response encoder fails at about 250. Either one
+    was a 500 on a read (PR 1838 review, TASK-528). The check is iterative
+    (:func:`~clauster.config_write.exceeds_nesting_depth`) and runs before both.
+    """
+    if cw.exceeds_nesting_depth(data):
+        raise PluginCliError(
+            f"{command} returned output nested too deeply (more than "
+            f"{cw.MAX_NESTING_DEPTH} levels)"
+        )
 
 
 def cli_plugin_details(
@@ -695,12 +705,8 @@ def cli_list_marketplaces(
     ``url`` entry's ``url`` can embed credentials.
     """
     data = _list_marketplaces_raw(binary, cwd, run=run)
-    try:
-        return redact_plugin_display(data)
-    except RecursionError as exc:  # the same parse-deeper-than-the-walk gap as plugin list
-        raise PluginCliError(
-            "claude plugin marketplace list returned output nested too deeply"
-        ) from exc
+    _refuse_deep_output("claude plugin marketplace list", data)
+    return redact_plugin_display(data)
 
 
 def _list_marketplaces_raw(binary: str, cwd: Path, *, run: RunFn) -> list[Any]:

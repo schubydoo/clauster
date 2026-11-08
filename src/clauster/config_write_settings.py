@@ -616,10 +616,17 @@ def validate_misc_settings(candidate: Any) -> None:
     (those keys are managed by their own dedicated surface, never here).
     ``env``, when present, must be a flat ``str -> str`` map. Every other key
     is accepted as opaque, never-interpreted JSON -- see the module docstring
-    for why this surface does not maintain an exhaustive misc-key allowlist.
+    for why this surface does not maintain an exhaustive misc-key allowlist. A candidate
+    that nests past :data:`~clauster.config_write.MAX_NESTING_DEPTH` is refused before any
+    walk over it (TASK-502).
     """
     if not isinstance(candidate, dict):
         raise cw.InvalidCandidateError("settings must be an object")
+    if cw.exceeds_nesting_depth(candidate):
+        raise cw.InvalidCandidateError(
+            f"settings is nested too deeply: its objects and lists go more than "
+            f"{cw.MAX_NESTING_DEPTH} levels deep. Flatten them"
+        )
     owned = OWNED_KEYS & set(candidate)
     if owned:
         where = "; ".join(f"{key} on the {OWNED_KEY_TABS[key]} tab" for key in sorted(owned))
@@ -810,24 +817,25 @@ def _orphan_sentinel_path(incoming: Any, stored: Any, path: str) -> str | None:
     ``plugins``) would move one entry's credential into another and report success.
     A dict is matched by key. A list that holds a sentinel must keep its length, and
     each element that holds one must come back unchanged apart from its sentinels.
+
+    The walk stops at the first list on each path: below it, an element with no sentinel
+    has nothing to match, and one that came back unchanged has every sentinel where the
+    stored value has a value. So each node is walked a fixed number of times, never once
+    per list above it (TASK-502).
     """
-    if isinstance(incoming, dict):
-        items: Any = incoming.items()
-    elif isinstance(incoming, list):
-        if _has_sentinel(incoming):
-            if not isinstance(stored, list) or len(stored) != len(incoming):
-                return path
-            for i, v in enumerate(incoming):
-                if _has_sentinel(v) and not _unchanged_but_masks(v, stored[i]):
-                    return f"{path}.{i}"
-        items = enumerate(incoming)
-    else:
+    if isinstance(incoming, list):
+        if not _has_sentinel(incoming):
+            return None
+        if not isinstance(stored, list) or len(stored) != len(incoming):
+            return path
+        for i, v in enumerate(incoming):
+            if _has_sentinel(v) and not _unchanged_but_masks(v, stored[i]):
+                return f"{path}.{i}"
         return None
-    for k, v in items:
-        if isinstance(incoming, dict):
-            here = stored.get(k, _MISSING) if isinstance(stored, dict) else _MISSING
-        else:
-            here = stored[k] if isinstance(stored, list) and k < len(stored) else _MISSING
+    if not isinstance(incoming, dict):
+        return None
+    for k, v in incoming.items():
+        here = stored.get(k, _MISSING) if isinstance(stored, dict) else _MISSING
         where = f"{path}.{k}"
         if v == cw.REDACTION_SENTINEL and here is _MISSING:
             return where
@@ -837,7 +845,31 @@ def _orphan_sentinel_path(incoming: Any, stored: Any, path: str) -> str | None:
     return None
 
 
-def _unmasked_slot_path(incoming: Any, shown: Any, path: str) -> str | None:
+def _sentinel_holders(*values: Any) -> set[int]:
+    """Return the ids of the dicts and lists under ``values`` that hold a sentinel.
+
+    One iterative pass, each container read twice (down, then up), so a check that asks
+    of every list on a path whether it holds a sentinel does not walk it again each time.
+    """
+    holders: set[int] = set()
+    stack: list[tuple[Any, bool]] = [(value, False) for value in values]
+    while stack:
+        node, done = stack.pop()
+        if isinstance(node, dict):
+            children: Any = node.values()
+        elif isinstance(node, list):
+            children = node
+        else:
+            continue
+        if not done:
+            stack.append((node, True))
+            stack.extend((child, False) for child in children)
+        elif any(c == cw.REDACTION_SENTINEL or id(c) in holders for c in children):
+            holders.add(id(node))
+    return holders
+
+
+def _unmasked_slot_path(incoming: Any, shown: Any, path: str, *, holders: set[int]) -> str | None:
     """Return the path of the first sentinel in ``incoming`` where the read view showed none.
 
     ``shown`` is the redacted view of the stored value. A sentinel is only a "keep the
@@ -851,7 +883,15 @@ def _unmasked_slot_path(incoming: Any, shown: Any, path: str) -> str | None:
     the kept one. To change one such element, retype every masked entry of the list. That
     case raises :class:`~clauster.config_write.InvalidCandidateError` here, with a message
     that names the list, since no single slot is at fault.
+
+    ``holders`` is :func:`_sentinel_holders` of ``incoming`` and ``shown``, so the walk is
+    linear however deep the lists nest (TASK-502).
     """
+
+    def held(value: Any) -> bool:
+        """Whether ``value`` is the sentinel or a container that holds one."""
+        return value == cw.REDACTION_SENTINEL or id(value) in holders
+
     if incoming == cw.REDACTION_SENTINEL:
         return None if shown == cw.REDACTION_SENTINEL else path
     if isinstance(incoming, dict):
@@ -861,11 +901,8 @@ def _unmasked_slot_path(incoming: Any, shown: Any, path: str) -> str | None:
         )
     elif isinstance(incoming, list):
         # The orphan check ran first, so ``incoming`` has the stored (and shown) length.
-        if isinstance(shown, list) and _has_sentinel(incoming):
-            if any(
-                _has_sentinel(s) and not _has_sentinel(v)
-                for s, v in zip(shown, incoming, strict=False)
-            ):
+        if isinstance(shown, list) and held(incoming):
+            if any(held(s) and not held(v) for s, v in zip(shown, incoming, strict=False)):
                 raise cw.InvalidCandidateError(
                     f"{path} holds masked entries that all look the same, so after you "
                     f"change one, type the real value of every masked entry in {path}"
@@ -877,7 +914,7 @@ def _unmasked_slot_path(incoming: Any, shown: Any, path: str) -> str | None:
     else:
         return None
     for k, v, sub in pairs:
-        found = _unmasked_slot_path(v, sub, f"{path}.{k}")
+        found = _unmasked_slot_path(v, sub, f"{path}.{k}", holders=holders)
         if found:
             return found
     return None
@@ -897,9 +934,12 @@ def _reject_orphan_sentinels(incoming: dict[str, Any], stored: dict[str, Any]) -
         if incoming[key] == cw.REDACTION_SENTINEL and key not in stored:
             where: str | None = key
         else:
+            seen = shown.get(key, _MISSING)
             where = _orphan_sentinel_path(
                 incoming[key], stored.get(key), key
-            ) or _unmasked_slot_path(incoming[key], shown.get(key, _MISSING), key)
+            ) or _unmasked_slot_path(
+                incoming[key], seen, key, holders=_sentinel_holders(incoming[key], seen)
+            )
         if where:
             raise cw.InvalidCandidateError(
                 f"{where} holds a masked value that no longer matches its stored value (an "

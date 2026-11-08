@@ -1298,8 +1298,11 @@ def test_an_aliased_scalar_changed_at_one_place_only_cannot_be_rewritten(changed
         # node pairs of `m` with its merged dict and rewrite `y`'s text for a new `x`.
         ("base: &b {x: 1}\nm: {y: 3, <<: *b}\n", {"m": {"x": 2, "y": 3}}),
         # The walk pairs the `!!omap` list, but each pair loads as a tuple, which no node
-        # branch takes.
+        # branch takes. `!!pairs` loads the same way (TASK-502).
         ("o: !!omap [{p: 1}]\n", {"o": [("p", 2)]}),
+        ("o: !!pairs [{p: 1}]\n", {"o": [("p", 2)]}),
+        # A `!!set` is a mapping node that loads as a set, which no node branch takes.
+        ("s: !!set {p: null}\n", {"s": {"q"}}),
         # A changed shape: a scalar where a list was, and a list of another length.
         ("l: [a, b]\n", {"l": "a"}),
         ("l: [a, b]\n", {"l": ["a"]}),
@@ -1320,7 +1323,7 @@ def test_changed_scalars_is_linear_in_the_header(monkeypatch: pytest.MonkeyPatch
     # level (the counter sees only that helper, not other comparisons).
     # The walk used to compare the whole subtree at every level above a change, so a deep
     # chain over a wide list cost depth x width. Counted: each comparison's leaves.
-    depth, width = 200, 2000
+    depth, width = cw.MAX_NESTING_DEPTH, 2000  # the deepest header the seam accepts
     text = (
         "---\nname: x\ndescription: d\nk: "
         + "[" * depth
