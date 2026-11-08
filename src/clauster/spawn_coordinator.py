@@ -1324,7 +1324,8 @@ class SpawnCoordinator:
         unregistered, which is a failed start (ERROR), not a running bridge. Both legs
         re-flush the redacted mirror each tick. Process death during startup is delegated
         to the injected ``_reconcile_status`` so the CRASHED/STOPPED outcome matches the
-        poll loop exactly.
+        poll loop exactly, except for a pty keeper that left an ``error`` in its sidecar
+        (the login screen, TASK-533): that is a failed start, ERROR, as at the readiness wait.
         """
         grace = self._config.claude.startup_grace_seconds
         deadline = time.monotonic() + grace
@@ -1335,20 +1336,28 @@ class SpawnCoordinator:
             if instance is None or proc is None or instance.status is not InstanceStatus.STARTING:
                 return  # already resolved, stopped, or gone
             if proc.poll() is not None:  # exited during startup
-                self._reconcile_status(instance, False)
                 log_path = instance.bridge_debug_log_path
                 if (  # pragma: skip-on-win — pty-mode (pywinpty-gated)
-                    instance.resume_mode == "pty"
-                    and log_path is not None
-                    and instance.error_detail is None
+                    instance.resume_mode == "pty" and log_path is not None
                 ):
-                    # A bootloader unpack that outlasts the readiness wait can still fail
-                    # before the keeper's first sidecar write (TASK-503): say why here too.
                     sidecar = self._sidecar_path_for(log_path)
                     info = await asyncio.to_thread(self._read_sidecar, sidecar) or {}
+                    if isinstance(info.get("error"), str):
+                        # The keeper recorded why it failed before it exited, for example the
+                        # login screen (TASK-533). That is a failed start, ERROR, as the
+                        # readiness wait reads it, and not a crash or a clean stop.
+                        self._apply_pty_info(instance, info, proc)
+                    else:
+                        self._reconcile_status(instance, False)
+                    # The sidecar's reason, or, for a bootloader unpack that outlasts the
+                    # readiness wait and fails before the keeper's first sidecar write
+                    # (TASK-503), the keeper's own log. A STARTING row carries no detail yet:
+                    # `_spawn_pty` sets one only on an ERROR row, which starts no watch.
                     instance.error_detail = await asyncio.to_thread(
                         self._keeper_failure_detail, sidecar, info
                     )
+                else:
+                    self._reconcile_status(instance, False)
                 await self._registry._persist()
                 return
             log_path = instance.bridge_debug_log_path

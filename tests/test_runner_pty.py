@@ -1103,6 +1103,35 @@ async def test_startup_watch_keeps_a_late_sidecar_error_while_the_launch_lingers
 
 
 @_POSIX_ONLY
+async def test_startup_watch_reads_an_exited_keepers_error_as_error(runner_config, monkeypatch):
+    # A keeper that recorded why it failed and then exited before the next watch tick (the
+    # login screen, TASK-533) is a failed start: ERROR with its reason, not CRASHED.
+    def _cmd(sidecar, *a, **k):
+        code = (
+            "import json, time; time.sleep(0.6); "
+            f"open({str(sidecar)!r}, 'w').write(json.dumps("
+            "{'state': 'exited', 'error': 'claude is not logged in on this host'}))"
+        )
+        return [sys.executable, "-c", code]
+
+    monkeypatch.setattr(BridgeLaunch, "_keeper_launch_cmd", staticmethod(_cmd))
+    monkeypatch.setattr("clauster.spawn_coordinator._READY_TIMEOUT", 0.2)
+    monkeypatch.setattr("clauster.spawn_coordinator._STARTUP_WATCH_INTERVAL", 0.1)
+    runner, _ = _pty_runner(runner_config)
+    inst = await runner.spawn("alpha")
+    try:
+        assert inst.status is InstanceStatus.STARTING
+        for _ in range(100):
+            if inst.status is not InstanceStatus.STARTING:
+                break
+            await asyncio.sleep(0.1)
+        assert inst.status is InstanceStatus.ERROR
+        assert inst.error_detail == "claude is not logged in on this host"
+    finally:
+        await runner.stop(inst.instance_id)
+
+
+@_POSIX_ONLY
 async def test_rediscover_and_stop_a_two_process_keeper_after_a_restart(
     runner_config, monkeypatch
 ) -> None:
@@ -1349,6 +1378,60 @@ async def test_spawn_pty_no_url_does_not_falsely_run(runner_config, monkeypatch)
     inst = await runner.spawn("alpha")
     try:
         assert inst.status is not InstanceStatus.RUNNING  # STARTING (watch will ERROR it)
+    finally:
+        await runner.stop(inst.instance_id)
+
+
+@_POSIX_ONLY
+async def test_spawn_pty_not_logged_in_is_an_error_naming_the_login(runner_config, monkeypatch):
+    """TASK-533: a flag-form bridge at claude's first-run login screen is an ERROR row.
+
+    It used to go STARTING then RUNNING at the keeper's URL timeout, and the card read
+    "Running · Preparing connect link…" while claude waited at a screen nobody can answer.
+    """
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "pty_not_logged_in")
+    runner, _ = _pty_runner(runner_config)
+    inst = await runner.spawn("alpha")
+    try:
+        assert inst.status is InstanceStatus.ERROR
+        assert inst.url is None
+        assert "not logged in" in (inst.error_detail or "")
+        # The keeper stops the bridge rather than leave it at the screen, after the delay
+        # that lets the runner read the error while the bridge is still alive.
+        for _ in range(300):
+            if procutil.proc_create_time(inst.bridge_pid) is None:
+                break
+            await asyncio.sleep(0.05)
+        assert procutil.proc_create_time(inst.bridge_pid) is None
+        assert inst.status is InstanceStatus.ERROR
+    finally:
+        await runner.stop(inst.instance_id)
+
+
+@_POSIX_ONLY
+async def test_late_login_screen_is_an_error_not_a_crash(runner_config, monkeypatch):
+    """TASK-533: the login screen drawn after the readiness wait still ends ERROR.
+
+    The startup watch owns the row then, and the poll loop runs beside it. The keeper keeps
+    the bridge up while the watch reads the error, so the poll loop never sees a dead
+    STARTING bridge to call CRASHED.
+    """
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "pty_not_logged_in")
+    monkeypatch.setenv("FAKE_CLAUDE_SLOW", "1.0")
+    monkeypatch.setattr("clauster.spawn_coordinator._READY_TIMEOUT", 0.3)
+    monkeypatch.setattr("clauster.spawn_coordinator._READY_POLL_INTERVAL", 0.05)
+    runner, _ = _pty_runner(runner_config)
+    inst = await runner.spawn("alpha")
+    try:
+        assert inst.status is InstanceStatus.STARTING  # past the readiness wait
+        for _ in range(200):  # the poll loop's cadence, compressed
+            await runner.poll_once()
+            if inst.status is not InstanceStatus.STARTING:
+                break
+            await asyncio.sleep(0.1)
+        assert inst.status is InstanceStatus.ERROR
+        assert "not logged in" in (inst.error_detail or "")
+        assert runner._registry._crash_counts.get("alpha", 0) == 0
     finally:
         await runner.stop(inst.instance_id)
 

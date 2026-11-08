@@ -1221,6 +1221,8 @@ def _fake_conpty(
 
         def terminate(self, force: bool = False) -> None:
             calls.append({"terminated": True})
+            if force:
+                calls.append({"forced": True})
             if terminate_error is not None:
                 raise terminate_error
 
@@ -1801,3 +1803,351 @@ def test_keeper_sidecar_always_carries_a_note_key(tmp_path: Path, monkeypatch) -
 
     assert "note" in _read(sidecar)
     assert _read(sidecar)["note"] is None
+
+
+# -- TASK-469: a connect URL split across two PTY reads --------------------------------
+# The scrape runs on the bytes read so far, and a read can end inside the session id. The
+# keeper used to publish the part it had seen: a wrong deep link, and a wrong value taught to
+# the exact-value redactor. At every split point it must publish the whole id or nothing.
+
+_SPLIT_ID = "session_01SPLITPOINTAAAAAAAAAAA"
+_SPLIT_URL = f"https://claude.ai/code/{_SPLIT_ID}"
+# The raw leg: a contiguous URL line, ended by an erase-line escape as the TUI writes it.
+_SPLIT_RAW = f"Continue at {_SPLIT_URL}\x1b[K\r\n".encode()
+# The screen leg: fragmented like #665, so the raw regex cannot match and only the pyte
+# screen can read the URL.
+_SPLIT_SCREEN = f"start\r\nhttps://claude.ai/codX\x1b[22Ge/{_SPLIT_ID}\r\n".encode()
+
+
+def _split_feed(tmp_path: Path, data: bytes, split: int, screen) -> tuple:  # noqa: ANN001
+    """Feed ``data`` to a fresh drain in two reads cut at ``split``; return what it published."""
+    from clauster import pty_keeper
+
+    base: dict[str, object] = {"state": "starting", "error": None, "note": None}
+    sidecar = tmp_path / "k.json"
+    drain = pty_keeper._KeeperDrain(base, sidecar, screen, None)
+    drain.feed(data[:split])
+    first = base.get("session_id")
+    drain.feed(data[split:])
+    return first, base.get("session_id"), _read(sidecar).get("connect_url")
+
+
+@pytest.mark.parametrize("split", range(1, len(_SPLIT_RAW)))
+def test_keeper_raw_scrape_publishes_the_whole_id_at_every_split(tmp_path: Path, split) -> None:  # noqa: ANN001
+    first, final, url = _split_feed(tmp_path, _SPLIT_RAW, split, None)
+    assert first in (None, _SPLIT_ID)  # never a truncated id after the first read
+    assert final == _SPLIT_ID
+    assert url == _SPLIT_URL
+
+
+@pytest.mark.parametrize("split", range(1, len(_SPLIT_SCREEN)))
+def test_keeper_screen_scrape_publishes_the_whole_id_at_every_split(tmp_path: Path, split) -> None:  # noqa: ANN001
+    first, final, url = _split_feed(tmp_path, _SPLIT_SCREEN, split, _fresh_screen())
+    assert first in (None, _SPLIT_ID)
+    assert final == _SPLIT_ID
+    assert url == _SPLIT_URL
+
+
+def test_keeper_raw_scrape_waits_for_the_byte_after_the_id() -> None:
+    """An id at the very end of what was read is not a match yet: the next read may extend it."""
+    from clauster import pty_keeper
+
+    assert pty_keeper._scan_connect_url(b"at " + _SPLIT_URL.encode(), None) is None
+    assert pty_keeper._scan_connect_url(b"at " + _SPLIT_URL.encode() + b" ", None) == _SPLIT_ID
+
+
+def test_keeper_leaves_an_escape_inside_the_id_to_the_screen() -> None:
+    """A colour change inside the id ends the raw match early; the screen shows all of it."""
+    from clauster import pty_keeper
+
+    data = b"at https://claude.ai/code/session_01COL\x1b[1mOURED\x1b[0m\r\n"
+    assert pty_keeper._scan_connect_url(data, None) is None  # raw alone cannot tell: none
+    screen = _fresh_screen()
+    screen.feed(data)
+    assert pty_keeper._scan_connect_url(data, screen) == "session_01COLOURED"
+
+
+@pytest.mark.parametrize(
+    "tail",
+    [b"\x1b[K\r\n", b"\x1b[0m\x1b[K\r\n", b"\x1b[39m \xc2\xb7 more", b"\x1b]8;;\x07\r\n"],
+)
+def test_keeper_reads_a_raw_id_that_escapes_then_a_non_id_byte_end(tail: bytes) -> None:
+    """The raw leg still answers when the screen cannot (an empty screen stands in for it)."""
+    from clauster import pty_keeper
+
+    data = b"at " + _SPLIT_URL.encode() + tail
+    assert pty_keeper._scan_connect_url(data, _fresh_screen()) == _SPLIT_ID
+    assert pty_keeper._scan_connect_url(data, None) == _SPLIT_ID
+
+
+def test_keeper_raw_scrape_waits_while_only_escapes_follow_the_id() -> None:
+    from clauster import pty_keeper
+
+    data = b"at " + _SPLIT_URL.encode() + b"\x1b[K"
+    assert pty_keeper._scan_connect_url(data, None) is None
+    assert pty_keeper._scan_connect_url(data + b"\r\n", None) == _SPLIT_ID
+
+
+@pytest.mark.parametrize(
+    "tail",
+    [b"\x1b", b"\x1b[", b"\x1b[?", b"\x1b[?2", b"\x1b[;", b"\x1b[1", b"\x1b(", b"\x1b]8;;"]
+    + [b"\x1b]8;;\x1b", b"\x1b[0m\x1b"],
+)
+def test_keeper_raw_scrape_waits_on_an_escape_a_read_cut_short(tail: bytes) -> None:
+    """A read that ends inside an escape after the id cannot say whether the id goes on."""
+    from clauster import pty_keeper
+
+    data = b"at https://claude.ai/code/session_01COL" + tail
+    assert pty_keeper._scan_connect_url(data, None) is None
+    screen = _fresh_screen()
+    screen.feed(data)
+    assert pty_keeper._scan_connect_url(data, screen) is None
+
+
+def test_keeper_raw_scrape_reads_no_further_than_the_escape_limit() -> None:
+    from clauster import pty_keeper
+
+    # The byte at the limit is inside the OSC, and it is not an id byte: it must not count.
+    osc = b"\x1b]" + b"/" * pty_keeper._ESCAPE_RUN_LIMIT + b"\x07"
+    assert pty_keeper._scan_connect_url(b"at " + _SPLIT_URL.encode() + osc + b"\r\n", None) is None
+
+
+def test_keeper_raw_scrape_reads_a_later_clean_copy() -> None:
+    from clauster import pty_keeper
+
+    data = (
+        b"https://claude.ai/code/session_01COL\x1b[1mOURED\r\nat " + _SPLIT_URL.encode() + b"\r\n"
+    )
+    assert pty_keeper._scan_connect_url(data, None) == _SPLIT_ID
+
+
+# -- TASK-533: a pty bridge whose claude is not logged in ------------------------------
+# A standard bridge exits with "You must be logged in to use Remote Control". The flag form
+# draws its first-run screens instead and waits for a keypress, so the URL timeout used to
+# promote it to `ready` and the card read "Running" forever. These bytes are what claude
+# 2.1.319 drew first with a throwaway HOME and no login: one cursor move per word.
+
+_THEME_PICKER = (
+    b"\x1b7\x1b[r\x1b8\x1b[?25h\x1b[?25l\x1b[?2004h\x1b[?2031h\x1b[?1004h\x1b[38;5;174m"
+    b"Welcome\x1b[9Gto\x1b[12GClaude\x1b[19GCode\x1b[24G\x1b[38;5;246mv2.1.319\x1b[39m"
+    b"\r\r\n\r\r\n\x1b[>0q\x1b[?u\x1b]7501;?\x07\x1b[c\x1b[2GLet's\x1b[8Gget\x1b[12G"
+    b"started.\r\r\n\r\r\n\x1b[2G\x1b[1mChoose\x1b[9Gthe\x1b[13Gtext\x1b[18Gstyle\x1b[24G"
+    b"that\x1b[29Glooks\x1b[35Gbest\x1b[40Gwith\x1b[45Gyour\x1b[50Gterminal\r\r\n"
+)
+# The login menu, as 2.1.319 drew it after the theme picker, here as the first screen.
+_LOGIN_METHOD_MENU = (
+    b"\x1b[38;5;174mWelcome\x1b[9Gto\x1b[12GClaude\x1b[19GCode\r\r\n"
+    b"\r\x1b[1C\x1b[1BSelect login method:\x1b[K\r\x1b[1C\x1b[2B\x1b[38;5;153m\xe2\x9d\xaf"
+    b"\x1b[4G\x1b[38;5;246m1. \x1b[38;5;153mClaude account with subscription \xc2\xb7 "
+)
+# A logged-in `--continue` resume that re-draws an old conversation quoting the theme
+# picker, wrapped by the TUI. The banner, not the first-run welcome, comes first.
+_RESUMED_CONVERSATION_QUOTING_IT = (
+    b"\x1b[38;5;174m\xe2\x95\xad\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80 Claude Code v2.1.319 "
+    b"\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x95\xae\r\n"
+    b'> claude printed "Let\'s get started." and "Choose the text style that looks best with\r\n'
+    b'  your terminal", then "Select login method:" and "Claude account with subscription"\r\n'
+)
+
+
+@pytest.mark.parametrize("output", [_THEME_PICKER, _LOGIN_METHOD_MENU])
+def test_shows_login_screen_reads_the_real_first_run_screens(output: bytes) -> None:
+    from clauster import pty_keeper
+
+    assert pty_keeper._shows_login_screen(output) is True
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        b"Welcome to Claude Code Let's get started.",  # one line of a screen is not the screen
+        b"Welcome to Claude Code Select login method:",
+        _THEME_PICKER[_THEME_PICKER.index(b"\x1b[2GLet's") :],  # not where claude starts
+        _RESUMED_CONVERSATION_QUOTING_IT,
+        b"Welcome to Claude Code " + b"." * 3000 + _THEME_PICKER,  # too far in
+        b"Continue at https://claude.ai/code/session_01ABC\r\n",
+        b"",
+    ],
+)
+def test_shows_login_screen_needs_the_whole_screen_where_claude_starts(output: bytes) -> None:
+    from clauster import pty_keeper
+
+    assert pty_keeper._shows_login_screen(output) is False
+
+
+def test_keeper_drain_fails_closed_at_the_login_screen(tmp_path: Path, capsys) -> None:  # noqa: ANN001
+    """The sidecar goes to `error` naming the login problem, and the timeout never promotes it."""
+    from clauster import pty_keeper
+
+    sidecar = tmp_path / "k.json"
+    base: dict[str, object] = {"state": "starting", "error": None, "note": None}
+    drain = pty_keeper._KeeperDrain(base, sidecar, None, None)
+    cut = _THEME_PICKER.index(b"style")  # inside the second phrase
+    drain.feed(_THEME_PICKER[:cut])
+    assert drain.login_required is False
+    drain.feed(_THEME_PICKER[cut:])
+
+    assert drain.login_required is True
+    assert _read(sidecar)["state"] == "error"
+    assert _read(sidecar)["error"] == pty_keeper._LOGIN_SCREEN_ERROR
+    assert "not logged in" in pty_keeper._LOGIN_SCREEN_ERROR
+
+    # Later output is not scanned again: one report, and a URL cannot undo the error.
+    drain.feed(_THEME_PICKER)
+    drain.feed(_SPLIT_RAW)
+    assert capsys.readouterr().err.count("first-run login screen") == 1  # to <sidecar>.log
+    assert _read(sidecar)["state"] == "error"
+    assert _read(sidecar).get("connect_url") is None
+
+    drain._deadline = time.monotonic() - 1
+    drain.tick()
+    assert _read(sidecar)["state"] == "error"  # NOT promoted to ready at the URL timeout
+    assert _read(sidecar)["note"] is None
+
+
+def test_keeper_drain_waits_before_the_login_stop_is_due(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    """The bridge is stopped only after the delay that lets the runner read the live error."""
+    from clauster import pty_keeper
+
+    drain = pty_keeper._KeeperDrain({"state": "starting"}, tmp_path / "k.json", None, None)
+    assert drain.login_stop_due() is False  # nothing seen yet
+    drain.feed(_THEME_PICKER)
+    assert drain.login_stop_due() is False  # seen, but the delay has not passed
+    monkeypatch.setattr(pty_keeper, "_LOGIN_STOP_DELAY", 0.0)
+    assert drain.login_stop_due() is True
+
+
+def test_keeper_drain_ignores_login_text_past_the_first_output(tmp_path: Path) -> None:
+    """Text that arrives after the window is a conversation, not the first-run screen."""
+    from clauster import pty_keeper
+
+    sidecar = tmp_path / "k.json"
+    base: dict[str, object] = {"state": "starting", "error": None, "note": None}
+    drain = pty_keeper._KeeperDrain(base, sidecar, None, None)
+    drain.feed(b"x" * pty_keeper._LOGIN_SCREEN_WINDOW)
+    drain.feed(_THEME_PICKER)
+    assert drain.login_required is False
+    drain._deadline = time.monotonic() - 1
+    drain.tick()
+    assert _read(sidecar)["state"] == "ready"
+
+
+def test_keeper_drain_ignores_login_text_once_the_url_was_found(tmp_path: Path) -> None:
+    from clauster import pty_keeper
+
+    sidecar = tmp_path / "k.json"
+    base: dict[str, object] = {"state": "starting", "error": None, "note": None}
+    drain = pty_keeper._KeeperDrain(base, sidecar, None, None)
+    drain.feed(_SPLIT_RAW)
+    drain.feed(_THEME_PICKER)
+    assert drain.login_required is False
+    assert _read(sidecar)["state"] == "ready"
+    assert _read(sidecar)["error"] is None
+
+
+def _login_screen_bridge(tmp_path: Path, *, ignore_sigterm: bool) -> list[str]:
+    """A fake flag-form bridge that draws the theme picker and waits for a keypress."""
+    script = tmp_path / "login_bridge.py"
+    script.write_text(
+        "import signal, sys, time\n"
+        + ("signal.signal(signal.SIGTERM, signal.SIG_IGN)\n" if ignore_sigterm else "")
+        + f"sys.stdout.buffer.write({_THEME_PICKER!r})\n"
+        "sys.stdout.flush()\n"
+        "time.sleep(60)\n"
+    )
+    return [sys.executable, str(script)]
+
+
+def test_run_keeper_stops_a_bridge_held_at_the_login_screen(
+    tmp_path: Path, monkeypatch, _restore_sighup
+) -> None:  # noqa: ANN001
+    """The keeper stops the bridge (it cannot get past the screen) and keeps the reason."""
+    from clauster import pty_keeper
+
+    monkeypatch.setattr(pty_keeper, "_LOGIN_STOP_DELAY", 1.0)
+    sidecar = tmp_path / "k.json"
+    started = time.monotonic()
+    rc = pty_keeper.run_keeper(
+        _login_screen_bridge(tmp_path, ignore_sigterm=False), sidecar, cwd=str(tmp_path)
+    )
+    elapsed = time.monotonic() - started
+    assert elapsed >= 1.0  # not before the delay that lets the runner read the live error
+    assert elapsed < 30  # stopped, not waited out
+    assert rc == -signal.SIGTERM
+    info = _read(sidecar)
+    assert info["state"] == "exited"
+    assert info["error"] == pty_keeper._LOGIN_SCREEN_ERROR  # survives the terminal write
+    assert info["connect_url"] is None
+
+
+def test_run_keeper_kills_a_login_screen_bridge_that_ignores_sigterm(
+    tmp_path: Path, monkeypatch, _restore_sighup
+) -> None:  # noqa: ANN001
+    from clauster import pty_keeper
+
+    monkeypatch.setattr(pty_keeper, "_LOGIN_STOP_DELAY", 0.0)
+    monkeypatch.setattr(pty_keeper, "_LOGIN_STOP_GRACE", 0.3)
+    sidecar = tmp_path / "k.json"
+    rc = pty_keeper.run_keeper(
+        _login_screen_bridge(tmp_path, ignore_sigterm=True), sidecar, cwd=str(tmp_path)
+    )
+    assert rc == -signal.SIGKILL
+    assert _read(sidecar)["error"] == pty_keeper._LOGIN_SCREEN_ERROR
+
+
+def test_run_keeper_conpty_stops_a_bridge_held_at_the_login_screen(
+    tmp_path: Path, monkeypatch
+) -> None:  # noqa: ANN001
+    from clauster import pty_keeper
+
+    monkeypatch.setattr(pty_keeper, "_LOGIN_STOP_DELAY", 0.0)
+    fake = _fake_conpty(chunks=[_THEME_PICKER.decode(), "redraw\r\n"], exit_code=1)
+    monkeypatch.setattr(pty_keeper, "_load_pty_process", lambda: fake)
+    sidecar = tmp_path / "b.keeper.json"
+    pty_keeper._run_keeper_conpty(["claude", "--remote-control"], sidecar, None, None)
+
+    assert fake.calls.count({"terminated": True}) == 1  # once, not once per later chunk
+    assert {"forced": True} in fake.calls  # past pywinpty's first signal if it must
+    data = _read(sidecar)
+    assert data["state"] == "exited"
+    assert data["error"] == pty_keeper._LOGIN_SCREEN_ERROR
+
+
+def test_run_keeper_conpty_reports_a_login_stop_that_failed(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:  # noqa: ANN001
+    from clauster import pty_keeper
+
+    monkeypatch.setattr(pty_keeper, "_LOGIN_STOP_DELAY", 0.0)
+    fake = _fake_conpty(
+        chunks=[_THEME_PICKER.decode(), "redraw\r\n"],
+        terminate_error=_FakeWinptyError("access denied"),
+    )
+    monkeypatch.setattr(pty_keeper, "_load_pty_process", lambda: fake)
+    sidecar = tmp_path / "b.keeper.json"
+    pty_keeper._run_keeper_conpty(["claude", "--remote-control"], sidecar, None, None)
+
+    assert "could not stop the bridge held at the login screen" in capsys.readouterr().err
+    assert _read(sidecar)["error"] == pty_keeper._LOGIN_SCREEN_ERROR
+
+
+def test_run_keeper_on_windows_never_restamps_an_unpack_dir(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    """The unpack-dir re-stamp is POSIX-only (PR 1853 review).
+
+    A frozen Windows keeper still runs from the server's own unpack dir, so a re-stamp there
+    would touch a directory it does not own. ``run_keeper`` returns into the ConPTY backend
+    before the guard is built, and this pins that.
+    """
+    from clauster import frozen_bundle, pty_keeper
+
+    built: list = []
+    monkeypatch.setattr(pty_keeper.sys, "platform", "win32")
+    monkeypatch.setattr(frozen_bundle, "unpack_dir", lambda: tmp_path)
+    monkeypatch.setattr(frozen_bundle, "REFRESH_INTERVAL_SECONDS", 0.0)
+    monkeypatch.setattr(
+        frozen_bundle.BundleGuard, "__init__", lambda self, root: built.append(root)
+    )
+    fake = _fake_conpty(chunks=["no url\r\n", "more\r\n"], exit_code=0)
+    monkeypatch.setattr(pty_keeper, "_load_pty_process", lambda: fake)
+    assert pty_keeper.run_keeper(["claude"], tmp_path / "b.keeper.json", cwd=str(tmp_path)) == 0
+    assert built == []

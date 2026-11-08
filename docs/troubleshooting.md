@@ -412,14 +412,25 @@ the operator's login`` or ``logged out (no access token in ...) — re-run
 ``access token has expired; re-authenticate with `claude` `` or
 `no claudeAiOauth.accessToken in ...`.
 
+A bridge that starts without a login fails at once. A standard bridge card shows
+`Error: You must be logged in to use Remote Control.` An Interactive Session card
+shows "Session failed to start" with
+``claude is not logged in on this host, or its first-run setup is not finished``.
+For an Interactive Session, `claude` does not exit. It opens its first-run screens
+and waits for a keypress. The keeper reads those screens at the start of the
+session output, records the error, and stops the bridge about 5 seconds later.
+`claude` can also show these screens when its first-run setup was never finished
+on the host. In both cases, run `claude` interactively once as the service user.
+
 **Most likely cause:** the account that runs Clauster has no usable `claude`
-credentials. Bridges inherit the *operator's* login, so a bridge can spawn
-and then hang unauthenticated.
+credentials. Bridges inherit the *operator's* login, so a bridge cannot connect
+without one.
 
 **The fix:** run `claude` interactively **as the service user** and complete
 login, or use the dashboard login flow
 ([`login_shepherd`](reference/config.md#login_shepherd-dashboard-driven-claude-account-login-loginshepherdconfig)).
-An `ANTHROPIC_API_KEY` in the service environment also satisfies the check.
+An `ANTHROPIC_API_KEY` in the service environment also satisfies the `doctor`
+check.
 
 ### "a login flow is already in progress; cancel it first"
 
@@ -799,7 +810,7 @@ present in every run:
 | --- | --- | --- |
 | `config` | `clauster.yml` found and valid | `no config found: ...` / `config unreadable: ...` / `config is not valid YAML ...` / `invalid config: ...` (the "no config found" section above breaks these down) |
 | `claude` | binary found, version ≥ `min_version` | not on PATH, too old, or a version that cannot be compared — see above |
-| `claude-login` | usable `claude` credentials | not logged in — bridges will spawn then hang |
+| `claude-login` | usable `claude` credentials | not logged in — bridges fail to start |
 | `projects_root` | the directory exists | wrong path in config |
 | `git` | `git` on PATH | create/clone features unavailable |
 | `state_dir` | writable | permissions — see above |
