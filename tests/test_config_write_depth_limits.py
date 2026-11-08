@@ -120,6 +120,16 @@ def test_the_refusal_stops_the_scan_at_the_cap(monkeypatch: pytest.MonkeyPatch) 
     assert work[0] < 10_000  # unbounded: about 400 x 2000 keys walked for this header
 
 
+@pytest.mark.parametrize("parse", _parsers())
+def test_deep_block_nesting_is_not_capped_but_still_fails_closed(parse) -> None:
+    # Block nesting costs the scanner nothing per level, so the cap leaves it alone. Past
+    # the recursion limit, the composer's RecursionError is still a refusal, never a 500.
+    parse("---\nname: a\ndescription: d\nk:\n" + "- " * (MAX + 10) + "x\n---\nb\n")
+    deep = "---\nname: a\ndescription: d\nk:\n" + "- " * 5_000 + "x\n---\nb\n"
+    with pytest.raises(cw.InvalidCandidateError, match="nested too deeply to parse"):
+        parse(deep)
+
+
 def test_a_syntax_error_ends_the_depth_scan_and_the_parse_reports_it() -> None:
     with pytest.raises(cw.InvalidCandidateError, match="is not valid YAML"):
         cw.load_frontmatter_yaml("k: 'unclosed\n" + _flow(5_000), what="fm", line_offset=1)
