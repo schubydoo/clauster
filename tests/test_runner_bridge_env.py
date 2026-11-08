@@ -124,27 +124,33 @@ def test_frozen_standard_bridge_drops_a_bundle_only_library_path(
 def test_frozen_operator_library_path_reaches_both_bridge_kinds(
     runner_config, monkeypatch, tmp_path
 ):
-    # claude.env wins on both paths: directly for the standard bridge, and via the
-    # keeper's *_ORIG (what its own child_env restores) for the pty bridge.
+    # claude.env wins on both paths: directly for the standard bridge, and for the pty
+    # bridge through the keeper's launch env, which the keeper's own bootloader saves in
+    # *_ORIG and its child_env restores for the bridge (TASK-503).
     _frozen_linux_bundle(monkeypatch, user_ld="/opt/lib")
     runner = _runner_with_env(runner_config, env={"LD_LIBRARY_PATH": "/operator/lib"})
     assert _capture_env("popen", runner, monkeypatch, tmp_path)["LD_LIBRARY_PATH"] == (
         "/operator/lib"
     )
     keeper = _capture_env("keeper", runner, monkeypatch, tmp_path)
-    assert keeper["LD_LIBRARY_PATH_ORIG"] == "/operator/lib"
+    assert keeper["LD_LIBRARY_PATH"] == "/operator/lib"
+    assert "LD_LIBRARY_PATH_ORIG" not in keeper
 
 
-def test_frozen_keeper_launch_stays_inside_this_bundle(runner_config, monkeypatch, tmp_path):
-    # The keeper is `<exe> __pty-keeper__`: it keeps this bundle's runtime so it runs as one
-    # process whose pid is the one the runner records; its OWN child_env cleans the bridge.
+def test_frozen_keeper_launch_is_a_fresh_one_file_instance(runner_config, monkeypatch, tmp_path):
+    # TASK-503: the keeper is `<exe> __pty-keeper__` launched WITHOUT this bundle's runtime, so
+    # its bootloader unpacks a copy of its own and the keeper outlives this server's unpack
+    # dir. Windows keeps the one-process form (procutil.keeper_launch_env).
     _frozen_linux_bundle(monkeypatch, user_ld="/opt/lib")
     monkeypatch.setenv("CLAUSTER_SESSION_SECRET", "must-not-leak")
     env = _capture_env("keeper", _runner_with_env(runner_config), monkeypatch, tmp_path)
     assert env is not None
-    assert env["_PYI_APPLICATION_HOME_DIR"] == _MEI
-    assert env["LD_LIBRARY_PATH"] == f"{_MEI}:/opt/lib"
-    assert env["LD_LIBRARY_PATH_ORIG"] == "/opt/lib"
+    if sys.platform == "win32":
+        assert env["_PYI_APPLICATION_HOME_DIR"] == _MEI
+    else:
+        assert not [name for name in env if name.startswith("_PYI_")]
+    assert env["LD_LIBRARY_PATH"] == "/opt/lib"
+    assert "LD_LIBRARY_PATH_ORIG" not in env
     assert "CLAUSTER_SESSION_SECRET" not in env
 
 

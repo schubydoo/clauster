@@ -1058,8 +1058,9 @@ def _bundle_env_suspects(config: ClausterConfig, projects: list[Project]) -> lis
     background agents (from Claude Code's roster), and the claustrum daemon (by its
     ``-socket`` argument), which every hosted session inherits its environment from. Each
     pid must pass the identity gate its owner uses, so a recycled pid is not reported. A
-    pty KEEPER is deliberately not listed: a current keeper keeps the bundle's runtime on
-    purpose (``procutil.keeper_launch_env``), and what reaches the session is its bridge's
+    pty KEEPER is deliberately not listed: a current keeper in the binary always carries a
+    bundle runtime, its own one-file instance's or (Windows) the server's
+    (``procutil.keeper_launch_env``), and what reaches the session is its bridge's
     environment.
     """
     from . import pointers, pty_keeper, supervisor  # local: keeps ops' import graph as it was

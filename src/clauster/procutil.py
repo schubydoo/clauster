@@ -681,6 +681,31 @@ def is_keeper_process(pid: int) -> bool:
         return False
 
 
+def is_keeper_child_of(pid: int, parent_pid: int) -> bool:
+    """Whether ``pid`` is a live, non-zombie keeper whose parent process is ``parent_pid``.
+
+    The gate for adopting the pid a frozen keeper writes to its sidecar in place of the
+    ``Popen.pid`` of its launch (:func:`keeper_launch_env`): the launch is a one-file
+    bootloader, and the keeper is the bootloader's Python child. The sidecar is a file on
+    disk and the adopted pid reaches a tree kill, so a cmdline match alone is not enough.
+    The caller asks only while the bootloader is unreaped, so its pid is not reused, and
+    the only process that names it as parent is the one child it started: a keeper whose
+    bootloader dies is reparented, and its parent pid never comes back.
+
+    Fails closed on gone / denied / zombie / negative pid, as :func:`is_keeper_process`
+    does, and for the same reasons.
+    """
+    try:
+        proc = psutil.Process(pid)
+        if proc.status() == psutil.STATUS_ZOMBIE or proc.ppid() != parent_pid:
+            return False
+        return is_keeper_cmdline(proc.cmdline())
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, ValueError):
+        return False
+    except RuntimeError:
+        return False
+
+
 def is_live_keeper(
     pid: int,
     proc_start: str | float | None,
@@ -1199,39 +1224,36 @@ def child_env(extra: dict[str, str] | None = None) -> dict[str, str]:
 def keeper_launch_env(extra: dict[str, str] | None = None) -> dict[str, str]:
     """Return the environment for launching the PTY keeper (:data:`KEEPER_SUBCOMMAND`).
 
-    Off the standalone binary this is exactly :func:`child_env`. In the binary the
-    keeper is ``<exe> __pty-keeper__``, and it keeps THIS bundle's PyInstaller state so
-    its bootloader runs it as a sub-process of the bundle: one process, whose pid is the
-    one the runner records and the keeper writes to its sidecar. A fresh top-level
-    instance would be two processes (the bootloader that unpacks a second bundle, and
-    the Python child), and the runner's pid bookkeeping assumes one.
+    This is exactly :func:`child_env`, except for the standalone binary on Windows. In
+    the binary the keeper is ``<exe> __pty-keeper__``. Without this bundle's ``_PYI_*``
+    state its bootloader starts it as a FRESH one-file instance, which is two processes:
+    the bootloader, which unpacks its own copy of the bundle and waits, and the Python
+    child that runs the keeper. So the keeper runs out of its OWN unpack directory, which
+    lives as long as the keeper does. It no longer runs out of the launching server's,
+    which that server's bootloader deletes when the server exits while the keeper lives
+    on, so a C extension the keeper imported first after a restart failed (TASK-503).
 
-    The keeper's own spawn of the bridge goes through :func:`child_env`, which restores
-    the library path from ``*_ORIG``. So ``*_ORIG`` here carries the value the BRIDGE
-    must get — the user's own, or the operator's ``claude.env`` override — while the
-    keeper itself runs with the bundle-first library path it inherited.
+    The two pids differ: ``Popen.pid`` is the bootloader, and the keeper writes the
+    Python child's pid to its sidecar. Rediscovery, the sidecar sweep and the stop paths
+    all name a keeper by that sidecar pid, so the runner records it too, once it has
+    verified that the pid is the bootloader's own child
+    (:func:`is_keeper_child_of`, used by ``SpawnCoordinator._adopt_keeper_identity``).
+    Only the bootloader is this process's child to reap; the stop paths never signal it.
+    It exits by itself, and deletes its unpack directory, once its keeper is gone.
 
-    ⚠️ Consequence: the frozen keeper runs out of THIS server's unpack directory, which
-    the server's bootloader deletes when the server exits — and the keeper outlives it.
-    Modules it already imported keep working, and pure-Python modules still load from
-    the archive inside the executable, but a C extension imported for the first time
-    after a restart fails. So the keeper must import everything it needs at startup.
-    (This was already true before issue 1708: the keeper inherited the same state.)
+    Windows keeps the one-process form, where the keeper inherits THIS bundle's
+    ``_PYI_*`` state and runs as a sub-process of it. A detached two-process keeper has
+    not been measured there (how the bootloader's child gets a console, and its job
+    object). So on Windows the keeper still runs out of the server's unpack directory,
+    and it must import every module it needs at startup. Windows sets no library-path
+    variable (:func:`_bundle_library_path_var`), so the ``_PYI_*`` state is all it keeps.
+    An operator-set reset flag is dropped, because it would make that keeper two processes.
     """
     env = child_env(extra)
-    if not deps.is_frozen():
+    if not (deps.is_frozen() and sys.platform == "win32"):
         return env
     env.update({k: v for k, v in os.environ.items() if k.startswith(PYI_ENV_PREFIX)})
-    # An operator-set reset flag would make the keeper a fresh two-process instance.
     env.pop(_PYI_RESET_ENV, None)
-    var = _bundle_library_path_var()
-    if var is None:
-        return env
-    for_bridge = env.pop(var, None)
-    if var in os.environ:
-        env[var] = os.environ[var]
-    if for_bridge is not None:
-        env[f"{var}_ORIG"] = for_bridge
     return env
 
 

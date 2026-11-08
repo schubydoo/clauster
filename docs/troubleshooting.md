@@ -506,9 +506,10 @@ No output means that the process is clean:
 tr '\0' '\n' < /proc/<pid>/environ | grep -E '^(LD_LIBRARY_PATH=(.*:)?[^:]*/_MEI|_PYI_)'
 ```
 
-Do not run this check on a pty keeper's own pid. A current keeper keeps these
-variables on purpose, and it removes them from the bridge that it starts. Check
-the bridge pid instead.
+Do not run this check on a pty keeper's own pid. In the binary, a current keeper
+always has these variables: on Linux and macOS it runs as its own copy of the
+binary, with its own `_MEI…` directory. It removes them from the bridge that it
+starts. Check the bridge pid instead.
 
 ## An Interactive Session (pty) bridge is wedged
 

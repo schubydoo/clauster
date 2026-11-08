@@ -244,10 +244,21 @@ class PollLoop:
         stamped = False
         for instance in list(self._registry._instances.values()):
             pid = instance.bridge_pid
-            # A pty keeper is Clauster's direct child and self-exits with its bridge;
-            # reap it here so it never lingers as a zombie after an organic exit.
+            # A pty keeper self-exits with its bridge, and Clauster's direct child (the
+            # keeper itself, or a frozen keeper's bootloader) follows it; reap it here so
+            # it never lingers as a zombie after an organic exit.
             if instance.keeper_pid is not None:
                 await asyncio.to_thread(procutil.reap_if_exited, instance.keeper_pid)
+                # A frozen keeper is a one-file instance (TASK-503): the row records the
+                # keeper itself, and the direct child is its bootloader, which exits after
+                # it. Reap that through its Popen, which also records the exit.
+                launcher = self._registry._procs.get(instance.instance_id)
+                if (
+                    launcher is not None
+                    and launcher.pid != instance.keeper_pid
+                    and launcher.returncode is None
+                ):
+                    await asyncio.to_thread(launcher.poll)
             if pid is None:
                 continue
             await asyncio.to_thread(procutil.reap_if_exited, pid)

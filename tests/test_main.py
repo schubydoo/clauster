@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import subprocess
 import sys
 import types
 from pathlib import Path
@@ -997,13 +998,40 @@ def test_import_without_setproctitle_degrades_to_noop(projects_root, monkeypatch
     monkeypatch.setitem(sys.modules, "setproctitle", None)
     try:
         importlib.reload(cli)
-        assert cli._setproctitle is None
-        # A title WOULD be produced (instance_name set), so this exercises the
-        # `_setproctitle is not None` guard being False, not the empty-title path.
+        # A title WOULD be produced (instance_name set), so this exercises the lazy
+        # import failing and the `module is not None` guard, not the empty-title path.
         cli._set_process_title(ClausterConfig(projects_root=projects_root, instance_name="dev"))
+        assert cli._setproctitle is None
     finally:
         monkeypatch.undo()
         importlib.reload(cli)
+
+
+def test_importing_the_cli_and_keeper_does_not_import_setproctitle():
+    # TASK-503: on macOS `import setproctitle` alone rewrites the process's argv into one
+    # space-joined string, and the frozen pty keeper is dispatched from clauster.__main__.
+    # A rewritten keeper argv fails `procutil.is_keeper_cmdline`, so the runner could not
+    # adopt, reattach or stop it. A fresh interpreter, so earlier imports cannot hide it.
+    code = (
+        "import sys, clauster.__main__, clauster.pty_keeper; print('setproctitle' in sys.modules)"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, timeout=120, check=True
+    )
+    assert result.stdout.strip() == "False", result.stderr
+
+
+def test_load_setproctitle_imports_once_and_only_when_asked(monkeypatch):
+    monkeypatch.setattr(cli, "_setproctitle", cli._SETPROCTITLE_UNLOADED)
+    first = cli._load_setproctitle()
+    assert first is sys.modules["setproctitle"]
+    assert cli._load_setproctitle() is first
+
+
+def test_set_process_title_without_a_title_does_not_load_setproctitle(projects_root, monkeypatch):
+    monkeypatch.setattr(cli, "_setproctitle", cli._SETPROCTITLE_UNLOADED)
+    cli._set_process_title(ClausterConfig(projects_root=projects_root))
+    assert cli._setproctitle is cli._SETPROCTITLE_UNLOADED
 
 
 def test_api_token_list_db_error_exits_1_not_empty(write_config, tmp_path, capsys, monkeypatch):

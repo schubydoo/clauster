@@ -44,7 +44,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import deps, procutil, redact
+from . import deps, frozen_bundle, procutil, redact
 
 # pty_screen is first-party and always importable (it lazy-imports the optional `pyte`
 # itself, only when a PtyScreen is actually constructed), so importing it here never pulls
@@ -849,6 +849,11 @@ def run_keeper(
     # hand it to the drain; between reads, let the drain throttle the live view + time out the
     # URL scrape.
     drain = _KeeperDrain(base, sidecar, screen, screen_sidecar)
+    # In the binary the keeper is a one-file instance of its own (TASK-503), so it keeps its
+    # OWN unpack dir out of an age-based temp cleanup, as the server does for its dir (#1663).
+    # Inert off the binary, which unpacks nothing.
+    bundle_guard = frozen_bundle.BundleGuard(frozen_bundle.unpack_dir())
+    next_stamp = time.monotonic() + frozen_bundle.REFRESH_INTERVAL_SECONDS
     while proc.poll() is None:
         try:
             if poller.poll(500):  # ms; truthy when the master fd has data (no FD_SETSIZE limit)
@@ -858,6 +863,9 @@ def run_keeper(
         except (OSError, BlockingIOError):
             time.sleep(0.2)
         drain.tick()
+        if bundle_guard.root is not None and time.monotonic() >= next_stamp:
+            bundle_guard.refresh()
+            next_stamp = time.monotonic() + frozen_bundle.REFRESH_INTERVAL_SECONDS
 
     rc = proc.poll() or 0
     drain.finish(rc)
@@ -871,9 +879,11 @@ def run_keeper(
 def main(argv: list[str] | None = None) -> int:
     """CLI entrypoint: ``python -m clauster.pty_keeper --sidecar P -- <bridge argv>``.
 
-    In the standalone binary the keeper runs out of the launching server's unpack
-    directory, which is deleted when that server exits: import every module the keeper
-    needs at startup, never lazily (see :func:`clauster.procutil.keeper_launch_env`).
+    In the standalone binary on POSIX the keeper is a one-file instance of its own, with
+    its own unpack directory, so a module it first imports after a Clauster restart still
+    loads. On Windows it still runs out of the launching server's unpack directory, which
+    is deleted when that server exits: there, import every module the keeper needs at
+    startup, never lazily (see :func:`clauster.procutil.keeper_launch_env`).
     """
     parser = argparse.ArgumentParser(prog="clauster.pty_keeper", description=__doc__)
     parser.add_argument("--sidecar", required=True, type=Path, help="JSON discovery file to write")

@@ -65,7 +65,9 @@ import asyncio
 import logging
 import os
 import subprocess
+import sys
 import time
+import weakref
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -109,6 +111,9 @@ _POISON_GRACE = 4.0
 # Cadence at which the post-spawn startup-watch re-reads the bridge log to detect
 # a (late) environment registration or a stuck-but-alive bridge.
 _STARTUP_WATCH_INTERVAL = 2.0
+# Whether a pty launch may adopt the keeper pid its sidecar names (TASK-503). Off on Windows,
+# where the frozen keeper stays one process and a two-process launch is unmeasured.
+_ADOPT_KEEPER_CHILD = sys.platform != "win32"
 
 
 class SpawnCoordinator:
@@ -197,6 +202,10 @@ class SpawnCoordinator:
         self._rc_setting_ensured = False
         # Install the resume-recap SessionStart hook once, before the first spawn.
         self._recap_hook_ensured = False
+        # Keeper launches whose sidecar pid failed the adoption gate (TASK-503): the refusal
+        # is logged once, and the startup watch does not re-ask on every tick. Keyed by the
+        # Popen itself, never by its pid, which a later launch can reuse once it is reaped.
+        self._keeper_adoption_refused: weakref.WeakSet[subprocess.Popen] = weakref.WeakSet()
 
     async def spawn(
         self,
@@ -971,6 +980,115 @@ class SpawnCoordinator:
             time.sleep(_READY_POLL_INTERVAL)  # pragma: skip-on-win
         return info  # pragma: skip-on-win
 
+    @classmethod
+    def _keeper_failure_detail(cls, sidecar: Path, info: dict) -> str | None:
+        """Return the redacted, bounded reason a pty keeper failed, for ``error_detail``.
+
+        The sidecar's own ``error`` when the keeper wrote one (an openpty or spawn failure).
+        With no sidecar at all, the keeper died before its first write: in the binary that
+        includes a bootloader that could not unpack its own copy (a full temp dir,
+        TASK-503), which reports only to the keeper's own log, so its tail is used.
+
+        Redacted and bounded exactly as ``_capture_error_detail`` does for the other
+        ``error_detail`` writer (invariant 4): the field is rendered inline on the card, and
+        both sources are text no redactor has seen (the keeper interpolates arbitrary
+        exception text into its ``error``, #1389).
+        """
+        reason = info.get("error") if info else cls._keeper_log_tail(sidecar)
+        return redact.redact_for_disk(reason)[-2000:] if isinstance(reason, str) else None
+
+    @staticmethod
+    def _keeper_log_tail(sidecar: Path) -> str | None:
+        """Return the end of the keeper's own stdout/stderr log, or ``None`` when it is empty.
+
+        The log is ``<sidecar>.log`` (``BridgeLaunch._popen_keeper``). The caller redacts
+        and bounds it before it reaches the card, as for every ``error_detail``.
+        """
+        try:
+            with sidecar.with_suffix(".log").open("rb") as fh:
+                fh.seek(0, os.SEEK_END)
+                start = max(0, fh.tell() - 8192)
+                fh.seek(start)
+                raw = fh.read()
+        except OSError:
+            return None
+        if start:
+            # A window that begins mid-line could begin mid-secret, where the anchored
+            # redaction patterns would miss it: keep whole lines only.
+            raw = raw.partition(b"\n")[2]
+        text = raw.decode("utf-8", errors="replace").strip()
+        return text or None
+
+    @staticmethod
+    def _keeper_identity_from_sidecar(
+        info: dict, launcher_pid: int
+    ) -> tuple[int, float | None, int | None] | bool:
+        """Return the keeper's own ``(pid, proc_start, start_ticks)`` when it is not the launch.
+
+        A frozen keeper on POSIX is a fresh one-file instance (TASK-503,
+        :func:`procutil.keeper_launch_env`): ``launcher_pid`` is its bootloader, and the
+        keeper that holds the PTY is the bootloader's Python child, which writes its own
+        pid to the sidecar. ``True`` when there is nothing to change (no sidecar pid yet, or
+        it IS the launch, as for a source install); ``False`` when the pid fails the gate.
+
+        The gate (:func:`procutil.is_keeper_child_of`) runs on both sides of the one
+        :func:`procutil.proc_start_pair` read. The sidecar is a file on disk and this pid
+        reaches ``_cleanup_keeper``'s tree kill, so it must be the bootloader's own keeper
+        child. Checking again after the read fences the pair: a keeper that exited, and a
+        pid the OS recycled, between the first check and the read would no longer name the
+        bootloader as its parent.
+        """
+        pid = _row_int(info.get("keeper_pid"))
+        if pid is None or pid == launcher_pid:
+            return True
+        if not procutil.is_keeper_child_of(pid, launcher_pid):
+            return False
+        created, ticks = procutil.proc_start_pair(pid)
+        if not procutil.is_keeper_child_of(pid, launcher_pid):
+            return False
+        return pid, created, ticks
+
+    async def _adopt_keeper_identity(
+        self, instance: RemoteControlInstance, info: dict, proc: subprocess.Popen
+    ) -> None:
+        """Record the keeper's own pid and start pair in place of the launch's (TASK-503).
+
+        Rediscovery, the sidecar sweep (``keeper_pid in held_keepers``) and the stop paths
+        all identify a keeper by the pid in its sidecar, so the row must carry that pid. The
+        three fields are replaced together, never one alone (the trio rule of
+        ``Rediscovery._recover_keeper_identity``). The ``Popen`` stays in ``_procs``: the
+        bootloader is this process's child, and the poll loop, or ``stop()``, reaps it
+        through that handle.
+
+        Asked only while the launch is unreaped, so its pid cannot have been reused, and
+        only off Windows: the frozen keeper there stays one process
+        (:func:`procutil.keeper_launch_env`), and a two-process launch there is unmeasured.
+        A refusal keeps the launch pid, which the stop paths still wind down (the
+        bootloader carries the keeper's command line), and is logged once per launch.
+        """
+        if (
+            not _ADOPT_KEEPER_CHILD
+            or instance.keeper_pid is None
+            or instance.keeper_pid != proc.pid  # already adopted, or not this launch's row
+            or proc in self._keeper_adoption_refused
+            or proc.poll() is not None  # the launch is gone: no live keeper to adopt
+        ):
+            return
+        found = await asyncio.to_thread(self._keeper_identity_from_sidecar, info, proc.pid)
+        if found is True or instance.keeper_pid != proc.pid:
+            return  # nothing to adopt, or the row moved on to another launch meanwhile
+        if found is False:
+            self._keeper_adoption_refused.add(proc)
+            _log.warning(
+                "keeper sidecar of %s names pid %r, which is not the keeper child of launch "
+                "pid %s; keeping the launch pid",
+                instance.project,
+                info.get("keeper_pid"),
+                proc.pid,
+            )
+            return
+        instance.keeper_pid, instance.keeper_proc_start, instance.keeper_start_ticks = found
+
     def _apply_pty_info(
         self, instance: RemoteControlInstance, info: dict, proc: subprocess.Popen
     ) -> None:
@@ -1083,22 +1201,15 @@ class SpawnCoordinator:
             procutil.proc_start_pair, proc.pid
         )
         info = await asyncio.to_thread(self._await_ready_pty, sidecar, proc)
+        await self._adopt_keeper_identity(instance, info, proc)
         self._apply_pty_info(instance, info, proc)
         await asyncio.to_thread(self._flush_redacted_mirror, instance)
         if instance.status is InstanceStatus.ERROR:
-            # Surface whatever the keeper recorded (openpty/spawn failure); the
-            # bridge's own failure reason, if any, is in its --debug-file on disk.
-            #
-            # Redact + bound it exactly as `_capture_error_detail` does for the other
-            # error_detail writer (invariant 4): this field is rendered inline on the
-            # dashboard card, and the keeper interpolates arbitrary exception text into
-            # it (`pty_keeper`'s conpty read/liveness/wait/abort reasons, #1389) — text
-            # that has passed through no redactor on its way here.
-            keeper_error = info.get("error")
-            instance.error_detail = (
-                redact.redact_for_disk(keeper_error)[-2000:]
-                if isinstance(keeper_error, str)
-                else None
+            # Surface whatever the keeper recorded (openpty/spawn failure, or its own log
+            # when it died before any sidecar), redacted and bounded; the bridge's own
+            # failure reason, if any, is in its --debug-file on disk.
+            instance.error_detail = await asyncio.to_thread(
+                self._keeper_failure_detail, sidecar, info
             )
         await self._registry._persist()
         if instance.status is InstanceStatus.STARTING:
@@ -1225,6 +1336,19 @@ class SpawnCoordinator:
                 return  # already resolved, stopped, or gone
             if proc.poll() is not None:  # exited during startup
                 self._reconcile_status(instance, False)
+                log_path = instance.bridge_debug_log_path
+                if (  # pragma: skip-on-win — pty-mode (pywinpty-gated)
+                    instance.resume_mode == "pty"
+                    and log_path is not None
+                    and instance.error_detail is None
+                ):
+                    # A bootloader unpack that outlasts the readiness wait can still fail
+                    # before the keeper's first sidecar write (TASK-503): say why here too.
+                    sidecar = self._sidecar_path_for(log_path)
+                    info = await asyncio.to_thread(self._read_sidecar, sidecar) or {}
+                    instance.error_detail = await asyncio.to_thread(
+                        self._keeper_failure_detail, sidecar, info
+                    )
                 await self._registry._persist()
                 return
             log_path = instance.bridge_debug_log_path
@@ -1235,12 +1359,20 @@ class SpawnCoordinator:
                 # bridge-log markers; readiness is the connect URL appearing there.
                 sidecar = self._sidecar_path_for(log_path)
                 info = await asyncio.to_thread(self._read_sidecar, sidecar)
+                await self._adopt_keeper_identity(instance, info or {}, proc)
                 self._apply_pty_info(instance, info or {}, proc)
                 # Keep the at-rest mirror current during pty startup too: poll_once
                 # can't yet (bridge_pid is still unknown until the sidecar reveals it),
                 # so without this the public log would stale out after _spawn_pty's
                 # one-time flush if the bridge logs more before registering.
                 await asyncio.to_thread(self._flush_redacted_mirror, instance)
+                if instance.status is InstanceStatus.ERROR and instance.error_detail is None:
+                    # A late keeper error (its sidecar says so while a frozen launch's
+                    # bootloader still runs, deleting its unpack dir): keep the reason, as
+                    # `_spawn_pty` does, because this watch never looks at the row again.
+                    instance.error_detail = await asyncio.to_thread(
+                        self._keeper_failure_detail, sidecar, info or {}
+                    )
                 if instance.status is not InstanceStatus.STARTING:
                     await self._registry._persist()
                     return

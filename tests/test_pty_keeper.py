@@ -184,6 +184,45 @@ def test_run_keeper_records_the_worktree_name(tmp_path: Path, _restore_sighup) -
     assert _read(sidecar)["worktree_name"] == "clauster-0a1b2c3d"
 
 
+def test_run_keeper_keeps_its_own_unpack_dir_fresh(
+    tmp_path: Path, _restore_sighup, monkeypatch
+) -> None:
+    """A frozen keeper is its own one-file instance (TASK-503), so it re-stamps its OWN
+    unpack dir against an age-based temp cleanup while it drains, as the server does (#1663)."""
+    from clauster import frozen_bundle, pty_keeper
+
+    unpack = tmp_path / "_MEIkeeper"
+    (unpack / "lib").mkdir(parents=True)
+    lib = unpack / "lib" / "_lzma.so"
+    lib.write_bytes(b"")
+    old = time.time() - 20 * 86400  # older than the 10-day /tmp cleanup
+    for path in (unpack, unpack / "lib", lib):
+        os.utime(path, (old, old))
+    monkeypatch.setattr(frozen_bundle, "unpack_dir", lambda: unpack)
+    monkeypatch.setattr(frozen_bundle, "REFRESH_INTERVAL_SECONDS", 0.0)
+    bridge = [sys.executable, "-c", "import time; time.sleep(1.2)"]
+    assert pty_keeper.run_keeper(bridge, tmp_path / "k.json", cwd=str(tmp_path)) == 0
+    assert lib.stat().st_mtime > old + 86400
+    assert unpack.stat().st_mtime > old + 86400
+
+
+def test_run_keeper_stamps_nothing_off_the_binary(
+    tmp_path: Path, _restore_sighup, monkeypatch
+) -> None:
+    """A source install unpacks nothing, so the keeper never builds a refresh walk."""
+    from clauster import frozen_bundle, pty_keeper
+
+    refreshed: list = []
+    monkeypatch.setattr(frozen_bundle, "unpack_dir", lambda: None)
+    monkeypatch.setattr(frozen_bundle, "REFRESH_INTERVAL_SECONDS", 0.0)
+    monkeypatch.setattr(
+        frozen_bundle.BundleGuard, "refresh", lambda self: refreshed.append(self) or 0
+    )
+    bridge = [sys.executable, "-c", "import time; time.sleep(0.8)"]
+    assert pty_keeper.run_keeper(bridge, tmp_path / "k.json", cwd=str(tmp_path)) == 0
+    assert refreshed == []
+
+
 def test_run_keeper_scrapes_url_from_screen_when_raw_fragments_it(
     tmp_path: Path, _restore_sighup
 ) -> None:
