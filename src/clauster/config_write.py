@@ -782,11 +782,11 @@ def redact_secret_lines(text: str) -> str:
                 continue
             item = content[indent] == "-" and content[indent + 1 : indent + 2] in ("", " ", "\t")
             # A plain value does not go on into a comment or a mapping key (`- key:` too).
-            key = _MAPPING_KEY_RE.match(content, _list_item_end(content))
-            structured = content[indent] == "#" or key is not None
-            if (indent > column and not (run == _PLAIN and structured)) or (
-                indent == column and items and item
-            ):
+            structured = run == _PLAIN and (
+                content[indent] == "#"
+                or _MAPPING_KEY_RE.match(content, _list_item_end(content)) is not None
+            )
+            if (indent > column and not structured) or (indent == column and items and item):
                 out.append(content[:indent] + REDACTION_SENTINEL + line[len(content) :])
                 continue
             block = None

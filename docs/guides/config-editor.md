@@ -620,10 +620,11 @@ visible and does not end the value. These values go on past their line:
   `- token: "abc`, its line starts at the `-`.
 - After a secret-shaped key: a plain value, as in `token: abc`. The value goes
   on in the lines that are indented deeper than the key. A line that starts with
-  a key and a `:` (also in a list item, as in `- key:`), or with a `#`, is not
-  part of the value, so the value ends there.
+  a key, a `:` and then a space or the end of the line (also in a list item, as
+  in `- key:`), or with a `#`, is not part of the value, so the value ends there.
 
-Any other value ends at the first line that is not indented deeper, also after
+A value of the first two kinds ends at the first line that is not indented
+deeper, also after
 the line that closes a quote, because the rest of that line can hold another
 secret value. The lines after the value that are indented deeper therefore also
 show as `********`. A line of the value that is not indented deeper is not

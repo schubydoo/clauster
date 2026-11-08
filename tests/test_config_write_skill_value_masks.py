@@ -494,6 +494,12 @@ def test_a_secret_shaped_args_item_is_masked_and_round_trips(tmp_path: Path) -> 
             "token = qv-cb\n  - token:\n      env: qv-cc\n",
             f"token = {MASK}\n  - token:\n      {MASK}\n",
         ),
+        (
+            "token = qv-cd\n  - - token:\n        env: qv-ce\n",
+            f"token = {MASK}\n  - - token:\n        {MASK}\n",
+        ),
+        # A `:` with no space after it does not start a key, so YAML folds the line in.
+        ("token: qv-cf\n  - foo:qv-cg\n  bar:qv-ch\n", f"token: {MASK}\n  {MASK}\n  {MASK}\n"),
         # A plain value goes on in the deeper lines that are not a key or a comment.
         (
             "token: qv-ap\n  qv-aq\n  qv-ar\nnext: ok\n",
