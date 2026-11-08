@@ -21,7 +21,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .reconcile import Decision, Finding
@@ -59,13 +59,29 @@ from .procutil import KEEPER_SUBCOMMAND
 from .recap import RECAP_SUBCOMMAND
 from .tls_provision import generate_self_signed
 
-# setproctitle is a required dependency; this guard is defensive, not optionality — a
+# setproctitle is a required dependency, imported only when a title is actually set
+# (`_load_setproctitle`). On macOS its import ALONE rewrites this process's argv area into
+# one space-joined string (setproctitle's darwin init calls getproctitle()), and the hidden
+# `__pty-keeper__` form below is dispatched from this module: a keeper whose argv is
+# rewritten fails its own cmdline gate (`procutil.is_keeper_cmdline`), so the runner cannot
+# adopt, reattach or stop it (TASK-503). The import guard is defensive, not optionality — a
 # cosmetic retitle must never crash `clauster run` if the wheel is somehow missing or
 # unbuildable on an exotic platform, so degrade to a no-op instead.
-try:
-    import setproctitle as _setproctitle
-except ImportError:  # defensive: a cosmetic retitle must not break startup
-    _setproctitle = None
+_SETPROCTITLE_UNLOADED: Any = object()
+_setproctitle: Any = _SETPROCTITLE_UNLOADED
+
+
+def _load_setproctitle() -> Any:
+    """Import setproctitle on first use; ``None`` when it is not installed."""
+    global _setproctitle
+    if _setproctitle is _SETPROCTITLE_UNLOADED:
+        try:
+            import setproctitle as module
+        except ImportError:  # defensive: a cosmetic retitle must not break startup
+            module = None
+        _setproctitle = module
+    return _setproctitle
+
 
 _COMMANDS = {
     "run",
@@ -1451,9 +1467,12 @@ def _set_process_title(config: ClausterConfig) -> None:
     is otherwise identical, which makes ``pkill -f`` a footgun.
     """
     title = _process_title(config)
-    if title and _setproctitle is not None:
+    if not title:
+        return
+    module = _load_setproctitle()
+    if module is not None:
         try:
-            _setproctitle.setproctitle(title)
+            module.setproctitle(title)
         except Exception:  # noqa: BLE001, S110 - a cosmetic retitle must never break startup
             pass
 

@@ -1107,6 +1107,19 @@ def test_is_keeper_child_of_fails_closed_on_a_psutil_error(monkeypatch, exc):
     assert procutil.is_keeper_child_of(501, 500) is False
 
 
+def test_a_setproctitle_rewritten_argv_is_not_a_keeper(monkeypatch):
+    # The macOS shape behind TASK-503's CI failure: setproctitle's darwin import rewrites the
+    # argv area into ONE space-joined string, which psutil then reports as argv[0] followed by
+    # empty strings. The gate rightly refuses that, so the frozen keeper must never import
+    # setproctitle (clauster.__main__ loads it lazily; test_main pins that).
+    joined = " ".join(_FROZEN_KEEPER_ARGV)
+    rewritten = (joined, "", "", "")
+    assert procutil.is_keeper_cmdline(list(_FROZEN_KEEPER_ARGV)) is True
+    assert procutil.is_keeper_cmdline(list(rewritten)) is False
+    monkeypatch.setattr(procutil.psutil, "Process", _fake_child(ppid=500, cmdline=rewritten))
+    assert procutil.is_keeper_child_of(501, 500) is False
+
+
 def test_is_keeper_child_of_on_real_processes():
     # Real psutil: this process is our parent's child but not a keeper, and a negative pid
     # (an on-disk sidecar value) answers rather than raising.

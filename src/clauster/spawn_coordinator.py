@@ -980,6 +980,23 @@ class SpawnCoordinator:
             time.sleep(_READY_POLL_INTERVAL)  # pragma: skip-on-win
         return info  # pragma: skip-on-win
 
+    @classmethod
+    def _keeper_failure_detail(cls, sidecar: Path, info: dict) -> str | None:
+        """Return the redacted, bounded reason a pty keeper failed, for ``error_detail``.
+
+        The sidecar's own ``error`` when the keeper wrote one (an openpty or spawn failure).
+        With no sidecar at all, the keeper died before its first write: in the binary that
+        includes a bootloader that could not unpack its own copy (a full temp dir,
+        TASK-503), which reports only to the keeper's own log, so its tail is used.
+
+        Redacted and bounded exactly as ``_capture_error_detail`` does for the other
+        ``error_detail`` writer (invariant 4): the field is rendered inline on the card, and
+        both sources are text no redactor has seen (the keeper interpolates arbitrary
+        exception text into its ``error``, #1389).
+        """
+        reason = info.get("error") if info else cls._keeper_log_tail(sidecar)
+        return redact.redact_for_disk(reason)[-2000:] if isinstance(reason, str) else None
+
     @staticmethod
     def _keeper_log_tail(sidecar: Path) -> str | None:
         """Return the end of the keeper's own stdout/stderr log, or ``None`` when it is empty.
@@ -1188,24 +1205,11 @@ class SpawnCoordinator:
         self._apply_pty_info(instance, info, proc)
         await asyncio.to_thread(self._flush_redacted_mirror, instance)
         if instance.status is InstanceStatus.ERROR:
-            # Surface whatever the keeper recorded (openpty/spawn failure); the
-            # bridge's own failure reason, if any, is in its --debug-file on disk.
-            #
-            # Redact + bound it exactly as `_capture_error_detail` does for the other
-            # error_detail writer (invariant 4): this field is rendered inline on the
-            # dashboard card, and the keeper interpolates arbitrary exception text into
-            # it (`pty_keeper`'s conpty read/liveness/wait/abort reasons, #1389) — text
-            # that has passed through no redactor on its way here.
-            keeper_error = info.get("error")
-            if not info:
-                # No sidecar at all: the keeper died before its first write. In the binary
-                # that includes a bootloader that could not unpack its own copy (a full temp
-                # dir, TASK-503), which reports only to the keeper's own log. Surface its tail.
-                keeper_error = await asyncio.to_thread(self._keeper_log_tail, sidecar)
-            instance.error_detail = (
-                redact.redact_for_disk(keeper_error)[-2000:]
-                if isinstance(keeper_error, str)
-                else None
+            # Surface whatever the keeper recorded (openpty/spawn failure, or its own log
+            # when it died before any sidecar), redacted and bounded; the bridge's own
+            # failure reason, if any, is in its --debug-file on disk.
+            instance.error_detail = await asyncio.to_thread(
+                self._keeper_failure_detail, sidecar, info
             )
         await self._registry._persist()
         if instance.status is InstanceStatus.STARTING:
@@ -1332,6 +1336,19 @@ class SpawnCoordinator:
                 return  # already resolved, stopped, or gone
             if proc.poll() is not None:  # exited during startup
                 self._reconcile_status(instance, False)
+                log_path = instance.bridge_debug_log_path
+                if (
+                    instance.resume_mode == "pty"
+                    and log_path is not None
+                    and instance.error_detail is None
+                ):
+                    # A bootloader unpack that outlasts the readiness wait can still fail
+                    # before the keeper's first sidecar write (TASK-503): say why here too.
+                    sidecar = self._sidecar_path_for(log_path)
+                    info = await asyncio.to_thread(self._read_sidecar, sidecar) or {}
+                    instance.error_detail = await asyncio.to_thread(
+                        self._keeper_failure_detail, sidecar, info
+                    )
                 await self._registry._persist()
                 return
             log_path = instance.bridge_debug_log_path

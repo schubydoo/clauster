@@ -1027,6 +1027,49 @@ async def test_spawn_pty_surfaces_the_keeper_log_when_it_dies_before_its_sidecar
 
 
 @_POSIX_ONLY
+async def test_startup_watch_surfaces_the_keeper_log_after_a_late_failure(
+    runner_config, monkeypatch
+) -> None:
+    # The same unpack failure, but slower than the readiness wait: the spawn returns
+    # STARTING, and the startup watch is what sees the exit. It must say why too.
+    failing = (
+        "import sys, time; time.sleep(0.6); "
+        "sys.stderr.write('[PYI-1:ERROR] Could not create temporary directory! "
+        "token sk-ant-api03-LATEFAILLATEFAILLATEFAIL\\n'); sys.exit(255)"
+    )
+    monkeypatch.setattr(
+        BridgeLaunch,
+        "_keeper_launch_cmd",
+        staticmethod(lambda *a, **k: [sys.executable, "-c", failing]),
+    )
+    monkeypatch.setattr("clauster.spawn_coordinator._READY_TIMEOUT", 0.2)
+    monkeypatch.setattr("clauster.spawn_coordinator._STARTUP_WATCH_INTERVAL", 0.1)
+    runner, _ = _pty_runner(runner_config)
+    inst = await runner.spawn("alpha")
+    assert inst.status is InstanceStatus.STARTING
+    assert inst.error_detail is None
+    for _ in range(100):
+        if inst.status is not InstanceStatus.STARTING:
+            break
+        await asyncio.sleep(0.1)
+    assert inst.status is not InstanceStatus.STARTING
+    assert inst.error_detail is not None
+    assert "Could not create temporary directory" in inst.error_detail
+    assert "LATEFAILLATEFAILLATEFAIL" not in inst.error_detail
+
+
+def test_keeper_failure_detail_prefers_the_sidecar_error(tmp_path) -> None:
+    from clauster.spawn_coordinator import SpawnCoordinator
+
+    sidecar = tmp_path / "k.keeper.json"
+    sidecar.with_suffix(".log").write_text("from the log\n")
+    detail = SpawnCoordinator._keeper_failure_detail
+    assert detail(sidecar, {"error": "openpty failed: boom"}) == "openpty failed: boom"
+    assert detail(sidecar, {"state": "exited"}) is None  # a sidecar without an error
+    assert detail(sidecar, {}) == "from the log"  # no sidecar at all: the keeper's own log
+
+
+@_POSIX_ONLY
 async def test_rediscover_and_stop_a_two_process_keeper_after_a_restart(
     runner_config, monkeypatch
 ) -> None:
