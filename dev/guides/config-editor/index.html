@@ -2024,7 +2024,8 @@ on; the User scope additionally requires <code>config_write.allow_user_scope</co
   skills folder.</li>
 <li><strong>Typed confirmation</strong> — every document save asks you to type the scope
   name; destructive list actions (delete, reset, plugin install) have their
-  own typed confirms.</li>
+  own typed confirms. An install from a marketplace's list is the exception, see
+  <a href="#plugins-and-marketplaces">Plugins and marketplaces</a>.</li>
 <li><strong>Secret masking</strong> — the Settings, MCP, Hooks, Subagents, and Skills
   surfaces, and the <code>autoMode</code> box and read-only view on the Permissions tab,
   mask secret-shaped values on read. The MCP surface also masks every <code>env</code>
@@ -2080,7 +2081,7 @@ on; the User scope additionally requires <code>config_write.allow_user_scope</co
 </tr>
 <tr>
 <td>Plugins</td>
-<td>Installed plugins (install / uninstall / enable / disable / update) and the marketplaces they come from (add / remove).</td>
+<td>Installed plugins (install / uninstall / enable / disable / update), the marketplaces they come from (add / remove), and the plugins each marketplace offers. See <a href="#plugins-and-marketplaces">Plugins and marketplaces</a>.</td>
 </tr>
 </tbody>
 </table>
@@ -2841,9 +2842,37 @@ The scope rules and the update results below were checked against Claude Code
   already enabled at the scope you chose, Claude Code refuses and names that
   scope. A plugin that the project enables cannot be disabled at user scope. To
   turn it off for yourself only, disable it at the Local scope.</li>
+<li><strong>One typed confirm covers a series of Enable, Disable and Update clicks.</strong>
+  The confirm is the scope name that you type at the top of the tab to arm its
+  actions. After an Enable, Disable or Update (of a plugin or a marketplace), the
+  confirm stays typed, so you can change several plugins in a row. Install,
+  Uninstall, and marketplace Add and Remove need the confirm typed again. After
+  one of them, the confirm box is empty.</li>
+<li><strong>A change of scope, project or tab clears the confirm.</strong> Closing the editor
+  clears it too. The server checks the confirm on every request.</li>
 <li><strong>Each marketplace row shows the source type and its location</strong>, for example
   <code>github · owner/repo</code>. A URL that carries a user name or password, such as
   <code>https://user:token@host/repo.git</code>, shows as <code>********</code>.</li>
+<li><strong>Show plugins lists the plugins that a marketplace offers.</strong> Clauster runs
+  <code>claude plugin list --available --json</code> from the directory of the scope that
+  you chose. At User scope, that is the home directory of the user that runs
+  Clauster. The list shows the plugins of that one marketplace, with the version
+  and description that the marketplace gives. A plugin that is installed for that
+  directory is marked <code>installed</code>. It shows the installed version and no
+  description. A plugin that is installed only in another project shows an
+  Install button, because Claude Code offers it again here. A marketplace with no
+  plugins, or a failed read, shows a message.</li>
+<li><strong>The list masks marketplace text.</strong> Clauster masks each description and
+  version as it masks other CLI output. It cuts a description or a version after
+  500 characters, and shows the text as text, never as HTML. Each row shows the
+  name part of the plugin id that its Install button installs. Clauster leaves
+  out an entry whose id is not a valid plugin id of that marketplace. This list
+  was checked against Claude Code 2.1.319.</li>
+<li><strong>Install from that list does not ask you to retype the plugin id.</strong> The id
+  comes from the CLI's own list. The install still needs the confirm typed
+  again, and it runs the same <code>claude plugin install &lt;id&gt; --scope &lt;scope&gt;</code>
+  command as the install form. The install form, where you type the id, still
+  asks you to retype it.</li>
 <li><strong>Clauster masks credentials in what it reads.</strong> It masks every <code>headers</code>,
   <code>env</code> and MCP server <code>args</code> value, every <code>headersHelper</code> command, and every URL
   that carries a user name or password. Every other <code>url</code> is masked as the
