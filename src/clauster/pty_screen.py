@@ -846,7 +846,9 @@ class PtyScreen:
             return True
         if not ends_at(screen.columns):
             return False
-        below = screen.buffer[y + 1][0].data if y + 1 < screen.lines else ""
+        if y + 1 >= screen.lines:
+            return True  # on the bottom row a wrap scrolls, so the next row cannot tell
+        below = screen.buffer[y + 1][0].data
         return below[:1].isascii() and below[:1].isalnum()
 
     def find_authorize_url(self) -> str | None:

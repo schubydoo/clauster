@@ -420,7 +420,7 @@ For an Interactive Session, `claude` does not exit. It opens its first-run scree
 and waits for a keypress. The keeper reads those screens at the start of the
 session output, records the error, and stops the bridge about 5 seconds later.
 `claude` can also show these screens when its first-run setup was never finished
-on the host, so the same fix applies.
+on the host. In both cases, run `claude` interactively once as the service user.
 
 **Most likely cause:** the account that runs Clauster has no usable `claude`
 credentials. Bridges inherit the *operator's* login, so a bridge cannot connect
@@ -429,7 +429,8 @@ without one.
 **The fix:** run `claude` interactively **as the service user** and complete
 login, or use the dashboard login flow
 ([`login_shepherd`](reference/config.md#login_shepherd-dashboard-driven-claude-account-login-loginshepherdconfig)).
-An `ANTHROPIC_API_KEY` in the service environment also satisfies the check.
+An `ANTHROPIC_API_KEY` in the service environment also satisfies the `doctor`
+check.
 
 ### "a login flow is already in progress; cancel it first"
 

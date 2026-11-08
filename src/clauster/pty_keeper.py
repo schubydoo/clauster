@@ -142,6 +142,10 @@ _RE_TERMINAL_CONTROL = re.compile(
     rb"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?|\x1b[ -/]*[0-~]|[\x00-\x1f\x7f]"
 )
 _RE_SPACE_RUN = re.compile(rb"\s+")
+# A run of escape sequences (no C0 controls): what may sit between an id and the next byte.
+_RE_ESCAPE_RUN = re.compile(
+    rb"(?:\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?|\x1b[ -/]*[0-~])*"
+)
 
 #: Seconds between publishing the login error and stopping the bridge. The runner's startup
 #: watch reads the sidecar every 2 s. While the bridge is alive it reads ``error`` as ERROR,
@@ -250,16 +254,18 @@ def _scan_connect_url(buf: bytes | bytearray, screen: PtyScreen | None) -> str |
     TUI winsize makes claude fragment it with cursor-positioning escapes the raw regex can't
     follow (#665). The id is returned UN-redacted for the keeper's private discovery sidecar.
 
-    A raw hit that an escape sequence ends is left to the screen when there is one: an escape
-    can sit inside the id (a colour change, a cursor move), so the raw bytes may end the id
-    early while the rendered row shows all of it (TASK-469). With no screen, the raw hit is
-    all there is, and the TUI usually ends the id line with an erase or colour escape.
+    An escape sequence can sit inside the id (a colour change), and the raw match then stops
+    at it (TASK-469). So a raw hit counts only when the first byte after it that is not part
+    of an escape cannot continue the id: the TUI ends the id line with an erase or colour
+    escape and then a newline. When escapes are followed by an id character, or by nothing
+    read yet, the raw bytes cannot tell, and the screen (when there is one) decides.
     """
-    raw_hit = _RE_CONNECT_URL.search(buf)
-    if raw_hit is not None and (
-        screen is None or buf[raw_hit.end() : raw_hit.end() + 1] != b"\x1b"
-    ):
-        return raw_hit.group(1).decode()
+    for raw_hit in _RE_CONNECT_URL.finditer(buf):  # a later, clean copy still counts
+        escapes = _RE_ESCAPE_RUN.match(buf, raw_hit.end())  # always matches, maybe empty
+        after = escapes.end() if escapes is not None else raw_hit.end()
+        following = buf[after : after + 1]
+        if after == raw_hit.end() or (following and not following.isalnum()):
+            return raw_hit.group(1).decode()
     if screen is not None:
         return screen.find_session_id()
     return None

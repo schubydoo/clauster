@@ -1221,6 +1221,8 @@ def _fake_conpty(
 
         def terminate(self, force: bool = False) -> None:
             calls.append({"terminated": True})
+            if force:
+                calls.append({"forced": True})
             if terminate_error is not None:
                 raise terminate_error
 
@@ -1854,15 +1856,45 @@ def test_keeper_raw_scrape_waits_for_the_byte_after_the_id() -> None:
     assert pty_keeper._scan_connect_url(b"at " + _SPLIT_URL.encode() + b" ", None) == _SPLIT_ID
 
 
-def test_keeper_leaves_an_escape_ended_raw_id_to_the_screen() -> None:
+def test_keeper_leaves_an_escape_inside_the_id_to_the_screen() -> None:
     """A colour change inside the id ends the raw match early; the screen shows all of it."""
     from clauster import pty_keeper
 
     data = b"at https://claude.ai/code/session_01COL\x1b[1mOURED\x1b[0m\r\n"
-    assert pty_keeper._scan_connect_url(data, None) == "session_01COL"  # raw alone: no better
+    assert pty_keeper._scan_connect_url(data, None) is None  # raw alone cannot tell: none
     screen = _fresh_screen()
     screen.feed(data)
     assert pty_keeper._scan_connect_url(data, screen) == "session_01COLOURED"
+
+
+@pytest.mark.parametrize(
+    "tail",
+    [b"\x1b[K\r\n", b"\x1b[0m\x1b[K\r\n", b"\x1b[39m \xc2\xb7 more", b"\x1b]8;;\x07\r\n"],
+)
+def test_keeper_reads_a_raw_id_that_escapes_then_a_non_id_byte_end(tail: bytes) -> None:
+    """The raw leg still answers when the screen cannot (an empty screen stands in for it)."""
+    from clauster import pty_keeper
+
+    data = b"at " + _SPLIT_URL.encode() + tail
+    assert pty_keeper._scan_connect_url(data, _fresh_screen()) == _SPLIT_ID
+    assert pty_keeper._scan_connect_url(data, None) == _SPLIT_ID
+
+
+def test_keeper_raw_scrape_waits_while_only_escapes_follow_the_id() -> None:
+    from clauster import pty_keeper
+
+    data = b"at " + _SPLIT_URL.encode() + b"\x1b[K"
+    assert pty_keeper._scan_connect_url(data, None) is None
+    assert pty_keeper._scan_connect_url(data + b"\r\n", None) == _SPLIT_ID
+
+
+def test_keeper_raw_scrape_reads_a_later_clean_copy() -> None:
+    from clauster import pty_keeper
+
+    data = (
+        b"https://claude.ai/code/session_01COL\x1b[1mOURED\r\nat " + _SPLIT_URL.encode() + b"\r\n"
+    )
+    assert pty_keeper._scan_connect_url(data, None) == _SPLIT_ID
 
 
 # -- TASK-533: a pty bridge whose claude is not logged in ------------------------------
@@ -2008,13 +2040,15 @@ def test_run_keeper_stops_a_bridge_held_at_the_login_screen(
     """The keeper stops the bridge (it cannot get past the screen) and keeps the reason."""
     from clauster import pty_keeper
 
-    monkeypatch.setattr(pty_keeper, "_LOGIN_STOP_DELAY", 0.2)
+    monkeypatch.setattr(pty_keeper, "_LOGIN_STOP_DELAY", 1.0)
     sidecar = tmp_path / "k.json"
     started = time.monotonic()
     rc = pty_keeper.run_keeper(
         _login_screen_bridge(tmp_path, ignore_sigterm=False), sidecar, cwd=str(tmp_path)
     )
-    assert time.monotonic() - started < 30  # stopped, not waited out
+    elapsed = time.monotonic() - started
+    assert elapsed >= 1.0  # not before the delay that lets the runner read the live error
+    assert elapsed < 30  # stopped, not waited out
     assert rc == -signal.SIGTERM
     info = _read(sidecar)
     assert info["state"] == "exited"
@@ -2049,6 +2083,7 @@ def test_run_keeper_conpty_stops_a_bridge_held_at_the_login_screen(
     pty_keeper._run_keeper_conpty(["claude", "--remote-control"], sidecar, None, None)
 
     assert fake.calls.count({"terminated": True}) == 1  # once, not once per later chunk
+    assert {"forced": True} in fake.calls  # past pywinpty's first signal if it must
     data = _read(sidecar)
     assert data["state"] == "exited"
     assert data["error"] == pty_keeper._LOGIN_SCREEN_ERROR

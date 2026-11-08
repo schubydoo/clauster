@@ -1324,7 +1324,8 @@ class SpawnCoordinator:
         unregistered, which is a failed start (ERROR), not a running bridge. Both legs
         re-flush the redacted mirror each tick. Process death during startup is delegated
         to the injected ``_reconcile_status`` so the CRASHED/STOPPED outcome matches the
-        poll loop exactly.
+        poll loop exactly, except for a pty keeper that left an ``error`` in its sidecar
+        (the login screen, TASK-533): that is a failed start, ERROR, as at the readiness wait.
         """
         grace = self._config.claude.startup_grace_seconds
         deadline = time.monotonic() + grace

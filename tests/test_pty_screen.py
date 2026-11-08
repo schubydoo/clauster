@@ -93,6 +93,16 @@ def test_find_session_id_reads_an_id_that_ends_exactly_at_the_right_edge():
     assert scr.find_session_id() == "session_01EDGE"
 
 
+def test_find_session_id_waits_on_an_id_at_the_bottom_right_corner():
+    # On the bottom row a wrap scrolls the screen, so no row below can show a continuation.
+    url = b"https://claude.ai/code/session_01CORNER"
+    scr = PtyScreen(cols=len(url), rows=2)
+    scr.feed(b"\r\n" + url)
+    scr._screen.cursor_position(1, 1)  # the cursor moved away, as a TUI redraw does
+    assert scr._screen.display[1] == url.decode()  # precondition: the id fills the bottom row
+    assert scr.find_session_id() is None
+
+
 def test_find_session_id_never_returns_an_id_that_wrapped():
     # An id that wraps onto the next row is cut short on its first row, so it is never read.
     scr = PtyScreen(cols=36, rows=4)
