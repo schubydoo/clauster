@@ -804,6 +804,9 @@ class HostedSession:
             self.status = InstanceStatus.ERROR
             # The agent may still run: the row says why, as _fail_closed's does.
             self.error_detail = detail = redact_for_disk(f"stop failed: {exc}")
+            # Kept, as _latch_lost keeps them: the agent may still wait on these, so they
+            # stay stored until a kill ends it (TASK-537, async review catch).
+            self.lost_requests = tuple(self._pending.values())
             self._resolve_parked()  # a dead session must not leave a parked request stranded
             self._emit({"type": "lost", "reason": detail})  # the daemon text can quote anything
         finally:
@@ -1120,11 +1123,15 @@ class HostedSession:
         try:
             # Redacted for the browser too: a daemon error's text can quote anything.
             self.error_detail = detail = redact_for_disk(reason)
+            # Kept until the kill below is accepted: if it fails, the agent may still
+            # wait on these, and they stay stored (TASK-537).
+            self.lost_requests = tuple(self._pending.values())
             self._resolve_parked()
             self._emit({"type": "lost", "reason": detail})
         finally:
             try:
                 await self._client.kill(self._process_id, signal="KILL")
+                self.lost_requests = ()
             except ClaustrumError as kill_exc:
                 logger.warning(
                     "hosted: could not end agent %s after pump failure: %s",
@@ -1767,6 +1774,11 @@ class HostedManager:
             ) from exc
         await self._end_error_agent(client, key, action=action)
         await self._kill_agent_by_pid(instance)
+        # The agent is ended, so it waits on nothing: its stored prompts go too.
+        session = self._sessions.get(key)
+        if session is not None:
+            session.lost_requests = ()
+        self._unrestored.pop(key, None)
 
     @staticmethod
     async def _kill_agent_by_pid(instance: RemoteControlInstance) -> None:
@@ -2531,6 +2543,12 @@ class HostedManager:
         self._synced(instance)
         await session.detach()
         self._sessions.pop(key, None)
+        if probe_orphan and session.lost_requests:
+            # With no await since the pop (async review catch): a shutdown that persists
+            # inside the probe below, before the caller sets the retry entry, must still
+            # find the prompts the agent may wait on (TASK-537). A kill the daemon took
+            # (probe_orphan false) ended the agent, so its prompts are not kept.
+            self._unrestored[key] = session.lost_requests
         if probe_orphan:
             await self._mark_unfound(
                 instance, lost_status=InstanceStatus.ERROR, lost_detail=detail
@@ -2678,13 +2696,16 @@ class HostedManager:
     def _parked_for(self, process_id: str) -> tuple[_ControlRequest, ...]:
         """Return the prompts a row's agent waits on, for its persisted record (TASK-537).
 
-        A live session's parked prompts; else those its retry entry carries (TASK-526);
-        else those a restart could not restore yet. So a plain restart (``aclose``
-        persists last) finds them in the store and parks them again.
+        A live session's parked prompts and those a loss took from it; else those its
+        retry entry carries (TASK-526); else those a restart could not restore yet. So
+        a plain restart (``aclose`` persists last) finds them in the store and parks
+        them again.
         """
         session = self._sessions.get(process_id)
         if session is not None:
-            return tuple(session.pending_requests)
+            # With the prompts a loss resolved locally: a lost or failed session holds
+            # them there while the hooks retire it (async review catch).
+            return _merged_requests(session.pending_requests, session.lost_requests)
         lost = self._reattach_retry.get(process_id)
         if lost is not None:
             return lost.requests

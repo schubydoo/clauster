@@ -6143,9 +6143,62 @@ async def test_a_named_prompt_leaves_the_store_with_its_row(
             await _call(mgr, op, pid, _connect_to(client))
         await mgr.persist()
         assert all(r.get("parked_requests") is None for r in store.load().values())
+        assert pid not in mgr._unrestored
         if op == "resume":
             await mgr.stop(resumed.claustrum_process_id, connect=None)
         await mgr.aclose()
+
+
+async def test_a_shutdown_inside_the_reconnect_failure_hook_keeps_the_prompt_stored(
+    fake_claustrum, tmp_path
+):
+    # Async review catch: fail_unreachable latched the session lost (the prompt moved to
+    # lost_requests) and retired it, then a shutdown persisted inside the orphan probe,
+    # before the retry entry existed. That save dropped the prompt from the store.
+    store = HostedStateStore(tmp_path / "hosted_state.json")
+    fake = await fake_claustrum()
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        mgr = HostedManager(store)
+        await mgr.reattach_all(client)
+        pid = (await _spawn(mgr, client)).claustrum_process_id
+        queue = mgr.session(pid).subscribe()
+        await fake.emit(pid, "stdout", _parked_prompt("perm-1"))
+        await _drain_until(queue, "control_request")
+        await mgr.persist()
+        await client.close()
+
+        async def _probe_during_shutdown(_instance):
+            await mgr.aclose()  # a systemctl restart lands on the probe's thread hop
+            return False
+
+        mgr._is_orphan = _probe_during_shutdown
+        await mgr.fail_unreachable("claustrum daemon connection lost and the reconnect failed")
+    assert [e["request_id"] for e in store.load()[pid]["parked_requests"]] == ["perm-1"]
+
+
+@pytest.mark.parametrize("seed", ["starting", "running"])
+async def test_kill_of_a_starting_or_running_row_without_a_session_is_refused(
+    fake_claustrum, monkeypatch, seed
+):
+    # Without a lock holder: a row a restore fault left STARTING, or one that reads
+    # RUNNING with no session. Neither may be marked stopped or killed by pid.
+    pid_kills: list[int] = []
+    monkeypatch.setattr(procutil, "kill_if_match", lambda pid, *a, **k: pid_kills.append(pid))
+    async with _manager(fake_claustrum) as (fake, client, mgr):
+        status = InstanceStatus.STARTING if seed == "starting" else InstanceStatus.RUNNING
+        mgr._instances["row"] = RemoteControlInstance(
+            project="proj",
+            label="hosted:proj",
+            channel="hosted",
+            claustrum_process_id="row",
+            agent_pid=4242,
+            status=status,
+        )
+        with pytest.raises(hosted.HostedAgentMayBeRunning, match="still reattaching"):
+            await mgr.kill_orphan("row", connect=_connect_to(client))
+        row = mgr.get_instance("row")
+        assert row.status is status and not row.intentional_stop
+        assert pid_kills == [] and fake.killed == []
 
 
 def test_the_lost_prompt_note_is_redacted():
@@ -6161,8 +6214,11 @@ def test_the_lost_prompt_note_is_redacted():
 def test_an_unreadable_stored_prompt_is_skipped_and_logged(caplog):
     good = {"request_id": "perm-1", "subtype": "can_use_tool", "request": {"tool_name": "Bash"}}
     with caplog.at_level(logging.WARNING, logger="clauster.hosted"):
-        requests = hosted._parked_from_record(_PID, [good, {"request_id": 7}, "junk"])
+        requests = hosted._parked_from_record(
+            _PID,
+            [good, {"request_id": 7}, "junk", {"request_id": "x", "subtype": 7, "request": {}}],
+        )
     assert [r.request_id for r in requests] == ["perm-1"]
-    assert caplog.text.count("stored parked prompt") == 2
+    assert caplog.text.count("stored parked prompt") == 3
     assert hosted._parked_from_record(_PID, None) == ()
     assert hosted._parked_from_record(_PID, good)[0].request_id == "perm-1"  # one, not a list

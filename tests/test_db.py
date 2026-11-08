@@ -253,6 +253,12 @@ def test_hosted_parked_requests_round_trip_and_stay_absent_when_none(persistence
     assert loaded["pid-1"]["parked_requests"] == parked
     assert "parked_requests" not in loaded["pid-none"]
     assert "parked_requests" not in loaded["pid-legacy"]
+    # A SQL NULL, not the JSON text "null" (none_as_null), so an IS NULL query finds it.
+    with persistence._engine.connect() as conn:
+        nulls = conn.execute(
+            text("SELECT claustrum_process_id FROM hosted_sessions WHERE parked_requests IS NULL")
+        ).scalars()
+        assert set(nulls) == {"pid-none", "pid-legacy"}
 
 
 def test_hosted_save_prunes_absent_keys(persistence):
