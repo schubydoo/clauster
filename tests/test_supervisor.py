@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import inspect
 import json
 import logging
+import os
 import signal
 import sys
 from pathlib import Path
@@ -10,7 +12,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 
-from clauster import supervisor
+from clauster import procutil, supervisor
 from clauster.app import create_app
 from clauster.claude_cli import ClaudeNotFound
 from clauster.config import CEILING_GATED_MODES, ClausterConfig, load_config
@@ -253,30 +255,99 @@ def test_worker_alive_rejects_garbage_pids():
     assert supervisor.worker_alive(0, "100") is False
 
 
-def test_worker_alive_dead_pid_or_bad_procstart(monkeypatch):
-    monkeypatch.setattr(supervisor, "proc_create_time", lambda pid: None)
-    assert supervisor.worker_alive(1234, "100") is False
-    monkeypatch.setattr(supervisor, "proc_create_time", lambda pid: 1000.0)
+def test_worker_alive_bad_procstart_fails_closed(monkeypatch):
+    calls: list = []
+    monkeypatch.setattr(supervisor, "is_live_process", lambda *a, **k: calls.append(a) or True)
     assert supervisor.worker_alive(1234, "not-jiffies") is False
     assert supervisor.worker_alive(1234, None) is False
+    assert supervisor.worker_alive(1234, 100.5) is False  # a float is not a tick count
+    # Neither half comparable (no /proc ticks AND no boot time): never trust the bare pid.
+    monkeypatch.setattr(supervisor, "proc_start_ticks", lambda pid: None)
     monkeypatch.setattr(supervisor, "jiffies_to_epoch", lambda j: None)
     assert supervisor.worker_alive(1234, "100") is False
+    assert calls == []
 
 
-def test_worker_alive_requires_start_time_match(monkeypatch):
-    monkeypatch.setattr(supervisor, "proc_create_time", lambda pid: 1000.0)
-    monkeypatch.setattr(supervisor, "jiffies_to_epoch", lambda j: 1001.0)
-    assert supervisor.worker_alive(1234, "100") is True  # within 2.0s tolerance
-    monkeypatch.setattr(supervisor, "jiffies_to_epoch", lambda j: 1010.0)
-    assert supervisor.worker_alive(1234, "100") is False  # recycled pid
+def test_worker_alive_hands_procstart_over_as_ticks(monkeypatch):
+    # An int procStart is passed as a STRING: is_live_process reads a number as our own
+    # epoch create-time, which would compare jiffies against seconds since 1970.
+    seen: list = []
+    monkeypatch.setattr(
+        supervisor, "is_live_process", lambda pid, ps, **k: seen.append((pid, ps, k)) or True
+    )
+    monkeypatch.setattr(supervisor, "proc_start_ticks", lambda pid: None)
+    monkeypatch.setattr(supervisor, "jiffies_to_epoch", lambda j: 1000.0)
+    assert supervisor.worker_alive(1234, 770579) is True
+    assert seen == [(1234, "770579", {"tolerance": 2.0, "start_ticks": 770579})]
+
+
+def _fake_worker(monkeypatch, *, ticks: int | None, create_time: float, btime: float) -> None:
+    """Fake a live roster worker: psutil sees it, /proc reports ``ticks`` (CLK_TCK 100)."""
+
+    class _Proc:
+        def __init__(self, pid):
+            pass
+
+        def status(self):
+            return procutil.psutil.STATUS_RUNNING
+
+        def cmdline(self):
+            return ["claude", "--bg"]
+
+        def create_time(self):
+            return create_time
+
+    monkeypatch.setattr(procutil.psutil, "Process", _Proc)
+    monkeypatch.setattr(procutil.psutil, "boot_time", lambda: btime)
+    monkeypatch.setattr(procutil, "_clk_tck", lambda: 100)
+    monkeypatch.setattr(procutil, "proc_start_ticks", lambda pid: ticks)
+    monkeypatch.setattr(supervisor, "proc_start_ticks", lambda pid: ticks)
+
+
+def test_worker_alive_survives_a_clock_step(monkeypatch):
+    # TASK-504. psutil's Linux create_time is `starttime/CLK_TCK + btime`, and btime is
+    # re-read on every call; an NTP step between the two reads moved one epoch 30s from the
+    # other. The old epoch compare (2.0s) read this live worker as gone — and the stop path
+    # then refused to signal it. The boot-relative ticks did not move.
+    _fake_worker(monkeypatch, ticks=770579, create_time=1_007_705.79, btime=1_000_030.0)
+    assert supervisor.worker_alive(4242, "770579") is True
+
+
+def test_worker_alive_rejects_a_recycled_pid_on_ticks_even_when_epochs_agree(monkeypatch):
+    # Same boot, same pid, a different process one tick later: the exact tick match is the
+    # PID-reuse defense now, so an epoch inside the old 2.0s bound no longer authenticates it.
+    _fake_worker(monkeypatch, ticks=770580, create_time=1_007_705.79, btime=1_000_000.0)
+    assert supervisor.worker_alive(4242, "770579") is False
+
+
+def test_worker_alive_without_ticks_keeps_the_epoch_bound(monkeypatch):
+    # macOS / Windows (no /proc): their create-time is an absolute timestamp, so the epoch
+    # compare with the 2.0s tolerance stays the identity check there.
+    _fake_worker(monkeypatch, ticks=None, create_time=1_007_705.79, btime=1_000_001.0)
+    assert supervisor.worker_alive(4242, "770579") is True  # 1.0s apart
+    _fake_worker(monkeypatch, ticks=None, create_time=1_007_705.79, btime=1_000_010.0)
+    assert supervisor.worker_alive(4242, "770579") is False  # 10s apart: a different process
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="boot-relative ticks come from /proc")
+def test_worker_alive_real_process_survives_a_btime_step(monkeypatch):
+    # The real /proc and psutil path, on this test process: only the btime the epoch half
+    # reads is stepped. psutil's own create_time keeps the unstepped value.
+    pid = os.getpid()
+    ticks = procutil.proc_start_ticks(pid)
+    assert ticks is not None
+    assert supervisor.worker_alive(pid, str(ticks)) is True
+    real_btime = procutil.psutil.boot_time()
+    monkeypatch.setattr(procutil.psutil, "boot_time", lambda: real_btime + 30)
+    assert supervisor.worker_alive(pid, str(ticks)) is True
+    assert supervisor.worker_alive(pid, str(ticks + 1)) is False
 
 
 def test_live_worker_joined_onto_job(tmp_path: Path, monkeypatch):
     jobs = tmp_path / "jobs"
     _write_job(jobs, "bd1cea2f", _state())
-    roster = _roster(tmp_path, {"bd1cea2f": {"pid": 4242, "procStart": "100"}})
-    monkeypatch.setattr(supervisor, "proc_create_time", lambda pid: 1000.0)
-    monkeypatch.setattr(supervisor, "jiffies_to_epoch", lambda j: 1000.5)
+    roster = _roster(tmp_path, {"bd1cea2f": {"pid": 4242, "procStart": "770579"}})
+    _fake_worker(monkeypatch, ticks=770579, create_time=1_007_705.79, btime=1_000_000.0)
     [job] = supervisor.list_background_jobs(jobs, roster)
     assert job.worker_alive is True
     assert job.worker_pid == 4242
@@ -286,7 +357,7 @@ def test_stale_roster_worker_not_joined(tmp_path: Path, monkeypatch):
     jobs = tmp_path / "jobs"
     _write_job(jobs, "bd1cea2f", _state())
     roster = _roster(tmp_path, {"bd1cea2f": {"pid": 4242, "procStart": "100"}})
-    monkeypatch.setattr(supervisor, "proc_create_time", lambda pid: None)  # pid is gone
+    monkeypatch.setattr(supervisor, "is_live_process", lambda *a, **k: False)  # pid is gone
     [job] = supervisor.list_background_jobs(jobs, roster)
     assert job.worker_alive is False
     assert job.worker_pid is None
@@ -340,7 +411,10 @@ class _FakeProc:
 
 
 def test_build_dispatch_argv_bare_and_full():
-    assert supervisor.build_dispatch_argv("/abs/claude") == ["/abs/claude", "--bg"]
+    assert supervisor.build_dispatch_argv("/abs/claude", permission_mode="inherit") == [
+        "/abs/claude",
+        "--bg",
+    ]
     assert supervisor.build_dispatch_argv(
         "/abs/claude", rc_name="proj-rc", model="opus", permission_mode="auto", prompt="go"
     ) == [
@@ -365,9 +439,36 @@ def test_build_dispatch_argv_omits_permission_mode_for_inherit():
     assert argv == ["/abs/claude", "--bg", "--", "go"]
 
 
+@pytest.mark.parametrize(
+    "fn",
+    [supervisor.build_dispatch_argv, supervisor.dispatch_background_job],
+    ids=lambda f: f.__name__,
+)
+def test_dispatch_permission_mode_is_keyword_required_with_no_default(fn):
+    # TASK-481: a None default built the no-flag argv, which is `inherit` without the
+    # caller's ceiling check. A missed call site must now be a type error, not that argv.
+    param = inspect.signature(fn).parameters["permission_mode"]
+    assert param.kind is inspect.Parameter.KEYWORD_ONLY
+    assert param.default is inspect.Parameter.empty
+    with pytest.raises(TypeError, match="permission_mode"):
+        fn("/abs/claude")
+
+
+def test_dispatch_rejects_a_none_permission_mode_before_trust(tmp_path, monkeypatch):
+    # The runtime half of TASK-481: an untyped caller passing None fails closed instead of
+    # dispatching the inherit argv.
+    trusted, seen = _patch_dispatch(monkeypatch)
+    with pytest.raises(supervisor.DispatchError, match="invalid permission mode: None"):
+        supervisor.dispatch_background_job(tmp_path, prompt="hi", permission_mode=None)
+    assert trusted == []
+    assert seen == {}
+
+
 def test_build_dispatch_argv_dash_prompt_is_positional_after_separator():
     # a prompt that looks like a flag lands after `--`, so claude can't parse it as one
-    assert supervisor.build_dispatch_argv("/abs/claude", prompt="--dangerously-skip") == [
+    assert supervisor.build_dispatch_argv(
+        "/abs/claude", permission_mode="inherit", prompt="--dangerously-skip"
+    ) == [
         "/abs/claude",
         "--bg",
         "--",
@@ -404,7 +505,12 @@ def test_dispatch_happy_pretrusts_and_returns_id(tmp_path, monkeypatch):
     trusted, seen = _patch_dispatch(monkeypatch)
     cj = tmp_path / "claude.json"
     job_id = supervisor.dispatch_background_job(
-        tmp_path, prompt="hi", rc_name="proj-rc", binary="claude", claude_json=cj
+        tmp_path,
+        prompt="hi",
+        rc_name="proj-rc",
+        permission_mode="inherit",
+        binary="claude",
+        claude_json=cj,
     )
     assert job_id == "29e8026f"
     assert trusted == [(tmp_path, cj)]  # cwd pre-trusted with the given claude.json
@@ -414,14 +520,14 @@ def test_dispatch_happy_pretrusts_and_returns_id(tmp_path, monkeypatch):
 
 def test_dispatch_default_claude_json_path(tmp_path, monkeypatch):
     trusted, _ = _patch_dispatch(monkeypatch)
-    supervisor.dispatch_background_job(tmp_path)
+    supervisor.dispatch_background_job(tmp_path, permission_mode="default")
     assert trusted == [(tmp_path,)]  # no claude_json -> trust_directory called with cwd only
 
 
 def test_dispatch_rejects_nondir_cwd(tmp_path, monkeypatch):
     _patch_dispatch(monkeypatch)
     with pytest.raises(supervisor.DispatchError, match="not a directory"):
-        supervisor.dispatch_background_job(tmp_path / "nope")
+        supervisor.dispatch_background_job(tmp_path / "nope", permission_mode="default")
 
 
 @pytest.mark.parametrize("field", ["rc_name", "model", "permission_mode"])
@@ -429,27 +535,29 @@ def test_dispatch_rejects_nondir_cwd(tmp_path, monkeypatch):
 def test_dispatch_rejects_flag_like_or_nonstring_values(tmp_path, monkeypatch, field, bad):
     trusted, _ = _patch_dispatch(monkeypatch)
     with pytest.raises(supervisor.DispatchError, match="invalid"):
-        supervisor.dispatch_background_job(tmp_path, **{field: bad})
+        supervisor.dispatch_background_job(tmp_path, **{"permission_mode": "default", field: bad})
     assert trusted == []  # rejected before the trust write — no side effect
 
 
 def test_dispatch_rejects_nonstring_prompt_before_trust(tmp_path, monkeypatch):
     trusted, _ = _patch_dispatch(monkeypatch)
     with pytest.raises(supervisor.DispatchError, match="invalid prompt"):
-        supervisor.dispatch_background_job(tmp_path, prompt=["not", "a", "string"])
+        supervisor.dispatch_background_job(
+            tmp_path, prompt=["not", "a", "string"], permission_mode="default"
+        )
     assert trusted == []  # a malformed request must not trust the cwd then 500
 
 
 def test_dispatch_nonzero_exit_raises_with_redacted_detail(tmp_path, monkeypatch):
     _patch_dispatch(monkeypatch, proc=_FakeProc(returncode=1, stderr="boom"))
     with pytest.raises(supervisor.DispatchError, match="exit 1.*boom"):
-        supervisor.dispatch_background_job(tmp_path)
+        supervisor.dispatch_background_job(tmp_path, permission_mode="default")
 
 
 def test_dispatch_no_id_raises(tmp_path, monkeypatch):
     _patch_dispatch(monkeypatch, proc=_FakeProc(stdout="all done, nothing here"))
     with pytest.raises(supervisor.DispatchError, match="no job id"):
-        supervisor.dispatch_background_job(tmp_path)
+        supervisor.dispatch_background_job(tmp_path, permission_mode="default")
 
 
 def test_dispatch_timeout_raises(tmp_path, monkeypatch):
@@ -458,13 +566,13 @@ def test_dispatch_timeout_raises(tmp_path, monkeypatch):
 
     _patch_dispatch(monkeypatch, run=boom)
     with pytest.raises(supervisor.DispatchError, match="timed out"):
-        supervisor.dispatch_background_job(tmp_path, timeout=5)
+        supervisor.dispatch_background_job(tmp_path, permission_mode="default", timeout=5)
 
 
 def test_dispatch_claude_not_found_propagates(tmp_path, monkeypatch):
     monkeypatch.setattr(supervisor, "resolve_binary", _raise_not_found)
     with pytest.raises(ClaudeNotFound):
-        supervisor.dispatch_background_job(tmp_path)
+        supervisor.dispatch_background_job(tmp_path, permission_mode="default")
 
 
 def _raise_not_found(_binary):
@@ -484,7 +592,9 @@ def test_dispatch_unparseable_claude_json_raises_without_spawning(tmp_path, monk
     cwd.mkdir()
 
     with pytest.raises(supervisor.DispatchError, match="could not trust .*not a valid JSON"):
-        supervisor.dispatch_background_job(cwd, prompt="hi", claude_json=cj)
+        supervisor.dispatch_background_job(
+            cwd, prompt="hi", permission_mode="default", claude_json=cj
+        )
 
     assert cj.read_bytes() == content
     assert spawned == []
@@ -506,7 +616,7 @@ def test_dispatch_trusts_before_spawning_subprocess(tmp_path, monkeypatch):
 
     monkeypatch.setattr(supervisor.subprocess, "run", _run)
 
-    supervisor.dispatch_background_job(tmp_path)
+    supervisor.dispatch_background_job(tmp_path, permission_mode="default")
 
     assert calls == ["trust", "spawn"]  # trust strictly precedes the subprocess spawn
 
@@ -927,7 +1037,9 @@ _UUID = "29e8026f-1234-4abc-8def-0123456789ab"  # a full RFC-4122 session UUID
 
 
 def test_build_dispatch_argv_resume():
-    assert supervisor.build_dispatch_argv("/abs/claude", resume=_UUID) == [
+    assert supervisor.build_dispatch_argv(
+        "/abs/claude", permission_mode="inherit", resume=_UUID
+    ) == [
         "/abs/claude",
         "--bg",
         "--resume",
@@ -949,7 +1061,7 @@ def test_dispatch_rejects_invalid_resume(tmp_path, monkeypatch):
     monkeypatch.setattr(supervisor, "resolve_binary", lambda b: "/abs/claude")
     monkeypatch.setattr(supervisor, "trust_directory", lambda *a, **k: None)
     with pytest.raises(supervisor.DispatchError, match="resume session id"):
-        supervisor.dispatch_background_job(tmp_path, resume="--evil")
+        supervisor.dispatch_background_job(tmp_path, permission_mode="default", resume="--evil")
 
 
 def _fake_job(**kw):
@@ -977,12 +1089,57 @@ def test_resume_background_job_dispatches(monkeypatch):
         "29e8026f", permission_mode="plan", refuse_cwd=_allow, binary="/abs/claude"
     )
     assert new_id == "newjob01"
-    assert captured["cwd"] == Path("/proj")
+    assert captured["cwd"] == Path("/proj").resolve()  # the drive is added on Windows
     assert captured["kw"]["resume"] == _UUID  # the FULL uuid, not the 8-hex id
     # TASK-335: the mode is passed explicitly (no flag would be the inherit argv), and the
-    # caller's ceiling check saw the job's recorded cwd before the dispatch.
+    # caller's ceiling check saw the job's cwd before the dispatch.
     assert captured["kw"]["permission_mode"] == "plan"
-    assert seen == [Path("/proj")]
+    assert seen == [Path("/proj").resolve()]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="os.symlink needs privilege on Windows")
+def test_resume_dispatches_in_the_cwd_it_checked(tmp_path, monkeypatch):
+    # TASK-481: the ceiling check resolved the recorded cwd, but the dispatch ran in the
+    # recorded (symlinked) path, so a link swapped after the check moved the job into a
+    # directory the check never saw. Both now get the one path resolved before the check.
+    checked = tmp_path / "checked"
+    swapped = tmp_path / "swapped"
+    checked.mkdir()
+    swapped.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(checked, target_is_directory=True)
+    monkeypatch.setattr(supervisor, "list_background_jobs", lambda *a, **k: [_fake_job(cwd=link)])
+    dispatched: list[Path] = []
+    monkeypatch.setattr(
+        supervisor,
+        "dispatch_background_job",
+        lambda cwd, **k: dispatched.append(cwd) or "newjob01",
+    )
+
+    def _check_then_swap(cwd):
+        # The check is handed the already-resolved path, not the link: a check that resolved
+        # the link itself could see a different target than the dispatch.
+        assert cwd == checked.resolve()
+        link.unlink()
+        link.symlink_to(swapped, target_is_directory=True)  # swapped after the check
+        return None
+
+    supervisor.resume_background_job(
+        "29e8026f", permission_mode="default", refuse_cwd=_check_then_swap
+    )
+    assert dispatched == [checked.resolve()]
+
+
+def test_resume_refuses_a_nul_byte_cwd_before_the_check(monkeypatch):
+    # Refused on every OS: POSIX resolve() raises on a NUL, Windows returns it unresolved.
+    job = _fake_job(cwd=Path("/proj/bad\x00name"))
+    monkeypatch.setattr(supervisor, "list_background_jobs", lambda *a, **k: [job])
+    checked: list = []
+    with pytest.raises(supervisor.ResumeError, match="invalid working directory"):
+        supervisor.resume_background_job(
+            "29e8026f", permission_mode="default", refuse_cwd=checked.append
+        )
+    assert checked == []
 
 
 def test_resume_background_job_refused_cwd_never_dispatches(monkeypatch):
@@ -1130,8 +1287,10 @@ def test_api_resume_agent_prefix_sibling_does_not_borrow(
     assert captured == []
 
 
-def test_api_resume_agent_nul_byte_cwd_is_403(write_config, tmp_path, projects_root, monkeypatch):
-    # A NUL-byte cwd is refused before resolve() on every OS: a 403, never a 500.
+def test_api_resume_agent_nul_byte_cwd_is_409(write_config, tmp_path, projects_root, monkeypatch):
+    # A NUL-byte cwd is refused before resolve() on every OS: never a 500. Since TASK-481
+    # the resume resolves the cwd itself before the ceiling check, so it is a malformed
+    # job (409) rather than a ceiling refusal (403).
     r, captured = _resume_via_route(
         write_config,
         tmp_path,
@@ -1139,7 +1298,7 @@ def test_api_resume_agent_nul_byte_cwd_is_403(write_config, tmp_path, projects_r
         cwd=projects_root / "alpha" / "bad\x00name",
         extra=_INHERIT_DEFAULT + _ALPHA_CEILING,
     )
-    assert r.status_code == 403
+    assert r.status_code == 409
     assert captured == []
 
 
@@ -1320,7 +1479,7 @@ def test_api_resume_agent_configured_symlink_alias_with_ceiling_resumes(
 
 @_SYMLINK_SKIP
 @pytest.mark.parametrize("kind", ["loop", "dangling"])
-def test_api_resume_agent_loop_or_dangling_link_cwd_is_403(
+def test_api_resume_agent_loop_or_dangling_link_cwd_is_refused(
     write_config, tmp_path, projects_root, monkeypatch, kind
 ):
     link = projects_root / "zeta"
@@ -1328,7 +1487,10 @@ def test_api_resume_agent_loop_or_dangling_link_cwd_is_403(
     r, captured = _resume_via_route(
         write_config, tmp_path, monkeypatch, cwd=link, extra=_INHERIT_DEFAULT + _ALPHA_CEILING
     )
-    assert r.status_code == 403
+    # 3.11/3.12 raise on a loop while resolving the recorded cwd, which is the 409 "cannot
+    # be resolved" refusal; 3.13+ resolve it to a path that no ceiling covers (403).
+    loop_raises = kind == "loop" and sys.version_info < (3, 13)
+    assert r.status_code == (409 if loop_raises else 403)
     assert captured == []
 
 
@@ -1366,10 +1528,11 @@ def test_projects_holding_unreadable_projects_root_matches_nothing(
     assert agents_module._projects_holding(config, projects_root / "alpha") == []
 
 
-def test_api_resume_agent_unresolvable_cwd_is_403(
+def test_api_resume_agent_unresolvable_cwd_is_409(
     write_config, tmp_path, projects_root, monkeypatch
 ):
     # Python 3.11/3.12 raise RuntimeError on a symlink loop; any resolve failure fails closed.
+    # The resume resolves the cwd before the ceiling check (TASK-481): a malformed job, 409.
     class _LoopPath(type(Path())):
         def resolve(self, strict=False):
             raise RuntimeError("Symlink loop")
@@ -1381,7 +1544,8 @@ def test_api_resume_agent_unresolvable_cwd_is_403(
         cwd=_LoopPath(projects_root / "alpha"),
         extra=_INHERIT_DEFAULT + _ALPHA_CEILING,
     )
-    assert r.status_code == 403
+    assert r.status_code == 409
+    assert r.json()["detail"] == "job '29e8026f' working directory cannot be resolved"
     assert captured == []
 
 
