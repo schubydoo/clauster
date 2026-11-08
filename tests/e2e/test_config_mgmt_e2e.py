@@ -2420,6 +2420,165 @@ def test_config_mgmt_plugins_tab_lists_and_acts(
     browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
 
 
+def _plugin_calls(server: Server, verb: str) -> list[list[str]]:
+    """Return the logged ``claude plugin`` argv lists whose first word is ``verb``."""
+    log = server.state_dir.parent / "plugin-argv.jsonl"
+    if not log.exists():
+        return []
+    rows = [json.loads(line)["argv"] for line in log.read_text(encoding="utf-8").splitlines()]
+    return [argv for argv in rows if argv and argv[0] == verb]
+
+
+def _wait_for_plugin_calls(
+    server: Server, verb: str, count: int, timeout_s: float = 20.0
+) -> list[list[str]]:
+    """Poll the fake CLI's call log until ``verb`` ran ``count`` times; return those calls."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        calls = _plugin_calls(server, verb)
+        if len(calls) >= count:
+            return calls
+        time.sleep(0.1)
+    raise AssertionError(
+        f"expected {count} `plugin {verb}` calls, got {_plugin_calls(server, verb)}"
+    )
+
+
+def test_config_mgmt_plugins_one_confirm_disables_two_plugins(
+    browser: AgentBrowser, config_mgmt_plugins_server: Server
+) -> None:
+    """One typed confirm covers two Disables; Uninstall needs it typed again (TASK-522).
+
+    The confirm stays typed after Enable, Disable and Update. Install, Uninstall and
+    marketplace Add/Remove stay disabled until it is typed again, an Uninstall clears it,
+    and a scope switch clears a kept confirm.
+    """
+    server = config_mgmt_plugins_server
+    hello, shared = "hello@market", "shared@market"
+    confirm = '[data-test="cm-plugin-confirm"]'
+    # An always-mounted live region (TASK-508): it changes text, it never hides.
+    spent = '[data-test="cm-plugin-confirm-spent"]'
+    again = "Type the confirm again"
+    _open_modal(browser, server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-plugins"]')
+    browser.expect_visible(f'[data-test="cm-plugin-disable-{hello}"]')
+    browser.fill(confirm, "alpha")
+    assert browser.get_text(spent) == ""
+    browser.click(f'[data-test="cm-plugin-disable-{hello}"]')
+    browser.expect_text(spent, again, timeout_ms=_SAVE_TIMEOUT)
+    assert browser.get_value(confirm) == "alpha"
+    # The second Disable needs no retype.
+    browser.expect_enabled(f'[data-test="cm-plugin-disable-{shared}"]', timeout_ms=_SAVE_TIMEOUT)
+    browser.click(f'[data-test="cm-plugin-disable-{shared}"]')
+    calls = _wait_for_plugin_calls(server, "disable", 2)
+    assert [argv[1] for argv in calls] == [hello, shared]
+    browser.expect_enabled(f'[data-test="cm-plugin-update-{hello}"]', timeout_ms=_SAVE_TIMEOUT)
+    browser.expect_enabled('[data-test="cm-market-update-market"]')
+    # The kept confirm does not arm the actions that need a fresh one.
+    browser.expect_disabled(f'[data-test="cm-plugin-uninstall-{hello}"]')
+    browser.expect_disabled('[data-test="cm-market-remove-market"]')
+    browser.fill('[data-test="cm-marketplace-add-source"]', "owner/other")
+    browser.expect_disabled('[data-test="cm-marketplace-add-go"]')
+    browser.fill('[data-test="cm-plugin-install-id"]', "x@market")
+    browser.fill('[data-test="cm-plugin-install-confirm"]', "x@market")
+    browser.expect_disabled('[data-test="cm-plugin-install-go"]')
+    # Typed again: Uninstall arms, and after it runs the confirm is empty.
+    browser.fill(confirm, "alpha")
+    assert browser.get_text(spent) == ""
+    browser.expect_enabled(f'[data-test="cm-plugin-uninstall-{hello}"]')
+    browser.click(f'[data-test="cm-plugin-uninstall-{hello}"]')
+    _wait_for_plugin_calls(server, "uninstall", 1)
+    browser.expect_value(confirm, "", timeout_ms=_SAVE_TIMEOUT)
+    browser.expect_disabled(f'[data-test="cm-plugin-disable-{shared}"]')
+    # A kept confirm clears when the scope changes.
+    browser.fill(confirm, "alpha")
+    browser.click(f'[data-test="cm-plugin-disable-{shared}"]')
+    _wait_for_plugin_calls(server, "disable", 3)
+    browser.expect_text(spent, again, timeout_ms=_SAVE_TIMEOUT)
+    browser.click('[data-test="cm-scope-local"]')
+    browser.expect_attr('[data-test="cm-scope-local"]', "aria-pressed", "true")
+    browser.expect_value(confirm, "")
+    assert browser.get_text(spent) == ""
+
+
+def test_config_mgmt_plugins_marketplace_lists_what_it_offers(
+    browser: AgentBrowser, config_mgmt_plugins_server: Server
+) -> None:
+    """A marketplace shows its plugins and installs one with no id retype (TASK-516).
+
+    Installed plugins are marked, the CLI's built-in directory stays out, marketplace
+    markup shows as text, and a marketplace that offers nothing says so. The install sends
+    the listed id as the server's ``confirm_plugin`` and needs a freshly typed confirm.
+    """
+    server = config_mgmt_plugins_server
+    _open_modal(browser, server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-plugins"]')
+    toggle = '[data-test="cm-market-offered-toggle-market"]'
+    browser.expect_visible(toggle)
+    browser.expect_attr(toggle, "aria-expanded", "false")
+    assert not browser.is_visible('[data-test="cm-market-offered-market"]')
+    assert _plugin_calls(server, "list") == [["list", "--json"]]  # nothing read before a click
+    # The accessible name starts with the visible words (WCAG 2.5.3).
+    # innerText puts a line break before the visually-hidden part.
+    assert " ".join(browser.get_text(toggle).split()) == "Show plugins from market"
+    browser.click(toggle)
+    browser.expect_attr(toggle, "aria-expanded", "true")
+    offered = '[data-test="cm-market-offered-market"]'
+    browser.expect_visible('[data-test="cm-offered-newbie@market"]')
+    # The row's always-mounted live region says what the list holds.
+    browser.expect_text('[data-test="cm-market-offered-live-market"]', "market offers 4 plugins.")
+    # Installed for alpha: marked, no Install. Installed only in beta: offered again.
+    browser.expect_visible('[data-test="cm-offered-installed-hello@market"]')
+    browser.expect_visible('[data-test="cm-offered-installed-shared@market"]')
+    assert browser.get_count('[data-test="cm-offered-install-hello@market"]') == 0
+    browser.expect_visible('[data-test="cm-offered-install-other@market"]')
+    assert (
+        browser.get_count('[data-test="cm-offered-directory-only@anthropic-plugin-directory"]')
+        == 0
+    )
+    # Marketplace text is text, never markup.
+    browser.expect_text(offered, "New <img src=x onerror=window.__xss516=1> plugin")
+    browser.expect_text(offered, "version 0.1.0")
+    assert browser.get_count(f"{offered} img") == 0
+    assert browser.eval_json("window.__xss516 === undefined") is True
+    # Read from alpha's directory, with the --available flag.
+    [read] = [argv for argv in _plugin_calls(server, "list") if "--available" in argv]
+    assert read == ["list", "--available", "--json"]
+    # A marketplace with no plugins says so instead of an empty area.
+    browser.click('[data-test="cm-market-offered-toggle-empty"]')
+    browser.expect_text(
+        '[data-test="cm-market-offered-empty-empty"]', "This marketplace offers no plugins."
+    )
+    available_reads = 2  # one per open list
+    _wait_for_plugin_calls(server, "list", 1 + available_reads)
+    # A Disable cannot change what a marketplace offers: no list is read again.
+    browser.fill('[data-test="cm-plugin-confirm"]', "alpha")
+    browser.click('[data-test="cm-plugin-disable-hello@market"]')
+    _wait_for_plugin_calls(server, "disable", 1)
+    browser.expect_text('[data-test="cm-plugin-confirm-spent"]', "Type", timeout_ms=_SAVE_TIMEOUT)
+    assert len(_plugin_calls(server, "list")) == 2 + available_reads  # + the plugin list
+    # Install from the list: the scope confirm typed again, no id retype.
+    install = '[data-test="cm-offered-install-newbie@market"]'
+    browser.expect_disabled(install)
+    browser.fill('[data-test="cm-plugin-confirm"]', "alpha")
+    browser.expect_enabled(install)
+    browser.click(install)
+    [call] = _wait_for_plugin_calls(server, "install", 1)
+    assert call == ["install", "newbie@market", "--scope", "project"]
+    browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
+    # An install clears the confirm, and both open lists are read again.
+    browser.expect_value('[data-test="cm-plugin-confirm"]', "", timeout_ms=_SAVE_TIMEOUT)
+    _wait_for_plugin_calls(server, "list", 3 + 2 * available_reads)
+    browser.expect_visible('[data-test="cm-offered-newbie@market"]', timeout_ms=_SAVE_TIMEOUT)
+    browser.expect_disabled(install)
+    # Hide closes the list.
+    browser.click(toggle)
+    browser.expect_attr(toggle, "aria-expanded", "false")
+    browser.expect_hidden(offered)
+
+
 def test_config_mgmt_plugins_rows_follow_the_install_scope(
     browser: AgentBrowser, config_mgmt_plugins_server: Server
 ) -> None:

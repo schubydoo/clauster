@@ -56,6 +56,40 @@ async def api_config_write_marketplaces_list(
     return result
 
 
+@router.get("/api/config-write/marketplaces/offered")
+async def api_config_write_marketplaces_offered(
+    config: ConfigDep,
+    runner: RunnerOrNoneDep,
+    marketplace: str = "",
+    scope: str = "project",
+    project: str = "",
+) -> dict:
+    """List the plugins one marketplace offers, installed ones marked (TASK-516)."""
+    # `claude plugin list --available --json`, read from the scope's cwd: the CLI leaves
+    # out what is installed for that cwd. One marketplace per request, because the CLI's
+    # answer also holds a built-in directory of thousands of plugins.
+    config_write.require_capability(config, scope)  # type: ignore[arg-type]
+    if scope not in ("project", "user", "local"):
+        raise HTTPException(status_code=422, detail="scope must be 'project', 'user', or 'local'")
+    try:
+        config_write.validate_candidate(
+            marketplace, config_write_plugins.validate_marketplace_name
+        )
+    except config_write.InvalidCandidateError as exc:
+        raise _base.map_config_write_error(exc) from exc
+    cwd = _base.plugin_cli_cwd(config, runner, scope, project)
+    try:
+        plugins = await asyncio.to_thread(
+            config_write_plugins.cli_list_offered_plugins, config.claude.binary, cwd, marketplace
+        )
+    except config_write.ConfigWriteError as exc:
+        raise _base.map_config_write_error(exc) from exc
+    result: dict[str, Any] = {"scope": scope, "marketplace": marketplace, "plugins": plugins}
+    if scope != "user":
+        result["project"] = project
+    return result
+
+
 @router.get("/api/config-write/marketplaces/declared")
 async def api_config_write_marketplaces_declared(
     config: ConfigDep, runner: RunnerOrNoneDep, scope: str = "project", project: str = ""

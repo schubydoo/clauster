@@ -2647,3 +2647,414 @@ def test_route_marketplace_update_failed_read_after_is_reported_not_400(
     with _client(write_config, tmp_path, _ON) as c:
         body = _update_marketplace(c)
     assert "could not read its plugin list" in body["message"]
+
+
+# --- the plugins one marketplace offers (TASK-516): `plugin list --available --json` ---
+
+#: The shape claude 2.1.319 prints (probed under a throwaway HOME, 2026-11-08): an installed
+#: plugin is left out of `available` for the cwd it is installed for, and a built-in
+#: directory that `marketplace list` does not name rides along.
+_AVAILABLE = {
+    "installed": [
+        {"id": "alpha@probe", "version": "1.2.0", "scope": "user", "enabled": True},
+        {"id": "gamma@probe", "version": "3.0.0", "scope": "project", "enabled": True},
+        {"id": "gamma@probe", "version": "3.0.0", "scope": "local", "enabled": True},
+        {"id": "elsewhere@probe", "version": "1.0.0", "scope": "project", "enabled": False},
+        {"id": "other@market2", "version": "9", "scope": "user", "enabled": True},
+    ],
+    "available": [
+        {
+            "pluginId": "zeta@probe",
+            "name": "zeta",
+            "description": "Zeta <b>bold</b>",
+            "marketplaceName": "probe",
+            "version": "0.1.0",
+            "source": {"source": "url", "url": "https://github.com/o/zeta.git"},
+        },
+        {
+            "pluginId": "beta@probe",
+            "name": "beta",
+            "marketplaceName": "probe",
+            "source": "./plugins/beta",
+        },
+        # Installed in another project only: the CLI still offers it from this cwd.
+        {"pluginId": "elsewhere@probe", "name": "elsewhere", "marketplaceName": "probe"},
+        {
+            "pluginId": "superpowers@anthropic-plugin-directory",
+            "name": "superpowers",
+            "marketplaceName": "anthropic-plugin-directory",
+        },
+    ],
+}
+
+
+def _offered(plugin_id: str, version: str = "", *, installed: bool, description: str = ""):
+    """Build one expected offered-plugin entry."""
+    return {
+        "id": plugin_id,
+        "name": plugin_id.split("@")[0],
+        "description": description,
+        "version": version,
+        "installed": installed,
+    }
+
+
+def test_cli_list_offered_plugins_keeps_one_marketplace_and_marks_installed(
+    tmp_path: Path,
+) -> None:
+    run, calls = _fake_run(rc=0, stdout=json.dumps(_AVAILABLE))
+    out = plugins.cli_list_offered_plugins(str(FAKE_CLAUDE), tmp_path, "probe", run=run)
+    assert calls[0]["argv"][1:] == ["plugin", "list", "--available", "--json"]
+    assert calls[0]["kwargs"]["cwd"] == str(tmp_path)
+    # Sorted by name; the source (a git url) is dropped; installed ones come from
+    # `installed`, once per id even when installed at two scopes.
+    assert out == [
+        _offered("alpha@probe", "1.2.0", installed=True),
+        _offered("beta@probe", installed=False),
+        _offered("elsewhere@probe", installed=False),
+        _offered("gamma@probe", "3.0.0", installed=True),
+        _offered("zeta@probe", "0.1.0", installed=False, description="Zeta <b>bold</b>"),
+    ]
+
+
+def test_cli_list_offered_plugins_marketplace_with_none_is_empty(tmp_path: Path) -> None:
+    run, _calls = _fake_run(rc=0, stdout=json.dumps(_AVAILABLE))
+    assert plugins.cli_list_offered_plugins(str(FAKE_CLAUDE), tmp_path, "nothing", run=run) == []
+
+
+def test_cli_list_offered_plugins_without_installed_key_is_ok(tmp_path: Path) -> None:
+    run, _calls = _fake_run(rc=0, stdout=json.dumps({"available": _AVAILABLE["available"]}))
+    out = plugins.cli_list_offered_plugins(str(FAKE_CLAUDE), tmp_path, "probe", run=run)
+    assert [p["id"] for p in out] == ["beta@probe", "elsewhere@probe", "zeta@probe"]
+
+
+def test_cli_list_offered_plugins_masks_marketplace_text(tmp_path: Path) -> None:
+    payload = {
+        "installed": [],
+        "available": [
+            {
+                "pluginId": "leaky@probe",
+                "name": "leaky",
+                "description": "clone https://user:sk-live-123@host/repo.git\ntoken: sk-live-456",
+                "version": "1.0\ntoken: sk-live-999",
+                "marketplaceName": "probe",
+            },
+            {
+                "pluginId": "interp@probe",
+                "description": "${DESC_TOKEN}",
+                "version": "${VERSION_TOKEN}",
+                "marketplaceName": "probe",
+            },
+        ],
+    }
+    run, _calls = _fake_run(rc=0, stdout=json.dumps(payload))
+    out = plugins.cli_list_offered_plugins(str(FAKE_CLAUDE), tmp_path, "probe", run=run)
+    shown = json.dumps(out)
+    for secret in ("sk-live-123", "sk-live-456", "sk-live-999", "DESC_TOKEN", "VERSION_TOKEN"):
+        assert secret not in shown
+    assert all(cw.REDACTION_SENTINEL in p["description"] for p in out)
+    assert [p["id"] for p in out] == ["interp@probe", "leaky@probe"]
+
+
+def test_cli_list_offered_plugins_cuts_long_description_after_masking(tmp_path: Path) -> None:
+    # The secret straddles the cut: masked first, so no part of it survives.
+    # The cut falls inside `sk-live-cut`, before the `@` the line redaction keys on.
+    text = "x" * (plugins.OFFERED_TEXT_MAX - 20) + " https://u:sk-live-cut@h/r.git" + "y" * 5000
+    payload = {
+        "available": [{"pluginId": "long@probe", "description": text, "marketplaceName": "probe"}]
+    }
+    run, _calls = _fake_run(rc=0, stdout=json.dumps(payload))
+    [entry] = plugins.cli_list_offered_plugins(str(FAKE_CLAUDE), tmp_path, "probe", run=run)
+    assert len(entry["description"]) == plugins.OFFERED_TEXT_MAX + 1
+    assert entry["description"].endswith("…")
+    assert "sk-live" not in entry["description"]
+
+
+def test_cli_list_offered_plugins_empty_available_is_a_real_answer(tmp_path: Path) -> None:
+    # Every plugin of the marketplace is installed for this cwd: `available` is empty.
+    payload = {"available": [], "installed": [{"id": "a@probe", "version": "1"}]}
+    run, _calls = _fake_run(rc=0, stdout=json.dumps(payload))
+    out = plugins.cli_list_offered_plugins(str(FAKE_CLAUDE), tmp_path, "probe", run=run)
+    assert out == [_offered("a@probe", "1", installed=True)]
+
+
+@pytest.mark.parametrize(
+    ("entries", "version"),
+    [
+        pytest.param(
+            [("project", "other", "1"), ("project", "here", "2")],
+            "2",
+            id="this-project-over-another-project",
+        ),
+        pytest.param(
+            [("project", "other", "1"), ("user", None, "5")],
+            "5",
+            id="user-over-another-project",
+        ),
+        pytest.param(
+            [("user", None, "3"), ("project", "here", "4")],
+            "4",
+            id="this-project-over-user",
+        ),
+        pytest.param(
+            [("project", "here", "6"), ("local", "here", "7"), ("user", None, "8")],
+            "7",
+            id="local-over-project-and-user",
+        ),
+        pytest.param(
+            [("local", "other", "1"), ("project", "other", "9")],
+            "1",
+            id="only-other-projects-keeps-the-first",
+        ),
+    ],
+)
+def test_cli_list_offered_plugins_shows_the_install_that_applies_here(
+    tmp_path: Path, entries: list[tuple[str, str | None, str]], version: str
+) -> None:
+    # Greptile, PR 1857: `installed` lists every project's installs. The row for this
+    # cwd shows the install that applies here (local, then project, then user), not the
+    # first one listed.
+    here, other = tmp_path / "here", tmp_path / "other"
+    here.mkdir()
+    other.mkdir()
+    dirs = {"here": here, "other": other}
+    installed = [
+        {"id": "p@m", "version": v, "scope": scope}
+        | ({"projectPath": str(dirs[where])} if where else {})
+        for scope, where, v in entries
+    ]
+    run, _calls = _fake_run(rc=0, stdout=json.dumps({"available": [], "installed": installed}))
+    out = plugins.cli_list_offered_plugins(str(FAKE_CLAUDE), here, "m", run=run)
+    assert out == [_offered("p@m", version, installed=True)]
+
+
+def test_cli_list_offered_plugins_lone_surrogate_cannot_500(
+    write_config, tmp_path, projects_root, monkeypatch
+) -> None:
+    # `\udc00` is valid JSON text, but the response cannot encode it (backend review).
+    raw = '{"available": [{"pluginId": "s@probe", "marketplaceName": "probe", '
+    raw += '"description": "a\\udc00b", "version": "\\ud800"}]}'
+    monkeypatch.setenv("FAKE_CLAUDE_PLUGIN_AVAILABLE_STDOUT", raw)
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.get(
+            "/api/config-write/marketplaces/offered?scope=project&project=alpha&marketplace=probe"
+        )
+    assert resp.status_code == 200
+    [entry] = resp.json()["plugins"]
+    assert entry["description"] == "a?b"
+    assert entry["version"] == "?"
+
+
+def test_cli_list_offered_plugins_sorts_by_shown_name(tmp_path: Path) -> None:
+    ids = ["ab@probe", "a_b@probe", "a@probe", "a0@probe", "a.b@probe", "a-b@probe"]
+    payload = {"available": [{"pluginId": i, "marketplaceName": "probe"} for i in ids]}
+    run, _calls = _fake_run(rc=0, stdout=json.dumps(payload))
+    out = plugins.cli_list_offered_plugins(str(FAKE_CLAUDE), tmp_path, "probe", run=run)
+    assert [p["name"] for p in out] == sorted(i.split("@")[0] for i in ids)
+
+
+def test_cli_list_offered_plugins_sort_ignores_case_then_breaks_ties_by_id(
+    tmp_path: Path,
+) -> None:
+    ids = ["B@probe", "a@probe", "A@probe"]
+    payload = {"available": [{"pluginId": i, "marketplaceName": "probe"} for i in ids]}
+    run, _calls = _fake_run(rc=0, stdout=json.dumps(payload))
+    out = plugins.cli_list_offered_plugins(str(FAKE_CLAUDE), tmp_path, "probe", run=run)
+    assert [p["id"] for p in out] == ["A@probe", "a@probe", "B@probe"]
+
+
+@pytest.mark.parametrize("value", ["a\n@probe", "a@probe\n", "a\n"])
+def test_validate_plugin_id_rejects_a_trailing_newline(value: str) -> None:
+    # `$` also matches before a trailing newline; the segment check must use fullmatch.
+    with pytest.raises(cw.InvalidCandidateError):
+        plugins.validate_plugin_id(value)
+
+
+def test_validate_marketplace_name_rejects_a_trailing_newline() -> None:
+    with pytest.raises(cw.InvalidCandidateError):
+        plugins.validate_marketplace_name("probe\n")
+
+
+def test_cli_list_offered_plugins_drops_an_id_with_a_newline(tmp_path: Path) -> None:
+    payload = {
+        "available": [
+            {"pluginId": "a\n@probe", "marketplaceName": "probe"},
+            {"pluginId": "ok@probe", "marketplaceName": "probe"},
+        ]
+    }
+    run, _calls = _fake_run(rc=0, stdout=json.dumps(payload))
+    out = plugins.cli_list_offered_plugins(str(FAKE_CLAUDE), tmp_path, "probe", run=run)
+    assert [p["id"] for p in out] == ["ok@probe"]
+
+
+def test_run_decodes_cli_output_as_utf8_on_every_os(tmp_path: Path) -> None:
+    # "Ł" is C5 81 in UTF-8, and cp1252 (the Windows default) has no 0x81: a locale
+    # decode raised UnicodeDecodeError, a 500. A real child writes the bytes, so the
+    # decode `_run` asks for is the one that runs.
+    payload = {"available": [{"pluginId": "p@m", "marketplaceName": "m", "description": "Ł"}]}
+    raw = json.dumps(payload, ensure_ascii=False).encode("utf-8") + b"\xff"
+    code = f"import sys; sys.stdout.buffer.write({raw!r})"
+
+    def run(argv, **kwargs):
+        # Pinned on every OS: a UTF-8 locale (Linux, macOS) hides a missing `encoding`.
+        assert kwargs["encoding"] == "utf-8" and kwargs["errors"] == "replace"
+        return subprocess.run([sys.executable, "-c", code], **kwargs)
+
+    with pytest.raises(plugins.PluginCliError, match="invalid JSON"):
+        # The trailing 0xFF is not UTF-8: replaced, never a UnicodeDecodeError.
+        plugins.cli_list_offered_plugins(str(FAKE_CLAUDE), tmp_path, "m", run=run)
+    code = f"import sys; sys.stdout.buffer.write({raw[:-1]!r})"
+    [entry] = plugins.cli_list_offered_plugins(str(FAKE_CLAUDE), tmp_path, "m", run=run)
+    assert entry["description"] == "Ł"
+
+
+def test_cli_list_offered_plugins_row_names_the_id_it_installs(tmp_path: Path) -> None:
+    # The list installs without a retype, so a row's label is its own id's name part, and
+    # an id that is not a valid id of this marketplace is never offered (backend review).
+    payload = {
+        "installed": [{"id": "${TOK}@probe"}, {"id": "-evil@probe"}],
+        "available": [
+            {"pluginId": "evil@other", "name": "trusted", "marketplaceName": "probe"},
+            {"pluginId": "real@probe", "name": "trusted", "marketplaceName": "probe"},
+            {"pluginId": "${TOK}@probe", "name": "masked", "marketplaceName": "probe"},
+            {"pluginId": "a@b@probe", "marketplaceName": "probe"},
+        ],
+    }
+    run, _calls = _fake_run(rc=0, stdout=json.dumps(payload))
+    out = plugins.cli_list_offered_plugins(str(FAKE_CLAUDE), tmp_path, "probe", run=run)
+    assert out == [_offered("real@probe", installed=False)]
+
+
+def test_cli_list_offered_plugins_skips_malformed_entries(tmp_path: Path) -> None:
+    payload = {
+        "installed": ["not a dict", {"id": 7}, {"version": "1"}],
+        "available": [
+            "not a dict",
+            {"marketplaceName": "probe"},  # no pluginId
+            {"pluginId": "", "marketplaceName": "probe"},
+            {"pluginId": "x@probe", "name": 5, "description": ["x"], "marketplaceName": "probe"},
+            {"pluginId": "x@probe", "name": "dup", "marketplaceName": "probe"},
+        ],
+    }
+    run, _calls = _fake_run(rc=0, stdout=json.dumps(payload))
+    out = plugins.cli_list_offered_plugins(str(FAKE_CLAUDE), tmp_path, "probe", run=run)
+    assert out == [_offered("x@probe", installed=False)]
+
+
+def test_cli_list_offered_plugins_rejects_bad_marketplace_before_spawn(tmp_path: Path) -> None:
+    run, calls = _fake_run(rc=0, stdout="{}")
+    with pytest.raises(cw.InvalidCandidateError):
+        plugins.cli_list_offered_plugins(str(FAKE_CLAUDE), tmp_path, "-evil", run=run)
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    [
+        # Fail closed: no output, or no `available` list, is a CLI contract change, never
+        # "this marketplace offers no plugins" (backend review).
+        pytest.param("", id="empty"),
+        pytest.param("  \n", id="blank"),
+        pytest.param("{}", id="no-available"),
+        pytest.param('{"plugins": []}', id="renamed-key"),
+        pytest.param("not json{{", id="invalid"),
+        pytest.param("[]", id="list-not-object"),
+        pytest.param('{"available": {}, "installed": []}', id="available-not-list"),
+        pytest.param('{"available": [], "installed": "x"}', id="installed-not-list"),
+        *_UNPARSEABLE,
+    ],
+)
+def test_cli_list_offered_plugins_rejects_malformed_output(tmp_path: Path, stdout: str) -> None:
+    run, _calls = _fake_run(rc=0, stdout=stdout)
+    with pytest.raises(plugins.PluginCliError):
+        plugins.cli_list_offered_plugins(str(FAKE_CLAUDE), tmp_path, "probe", run=run)
+
+
+def test_cli_list_offered_plugins_cli_failure_is_400_not_404(tmp_path: Path) -> None:
+    # A read names no entity: "not found" in its message is a CLI failure, never a 404.
+    run, _calls = _fake_run(rc=1, stderr="marketplace not found\ntoken: sk-live-789")
+    with pytest.raises(plugins.PluginCliError) as exc_info:
+        plugins.cli_list_offered_plugins(str(FAKE_CLAUDE), tmp_path, "probe", run=run)
+    assert not isinstance(exc_info.value, plugins.PluginNotFoundError)
+    assert "sk-live-789" not in str(exc_info.value)
+
+
+def test_route_marketplaces_offered_project_scope(
+    write_config, tmp_path, projects_root, monkeypatch
+) -> None:
+    argv_file = tmp_path / "argv.json"
+    monkeypatch.setenv("FAKE_CLAUDE_PLUGIN_ARGV_FILE", str(argv_file))
+    monkeypatch.setenv("FAKE_CLAUDE_PLUGIN_AVAILABLE_STDOUT", json.dumps(_AVAILABLE))
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.get(
+            "/api/config-write/marketplaces/offered?scope=project&project=alpha&marketplace=probe"
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["scope"] == "project" and body["project"] == "alpha"
+    assert body["marketplace"] == "probe"
+    assert [p["id"] for p in body["plugins"]] == [
+        "alpha@probe",
+        "beta@probe",
+        "elsewhere@probe",
+        "gamma@probe",
+        "zeta@probe",
+    ]
+    record = json.loads(argv_file.read_text())
+    assert record["argv"] == ["list", "--available", "--json"]
+    # Read from the project's own directory: the CLI's "installed" depends on the cwd.
+    assert Path(record["cwd"]).resolve() == (projects_root / "alpha").resolve()
+
+
+def test_route_marketplaces_offered_user_scope_omits_project(
+    write_config, tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("FAKE_CLAUDE_PLUGIN_AVAILABLE_STDOUT", json.dumps(_AVAILABLE))
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.get("/api/config-write/marketplaces/offered?scope=user&marketplace=market2")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "project" not in body
+    assert body["plugins"] == [_offered("other@market2", "9", installed=True)]
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        pytest.param("scope=bogus&project=alpha&marketplace=probe", id="bogus-scope"),
+        pytest.param("scope=project&project=alpha&marketplace=-evil", id="option-like-name"),
+        pytest.param("scope=project&project=alpha", id="missing-name"),
+    ],
+)
+def test_route_marketplaces_offered_bad_input_is_422(
+    write_config, tmp_path, projects_root, query
+) -> None:
+    with _client(write_config, tmp_path, _ON) as c:
+        assert c.get(f"/api/config-write/marketplaces/offered?{query}").status_code == 422
+
+
+def test_route_marketplaces_offered_404_when_disabled(write_config, tmp_path) -> None:
+    # Capability first (#819): a disabled surface 404s, a bad name included.
+    with _client(write_config, tmp_path, "") as c:
+        resp = c.get("/api/config-write/marketplaces/offered?scope=bogus&marketplace=-evil")
+    assert resp.status_code == 404
+
+
+def test_route_marketplaces_offered_user_scope_404_when_off(write_config, tmp_path) -> None:
+    with _client(write_config, tmp_path, _PROJECT_ONLY) as c:
+        resp = c.get("/api/config-write/marketplaces/offered?scope=user&marketplace=probe")
+    assert resp.status_code == 404
+
+
+def test_route_marketplaces_offered_cli_error_is_400_with_masked_detail(
+    write_config, tmp_path, projects_root, monkeypatch
+) -> None:
+    monkeypatch.setenv("FAKE_CLAUDE_PLUGIN_EXIT_CODE_LIST_AVAILABLE", "1")
+    monkeypatch.setenv("FAKE_CLAUDE_PLUGIN_STDERR", "boom https://u:sk-live-000@h/r.git")
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.get(
+            "/api/config-write/marketplaces/offered?scope=project&project=alpha&marketplace=probe"
+        )
+    assert resp.status_code == 400
+    assert "boom" in resp.json()["detail"]
+    assert "sk-live-000" not in resp.json()["detail"]

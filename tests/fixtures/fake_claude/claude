@@ -387,8 +387,10 @@ def run_plugin(args):
                                   upper-cased (ENABLE/DISABLE/INSTALL/UNINSTALL/
                                   UPDATE/LIST/DETAILS), or for a `marketplace`
                                   subcommand `MARKETPLACE_<SUBVERB>` (e.g.
-                                  MARKETPLACE_ADD, MARKETPLACE_REMOVE).
+                                  MARKETPLACE_ADD, MARKETPLACE_REMOVE). `list
+                                  --available` uses LIST_AVAILABLE (TASK-516).
       FAKE_CLAUDE_PLUGIN_STDOUT   = stdout text to emit (default "")
+      FAKE_CLAUDE_PLUGIN_AVAILABLE_STDOUT = stdout for `list --available --json` only
       FAKE_CLAUDE_PLUGIN_STDERR   = stderr text to emit (default "")
       FAKE_CLAUDE_PLUGIN_ARGV_FILE = path to record {"argv", "cwd"} as JSON, so a
                                   test can assert exactly what clauster invoked
@@ -402,6 +404,9 @@ def run_plugin(args):
     key = verb.upper().replace("-", "_")
     if verb == "marketplace" and len(args) > 1:
         key = f"MARKETPLACE_{args[1].upper().replace('-', '_')}"
+    available = verb == "list" and "--available" in args
+    if available:
+        key = "LIST_AVAILABLE"
     if os.environ.get("FAKE_CLAUDE_PLUGIN_ARGV_FILE"):
         import json
 
@@ -423,7 +428,10 @@ def run_plugin(args):
     # existing route tests are unaffected.
     list_out = os.environ.get("FAKE_CLAUDE_PLUGIN_LIST_STDOUT")
     mkt_out = os.environ.get("FAKE_CLAUDE_PLUGIN_MARKETPLACE_LIST_STDOUT")
-    if verb == "list" and list_out is not None:
+    avail_out = os.environ.get("FAKE_CLAUDE_PLUGIN_AVAILABLE_STDOUT")
+    if available and avail_out is not None:
+        stdout = avail_out
+    elif verb == "list" and list_out is not None:
         stdout = list_out
     elif verb == "marketplace" and len(args) > 1 and args[1] == "list" and mkt_out is not None:
         stdout = mkt_out
