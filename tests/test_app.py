@@ -895,11 +895,10 @@ def test_dashboard_hosted_view_reconnects_after_a_recovered_session(write_config
     assert re.search(
         r"if\s*\(v\.deadSeen\)\s*\{\s*v\.attempts\s*=\s*0;\s*this\.openHosted\(id\);\s*\}", page
     )
-    assert re.search(
-        r"w\.attempts\s*>=\s*MAX_LOG_RECONNECTS\)\s*\{\s*self\._markHostedEnded\(id\);"
-        r"(?:\s*//[^\n]*)*\s*if\s*\(h\.status\s*!==\s*\"running\"\)\s*w\.deadSeen\s*=\s*true;",
-        page,
-    )
+    cap = page.index("if (w.attempts >= MAX_LOG_RECONNECTS) {")
+    give_up = page[cap : page.index("return;", cap)]
+    assert "self._markHostedEnded(id);" in give_up
+    assert 'if (h.status !== "running") w.deadSeen = true;' in give_up
 
 
 def test_dashboard_footer_credits_vendored_assets(write_config):
