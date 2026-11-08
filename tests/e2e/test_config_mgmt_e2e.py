@@ -2867,18 +2867,19 @@ def test_mcp_gate_stays_closed_when_the_reload_after_a_save_fails(
     _stub_alpha_preflight(browser, "Promise.resolve(new Response('{}',{status:500}))")
     browser.click('[data-test="cm-mcp-approvals-save"]')
     browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
-    _wait_for_failed_reload(browser)
+    _wait_for_failed_reload(browser, min_calls=1)  # the save's fetch is the first call
     assert browser.eval_json(_GATE) is True
 
 
-def _wait_for_failed_reload(browser: AgentBrowser) -> None:
+def _wait_for_failed_reload(browser: AgentBrowser, *, min_calls: int) -> None:
     """Wait until the save's own readiness reload has failed and been applied.
 
-    The stub's counter rises only when this save fetches, so an older preflightError
-    cannot satisfy the wait.
+    ``min_calls`` is the stub's call count that includes this save's fetch, so an older
+    preflightError cannot end the wait before the save has fetched.
     """
     deadline = time.monotonic() + 10
-    while not browser.eval_json("(()=>window.__pf>=1&&!!" + _ROOT + ".preflightError['alpha'])()"):
+    cond = f"(()=>window.__pf>={min_calls}&&!!{_ROOT}.preflightError['alpha'])()"
+    while not browser.eval_json(cond):
         assert time.monotonic() < deadline, "the save's readiness reload never failed"
         time.sleep(0.2)
 
@@ -2911,7 +2912,7 @@ def test_mcp_gate_ignores_a_pre_write_answer_that_lands_during_the_save(
     )
     browser.click('[data-test="cm-mcp-approvals-save"]')
     browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
-    _wait_for_failed_reload(browser)
+    _wait_for_failed_reload(browser, min_calls=2)  # call 1 is the held older request
     state = browser.eval_json(
         "(()=>({entered:window.__mcpEntered===true,stale:window.__staleApplied??null,"
         "calls:window.__pf}))()"
