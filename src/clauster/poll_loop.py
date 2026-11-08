@@ -393,9 +393,9 @@ class PollLoop:
             )
 
         # A managed bridge owns the working sessions at its cwd if its PROCESS is alive
-        # (computed above), or — the one status-based exception, see the explicit arm below
-        # (#713) — if it is still STARTING (or, TASK-520, went RUNNING after the liveness
-        # loop judged it; see `may_own`). Keying on a *live* process rather than a stale
+        # (computed above), or — the status-based exceptions, see `may_own` — if it is still
+        # STARTING (#713) or, TASK-520, went RUNNING on a pid the liveness loop never judged.
+        # Keying on a *live* process rather than a stale
         # RUNNING status is what keeps a genuinely dead instance from hiding a real external
         # bridge: a `_stopped_from_persisted` phantom (no live process) is correctly absent
         # here, so a real flag-form/tmux bridge at its cwd still surfaces as external. The
