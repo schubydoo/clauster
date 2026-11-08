@@ -2408,7 +2408,10 @@ it does not try to inspect the files. Instead, it refuses <code>inherit</code> i
   without a config entry, so a symlink alias directly under <code>projects_root</code> needs its
   own ceiling too. Clauster compares the resolved paths, so a <code>..</code> cannot borrow
   another project's ceiling, and a run in no project is refused. A deeper link, or a
-  link outside <code>projects_root</code>, counts as the directory that it resolves to.</li>
+  link outside <code>projects_root</code>, counts as the directory that it resolves to.
+  Clauster resolves the run's directory once and starts the resume in that resolved
+  directory, so a link in the recorded path that changes after the check does not
+  move the resume.</li>
 </ul>
 <p>Claude Code ignores <code>bypassPermissions</code> in a project's <code>.claude/settings.json</code> and
 <code>.claude/settings.local.json</code> (the session starts in the default mode), so a value
