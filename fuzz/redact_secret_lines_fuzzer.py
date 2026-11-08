@@ -130,11 +130,10 @@ _CLOSED_QUOTE_RE = {
 _PLAIN_FLOW_RE = re.compile(r"[^,}\]]*")
 #: Node properties (``&anchor``, ``!tag``) in front of a value.
 _PROPERTIES_RE = re.compile(r"(?:[&!][^ \t]*[ \t]*)*")
-#: A line that a plain value does not go on into: a comment or a mapping key (``key:`` and
-#: then a space, a tab or the end).
-_NOT_PLAIN_TEXT_RE = re.compile(r"#|([\"']?)[\w.\-]+\1[ \t]*:(?:[ \t]|\Z)")
-#: How a value goes on: a flow or block value, or a plain value (a quote character is the
-#: quoted value of a ``key: value`` line still open).
+#: A line that a plain value does not go on into: a comment, or a mapping key (``key:`` and
+#: then a space, a tab or the end) after any ``- `` markers.
+_NOT_PLAIN_TEXT_RE = re.compile(r"#|(?:-[ \t]+)*([\"']?)[\w.\-]+\1[ \t]*:(?:[ \t]|\Z)")
+#: How a value goes on: a block, flow or open quoted value, or a plain value.
 _FLOW, _PLAIN = "", "plain"
 
 
@@ -178,7 +177,7 @@ def _ref_value_run(value: str) -> str | None:
     rest = value[props.end() :]
     lead = rest[:1]
     if lead in _CLOSED_QUOTE_RE:
-        return None if _CLOSED_QUOTE_RE[lead].match(rest) else lead
+        return None if _CLOSED_QUOTE_RE[lead].match(rest) else _FLOW
     return _FLOW if lead in ("{", "[") else _PLAIN
 
 
@@ -211,8 +210,6 @@ def _reference_redact(text: str) -> str:
             text = run == _PLAIN and _NOT_PLAIN_TEXT_RE.match(body, indent) is not None
             if (indent > column and not text) or (indent == column and items and item):
                 out.append(body[:indent] + _SENTINEL + eol)
-                if run in _CLOSED_QUOTE_RE and _CLOSED_QUOTE_RE[run].match(run + body):
-                    block = None  # the line that closes the quote ends the value
                 continue
             block = None
         masked = _ref_shared_masks(body)

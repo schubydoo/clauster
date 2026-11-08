@@ -223,8 +223,8 @@ _FLOW_END_RE = re.compile(r"[,}\]]")
 
 
 #: How a secret value goes on past its line (:func:`redact_secret_lines`): ``_RUNS_ON`` is
-#: a block or flow value, a quote character is the quoted value of a ``key: value`` line
-#: still open, and ``_PLAIN`` is a plain value that YAML can fold onto the next lines.
+#: a block, flow or open quoted value, and ``_PLAIN`` is a plain value that YAML can fold
+#: onto the next lines.
 _RUNS_ON = ""
 _PLAIN = "plain"
 
@@ -320,18 +320,18 @@ def _indent(body: str) -> int:
 
 
 #: A line that a plain value does not go on into: a mapping key (``key:`` and then a space,
-#: a tab or the end), matched after the indent. YAML refuses such a line as the text of a
-#: plain value, and a comment line ends one.
+#: a tab or the end), matched after the indent and any ``- `` markers. YAML refuses such a
+#: line as the text of a plain value, and a comment line ends one.
 _MAPPING_KEY_RE = re.compile(r"(?P<q>[\"']?)[\w.\-]+(?P=q)[ \t]*:(?:[ \t]|$)")
 
 
 def _value_run(value: str) -> str | None:
     """Return how the value of a secret ``key: value`` line can go on in the next lines.
 
-    The quote character for a quoted value with no closing quote on the line
-    (``token: "abc``), :data:`_RUNS_ON` for a flow value (``token: {a: b,``), and
-    :data:`_PLAIN` for a plain value (``token: abc``), each also behind node properties
-    (``token: &a "abc``). ``None`` for a quoted value that closes on the line. One pass.
+    :data:`_RUNS_ON` for a quoted value with no closing quote on the line
+    (``token: "abc``) and for a flow value (``token: {a: b,``), and :data:`_PLAIN` for a
+    plain value (``token: abc``), each also behind node properties (``token: &a "abc``).
+    ``None`` for a quoted value that closes on the line. One pass.
     """
     i = 0
     while value[i : i + 1] in ("&", "!"):
@@ -341,13 +341,8 @@ def _value_run(value: str) -> str | None:
             i += 1
     lead = value[i : i + 1]
     if lead in ("'", '"'):
-        return lead if _quoted_end(value, i) is None else None
+        return _RUNS_ON if _quoted_end(value, i) is None else None
     return _RUNS_ON if lead in ("{", "[") else _PLAIN
-
-
-def _closes_quote(content: str, quote: str) -> bool:
-    """Whether the line ``content``, read inside a ``quote`` value, holds its closing quote."""
-    return _quoted_end(quote + content, 0) is not None
 
 
 # Character classification for the URL scheme, delegated to the regex ENGINE rather than
@@ -750,12 +745,12 @@ def redact_secret_lines(text: str) -> str:
       lines indented deeper than that line: a flow value that :func:`_mask_flow_pairs`
       reports as going on (``env: {token:``, an unclosed quote, ``&a``), and the value of
       a secret ``key: value`` that is an unclosed quote or a flow value
-      (:func:`_value_run`). The quoted value of a ``key: value`` line ends with the line
-      that closes its quote. A flow value does not, because the rest of that line can open
-      another secret value. A plain value goes on only in the lines indented deeper than
-      its key that are not a mapping key (:data:`_MAPPING_KEY_RE`) or a comment, because
-      YAML refuses the first as its text and a comment ends it. A continued line at the
-      column of that line (or of the key, for a plain value) or less is not detected.
+      (:func:`_value_run`). Such a value ends at the first line that is not indented
+      deeper, not at the line that closes a quote: the rest of that line can open another
+      secret value. A plain value goes on only in the lines indented deeper than its key
+      that are not a mapping key (:data:`_MAPPING_KEY_RE`) or a comment, because YAML
+      refuses the first as its text and a comment ends it. A continued line at the column
+      of that line (or of the key, for a plain value) or less is not detected.
 
     Deliberately conservative in the same direction as :func:`redact_secrets`:
     over-masking a non-secret line only costs a resend; under-masking would leak.
@@ -766,8 +761,7 @@ def redact_secret_lines(text: str) -> str:
     out: list[str] = []
     # The column of the secret key whose value the next lines hold, whether a `-` item at
     # that column belongs to it (a bare `token:`, never a block scalar), and how a value
-    # that went on past its line goes on (`_RUNS_ON`, the quote character of a `key: value`
-    # line, or `_PLAIN`).
+    # that went on past its line goes on (`_RUNS_ON` or `_PLAIN`).
     block: tuple[int, bool, str] | None = None
     for line in lines:
         if block is not None:
@@ -787,14 +781,13 @@ def redact_secret_lines(text: str) -> str:
                 out.append(comment + line[len(content) :])
                 continue
             item = content[indent] == "-" and content[indent + 1 : indent + 2] in ("", " ", "\t")
-            # A plain value does not go on into a comment or a mapping key.
-            structured = content[indent] == "#" or bool(_MAPPING_KEY_RE.match(content, indent))
+            # A plain value does not go on into a comment or a mapping key (`- key:` too).
+            key = _MAPPING_KEY_RE.match(content, _list_item_end(content))
+            structured = content[indent] == "#" or key is not None
             if (indent > column and not (run == _PLAIN and structured)) or (
                 indent == column and items and item
             ):
                 out.append(content[:indent] + REDACTION_SENTINEL + line[len(content) :])
-                if run not in (_RUNS_ON, _PLAIN) and _closes_quote(content, run):
-                    block = None  # the line that closes a quoted value ends it
                 continue
             block = None
         # Whatever ends the line (a lone `\r` too) stays out of the body, so a mask that runs
@@ -816,14 +809,15 @@ def redact_secret_lines(text: str) -> str:
                 # The value can go on in the next lines (`token: "abc` then `  def"`). A
                 # plain value can go on only in lines deeper than its key. An unclosed quote
                 # or a flow value can also go on at the key of a `- ` item, so it is measured
-                # from the line (`- token: "abc` then `  def"`).
+                # from the line (`- token: "abc` then `  def"`). The line that closes a quote
+                # does not end it: inside a flow opened on an earlier line, the rest of that
+                # line can open another secret value.
                 block = (lead if run == _PLAIN else _indent(masked), False, run)
         else:
             masked, runs_on = _mask_flow_pairs(masked)
             if runs_on and block is None:
                 # A secret flow value that goes on past this line (`env: {token:` then
-                # `  LEAK}`): the lines indented deeper than this line hold its text. Even
-                # the line that closes a quote can open another secret value after it.
+                # `  LEAK}`): the lines indented deeper than this line hold its text.
                 block = (_indent(masked), False, _RUNS_ON)
         out.append(masked + eol)
     return "".join(out)
