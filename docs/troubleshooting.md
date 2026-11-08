@@ -729,7 +729,8 @@ restart, a dropped connection or a request that timed out.
 If only the connection was lost, Clauster reattaches the session again over the
 next daemon connection. If the daemon still has the process, the card shows
 `Running` again. After `the reconnect failed`, that next connection comes only
-when you start a new Direct Session. See
+when you start a new Direct Session, or use Resume or Restart on a Direct
+Session. See
 [When the daemon connection drops](concepts/how-it-works.md#when-the-daemon-connection-drops)
 for each case.
 

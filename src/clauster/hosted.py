@@ -573,7 +573,9 @@ class HostedSession:
         that number, and :meth:`subscribe` sends only the events above it. Call this
         before :meth:`reattach`, so the restored history and the replay are above it.
         The numbers up to ``event_seq`` were never in this ring, so :meth:`subscribe`
-        does not report them as a gap to a new viewer.
+        does not report them as a gap to a new viewer. A view that stayed open keeps
+        its old events and gets the restored history again below them: a duplicate,
+        the safe direction that :meth:`_rehydrate` accepts too.
         """
         self._event_seq = max(self._event_seq, event_seq)
         self._seq_floor = self._event_seq
@@ -714,9 +716,9 @@ class HostedSession:
         except ClaustrumError as exc:  # daemon loss during stop (CL-4b)
             self.status = InstanceStatus.ERROR
             # The agent may still run: the row says why, as _fail_closed's does.
-            self.error_detail = redact_for_disk(f"stop failed: {exc}")
+            self.error_detail = detail = redact_for_disk(f"stop failed: {exc}")
             self._resolve_parked()  # a dead session must not leave a parked request stranded
-            self._emit({"type": "lost", "reason": f"stop failed: {exc}"})
+            self._emit({"type": "lost", "reason": detail})  # the daemon text can quote anything
         finally:
             await self._teardown()
             if (
@@ -1027,9 +1029,10 @@ class HostedSession:
         """
         self.status = InstanceStatus.ERROR
         try:
-            self.error_detail = redact_for_disk(reason)
+            # Redacted for the browser too: a daemon error's text can quote anything.
+            self.error_detail = detail = redact_for_disk(reason)
             self._resolve_parked()
-            self._emit({"type": "lost", "reason": reason})
+            self._emit({"type": "lost", "reason": detail})
         finally:
             try:
                 await self._client.kill(self._process_id, signal="KILL")
@@ -1450,15 +1453,19 @@ class HostedManager:
         if key is None:
             raise HostedSessionError(f"no such hosted session: {hosted_id}")
         async with self._lock_for(key):
-            await self._require(key).stop()
+            session = self._require(key)
+            await session.stop()
             # The per-id lock now bars a concurrent forget()/resume() from popping the
             # row mid-grace; the re-fetch + absent→404 mapping stays as defense-in-depth
             # (and still covers the no-session-but-row corner) rather than a 500.
             instance = self._instances.get(key)
             if instance is None:
                 raise HostedSessionError(f"no such hosted session: {hosted_id}")
-            # Mark the intent so a restart shows it as stopped, not "lost"/crashed.
-            instance.intentional_stop = True
+            # Mark the intent so a restart shows it as stopped, not "lost"/crashed. Not
+            # for a session that ended in ERROR (TASK-461): its agent may still run, and
+            # a stopped row skips the restart's reattach and Resume's kill of the agent.
+            if session.status != InstanceStatus.ERROR:
+                instance.intentional_stop = True
             await self._persist()
             return self._synced(instance)
 
@@ -1836,8 +1843,9 @@ class HostedManager:
                         client, process_id, instance, history_for=history_for, lost=lost
                     )
                 except Exception:
-                    # Not a daemon error (those are classified inside). The row keeps the
-                    # state it had, and its retry entry, and the other rows go on.
+                    # Not a daemon error (those are classified inside). A fault before the
+                    # outcome keeps the row as it was, with its retry entry; one after it
+                    # leaves the row as classified, still visible. The other rows go on.
                     logger.exception("hosted: retried reattach of %s failed", process_id)
                     continue
             entry = self._reattach_retry.get(process_id)
@@ -2020,11 +2028,10 @@ class HostedManager:
                 await self._mark_unfound(
                     instance, lost_status=InstanceStatus.ERROR, lost_detail=detail
                 )
-                prior = lost or self._reattach_retry.get(process_id)
                 self._reattach_retry[process_id] = _LostRow(
                     client,
-                    prior.requests if prior else (),
-                    prior.event_seq if prior else 0,
+                    lost.requests if lost else (),
+                    lost.event_seq if lost else 0,
                 )
                 return
             self._reattach_retry.pop(process_id, None)

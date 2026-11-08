@@ -5540,6 +5540,52 @@ async def test_a_stop_that_loses_the_daemon_says_why_on_the_row(fake_claustrum, 
         assert session.error_detail == "stop failed: daemon gone"
 
 
+async def test_a_stop_that_ends_in_error_is_not_saved_as_an_intentional_stop(
+    fake_claustrum, monkeypatch
+):
+    # The agent may still run. A row saved as intentionally stopped would come back
+    # STOPPED after a restart, skip the reattach, and let Resume skip its kill.
+    async def _gone(*_args, **_kwargs):
+        raise DaemonUnreachable("daemon gone")
+
+    async with _manager(fake_claustrum) as (_fake, client, mgr):
+        pid = (await _spawn(mgr, client)).claustrum_process_id
+        real_kill = client.kill
+        monkeypatch.setattr(client, "kill", _gone)
+        row = await mgr.stop(pid)
+        assert row.status is InstanceStatus.ERROR and not row.intentional_stop
+        monkeypatch.setattr(client, "kill", real_kill)
+
+
+async def test_lost_reasons_from_a_stop_and_a_pump_failure_are_redacted(
+    fake_claustrum, monkeypatch
+):
+    # The `lost` event goes to the browser as it is, so its reason is redacted the same
+    # way as the row's error_detail: a daemon error's text can quote anything.
+    secret = "sk-ant-api03-" + "B" * 40
+
+    async def _leaky(*_args, **_kwargs):
+        raise DaemonUnreachable(f"boom {secret}")
+
+    async with _session(fake_claustrum) as (fake, session):
+        queue = session.subscribe()
+        monkeypatch.setattr(session._client, "kill", _leaky)
+        await session.stop()
+        lost = await _drain_until(queue, "lost")
+        assert lost["reason"].startswith("stop failed: boom") and secret not in lost["reason"]
+    async with _session(fake_claustrum) as (fake, session):
+        queue = session.subscribe()
+
+        async def _refuse(*_args, **_kwargs):
+            raise RpcError(-32602, f"refused {secret}")
+
+        monkeypatch.setattr(session._client, "stdin", _refuse)
+        await fake.emit(_PID, "stdout", _AUTO_ACK)  # the auto-ack's stdin write fails
+        lost = await _drain_until(queue, "lost")
+        assert "refused" in lost["reason"] and secret not in lost["reason"]
+        assert secret not in (session.error_detail or "")
+
+
 async def test_a_pump_that_dies_before_its_failure_path_latches_is_an_error(
     fake_claustrum, monkeypatch
 ):
@@ -5559,3 +5605,22 @@ async def test_a_pump_that_dies_before_its_failure_path_latches_is_an_error(
         await session.detach()
         assert session.status == "error"  # no pump: never a silent "running" row
         assert mgr.get_instance(pid).error_detail == "internal error (RuntimeError)"
+
+
+async def test_a_retried_orphan_that_reattaches_reads_running_again(fake_claustrum, monkeypatch):
+    async def _orphan(_instance):
+        return True
+
+    monkeypatch.setattr(HostedManager, "_is_orphan", staticmethod(_orphan))
+    async with _manager(fake_claustrum) as (fake, client, mgr):
+        pid = (await _spawn(mgr, client)).claustrum_process_id
+        await client.close()
+        await mgr.fail_unreachable("claustrum daemon connection lost and the reconnect failed")
+        assert mgr.get_instance(pid).is_orphan
+        async with ClaustrumClient(fake.socket_path, fake.token) as again:
+            await mgr.on_connected(again, history_for=None)
+            row = mgr.get_instance(pid)
+            # Not an orphan any more: no Kill on a running card, and Forget's guard holds.
+            assert row.status is InstanceStatus.RUNNING
+            assert not row.is_orphan and row.error_detail is None
+            await mgr.stop(pid)

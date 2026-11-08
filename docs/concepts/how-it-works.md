@@ -186,15 +186,17 @@ restart, so that **Resume** never starts a second agent beside it.
 When the connection itself caused the failure, the next daemon connection
 reattaches the session again. If the daemon still has the process, the card
 shows `Running` again, with its open permission prompts. If not, the card shows
-`Crashed` with `the daemon no longer has this session; session lost`. When that
-next connection comes depends on the case:
+`Crashed` with `the daemon no longer has this session; session lost`, or the
+`orphan` badge if the `claude` process still runs. When that next connection
+comes depends on the case:
 
 - If the new connection also ended during the reattach, Clauster reconnects at
   once.
 - After `the reconnect failed`, Clauster does not retry by itself. The next new
-  Direct Session connects again.
+  Direct Session, or a Resume or Restart of a Direct Session, connects again.
 - If a reattach at startup timed out, the next connection comes only when this
-  connection drops, or when a `/healthz` check finds that it no longer answers.
+  connection drops, or when a `/healthz` check or a new Direct Session finds that
+  it no longer answers.
 
 **Resume** does not wait for that retry. On an `Error` card, Resume first ends
 the old agent through the daemon and waits for the answer. If the daemon refuses
