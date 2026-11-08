@@ -335,6 +335,10 @@ def test_a_masked_header_line_moved_to_another_server_is_refused(tmp_path: Path)
         # Only a `- ` item continues a bare key at its column: not a fence, not `-foo`.
         ("api_key:\n---\n", "api_key:\n---\n"),
         ("token:\n-foo: v\n", "token:\n-foo: v\n"),
+        ("token:\n-\tqv-tab\n-\n", f"token:\n{MASK}\n{MASK}\n"),
+        # A mask that runs to the end of a line keeps a lone `\r` ending.
+        ("env: {TOKEN: [x, qv-cr]}\rnext\r", f"env: {{TOKEN: {MASK}\rnext\r"),
+        ("a, token: 'qv-cr2\rnext\r", f"a, token: {MASK}\rnext\r"),
         ("api_key: |\n  qv-x\n- item\n", f"api_key: {MASK}\n  {MASK}\n- item\n"),
         # Flow sequences, a pair continued from the line above, nested values.
         ("env: [TOKEN: qv-y]\n", f"env: [TOKEN: {MASK}]\n"),

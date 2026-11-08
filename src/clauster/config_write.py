@@ -704,11 +704,10 @@ def redact_secret_lines(text: str) -> str:
                 out.append(content[:indent] + REDACTION_SENTINEL + line[len(content) :])
                 continue
             block = None
-        body, eol = line, ""
-        if body.endswith("\r\n"):
-            body, eol = body[:-2], "\r\n"
-        elif body.endswith("\n"):
-            body, eol = body[:-1], "\n"
+        # Whatever ends the line (a lone `\r` too) stays out of the body, so a mask that runs
+        # to the end of the body never joins this line to the next.
+        body = line.splitlines()[0]
+        eol = line[len(body) :]
         masked = _mask_interps(body, REDACTION_SENTINEL)
         masked = _mask_url_creds(masked, f"{REDACTION_SENTINEL}@")
         lead = _list_item_end(masked)
