@@ -343,6 +343,158 @@ def test_worker_alive_real_process_survives_a_btime_step(monkeypatch):
     assert supervisor.worker_alive(pid, str(ticks + 1)) is False
 
 
+# TASK-534. Off Linux and Windows the CLI writes procStart as the trimmed output of
+# `LC_ALL=C TZ=UTC ps -o lstart= -p <pid>`, not ticks (inferred from the dead non-Linux
+# branch of the Linux CLI 2.1.319 bundle). Sun Nov 8 2026 19:08:12 UTC:
+_LSTART = "Sun Nov  8 19:08:12 2026"
+_LSTART_EPOCH = 1_794_164_892
+
+
+@pytest.fixture
+def on_macos(monkeypatch):
+    """Pin darwin: the lstart branch is gated off on Linux, where create_time drifts."""
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+
+def _lstart_text(epoch: int) -> str:
+    """Format ``epoch`` the way `LC_ALL=C TZ=UTC ps -o lstart=` prints it, on any locale."""
+    from datetime import UTC, datetime
+
+    t = datetime.fromtimestamp(epoch, tz=UTC)
+    day = procutil._LSTART_DAYS[t.weekday()]
+    month = procutil._LSTART_MONTHS[t.month - 1]
+    return f"{day} {month} {t.day:2d} {t:%H:%M:%S} {t.year}"
+
+
+def test_lstart_to_epoch_reads_the_cli_format():
+    assert _lstart_text(_LSTART_EPOCH) == _LSTART
+    assert procutil.lstart_to_epoch(_LSTART) == _LSTART_EPOCH
+    assert procutil.lstart_to_epoch(f"  {_LSTART}\n") == _LSTART_EPOCH  # untrimmed ps output
+    assert procutil.lstart_to_epoch("Tue Nov 10 01:02:03 2026") == 1_794_272_523  # 2-digit day
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "",
+        "770579",  # Linux ticks
+        "Mon Nov  8 19:08:12 2026",  # weekday does not match the date
+        "Sun Feb 30 19:08:12 2026",  # no such day
+        "Sun Nov  8 24:08:12 2026",  # no such hour
+        "Sun Nov  8 19:08:12",  # no year
+        "dim. nov.  8 19:08:12 2026",  # a localized ps, not LC_ALL=C
+        "Sun Nov  8 19:08:12 2026 UTC",
+        "Sun Nov  8 19:08:12.5 2026",
+    ],
+)
+def test_lstart_to_epoch_rejects_anything_else(text):
+    assert procutil.lstart_to_epoch(text) is None
+
+
+@pytest.mark.parametrize("offset", [0.0, 0.73, 0.999999])
+def test_worker_alive_reads_a_macos_lstart_procstart(monkeypatch, on_macos, offset):
+    # The old code parsed procStart with int() and read every macOS worker as not alive.
+    # The real proc_create_time path runs here, over a faked psutil.Process. Any instant
+    # inside the named second matches: ps prints only the whole second.
+    _fake_worker(monkeypatch, ticks=None, create_time=_LSTART_EPOCH + offset, btime=0.0)
+    assert supervisor.worker_alive(4242, _LSTART) is True
+
+
+@pytest.mark.parametrize(
+    "offset",
+    [
+        pytest.param(1.0, id="the-next-second"),
+        pytest.param(1.02, id="just-after-the-next-second"),
+        pytest.param(3600.2, id="an-hour-later"),
+        pytest.param(-0.01, id="just-before-the-second"),
+        pytest.param(-0.98, id="early-in-the-previous-second"),
+    ],
+)
+def test_worker_alive_rejects_a_recycled_macos_pid(monkeypatch, on_macos, offset):
+    # Same pid, a process that started in another second: not the recorded worker.
+    _fake_worker(monkeypatch, ticks=None, create_time=_LSTART_EPOCH + offset, btime=0.0)
+    assert supervisor.worker_alive(4242, _LSTART) is False
+
+
+def test_worker_alive_lstart_fails_closed_on_a_dead_pid(monkeypatch, on_macos):
+    def _gone(pid):
+        raise procutil.psutil.NoSuchProcess(pid)
+
+    monkeypatch.setattr(procutil.psutil, "Process", _gone)
+    assert supervisor.worker_alive(4242, _LSTART) is False
+
+
+def test_worker_alive_lstart_fails_closed_on_unreadable_text(monkeypatch, on_macos):
+    # The pid is alive, but a start time that does not parse is no evidence of identity.
+    _fake_worker(monkeypatch, ticks=None, create_time=_LSTART_EPOCH + 0.5, btime=0.0)
+    assert supervisor.worker_alive(4242, "Sun Nov  8 19:08:12") is False
+    assert supervisor.worker_alive(4242, "") is False
+
+
+def test_worker_alive_lstart_fails_closed_on_a_zombie(monkeypatch, on_macos):
+    class _Zombie:
+        def __init__(self, pid):
+            pass
+
+        def status(self):
+            return procutil.psutil.STATUS_ZOMBIE
+
+        def create_time(self):
+            return _LSTART_EPOCH + 0.5
+
+    monkeypatch.setattr(procutil.psutil, "Process", _Zombie)
+    assert supervisor.worker_alive(4242, _LSTART) is False
+
+
+def test_worker_alive_lstart_never_reaches_the_tick_path(monkeypatch, on_macos):
+    # The text is not handed to is_live_process, which reads an unparsable start time as
+    # "no start time" and would then answer on alive alone.
+    calls: list = []
+    monkeypatch.setattr(supervisor, "is_live_process", lambda *a, **k: calls.append(a) or True)
+    _fake_worker(monkeypatch, ticks=None, create_time=_LSTART_EPOCH + 9.0, btime=0.0)
+    assert supervisor.worker_alive(4242, _LSTART) is False
+    assert calls == []
+
+
+def test_worker_alive_padded_ticks_stay_on_the_tick_path(monkeypatch):
+    seen: list = []
+    monkeypatch.setattr(
+        supervisor, "is_live_process", lambda pid, ps, **k: seen.append((pid, ps, k)) or True
+    )
+    monkeypatch.setattr(supervisor, "proc_start_ticks", lambda pid: 770579)
+    assert supervisor.worker_alive(1234, " 770579\n") is True
+    assert seen == [(1234, "770579", {"tolerance": 2.0, "start_ticks": 770579})]
+
+
+def test_worker_alive_ignores_lstart_text_on_linux(monkeypatch):
+    # Linux create_time drifts with NTP, so frozen text must not be compared with it. The CLI
+    # never writes lstart there; the text reads as not alive, as it did before TASK-534.
+    monkeypatch.setattr(sys, "platform", "linux")
+    _fake_worker(monkeypatch, ticks=None, create_time=_LSTART_EPOCH + 0.5, btime=0.0)
+    assert supervisor.worker_alive(4242, _LSTART) is False
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="the CLI writes lstart text on macOS")
+def test_worker_alive_real_macos_ps_lstart():
+    # The real thing on the macOS CI leg: the exact command the CLI runs, on this process.
+    import shutil
+    import subprocess
+
+    ps = shutil.which("ps")
+    assert ps is not None
+    pid = os.getpid()
+    env = {**os.environ, "LC_ALL": "C", "TZ": "UTC"}
+    out = subprocess.run(  # noqa: S603 - absolute ps, list argv
+        [ps, "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True, env=env, check=True
+    )
+    text = out.stdout.strip()
+    started = procutil.lstart_to_epoch(text)
+    assert started is not None, text
+    assert supervisor.worker_alive(pid, text) is True
+    assert supervisor.worker_alive(pid, _lstart_text(started + 1)) is False
+    assert supervisor.worker_alive(pid, _lstart_text(started - 1)) is False
+
+
 def test_live_worker_joined_onto_job(tmp_path: Path, monkeypatch):
     jobs = tmp_path / "jobs"
     _write_job(jobs, "bd1cea2f", _state())
@@ -736,6 +888,7 @@ def test_api_dispatch_agent_maps_claude_not_found(write_config, tmp_path, monkey
 # --- stop (BG-3) -----------------------------------------------------------
 
 _JID = "2045a6c1"
+_REAL_WORKER_ALIVE = supervisor.worker_alive  # _stop_setup replaces the module attribute
 
 
 def test_valid_job_id():
@@ -778,6 +931,41 @@ def test_stop_happy_double_sigint_polls_then_rm(tmp_path, monkeypatch):
     res = supervisor.stop_background_job(_JID, roster_json=roster)
     assert kills == [(4242, signal.SIGINT), (4242, signal.SIGINT)]  # double-SIGINT
     assert res == {"id": _JID, "settled": True, "removed": True, "detail": "removed 2045a6c1"}
+
+
+def test_stop_signals_a_live_macos_worker(tmp_path, monkeypatch):
+    # TASK-534: the real worker_alive, over a macOS lstart procStart. The worker is alive
+    # until the second SIGINT and gone after it. Before the fix no SIGINT was ever sent.
+    roster, kills = _stop_setup(monkeypatch, tmp_path, alive_seq=[], proc_start=_LSTART)
+    monkeypatch.setattr(supervisor.sys, "platform", "darwin")
+    monkeypatch.setattr(supervisor, "worker_alive", _REAL_WORKER_ALIVE)
+
+    class _Worker:
+        def __init__(self, pid):
+            assert pid == 4242
+            if len(kills) >= 2:
+                raise procutil.psutil.NoSuchProcess(pid)
+
+        def status(self):
+            return procutil.psutil.STATUS_SLEEPING
+
+        def create_time(self):
+            return _LSTART_EPOCH + 0.5
+
+    monkeypatch.setattr(procutil.psutil, "Process", _Worker)
+    res = supervisor.stop_background_job(_JID, roster_json=roster)
+    assert kills == [(4242, signal.SIGINT), (4242, signal.SIGINT)]
+    assert res["settled"] is True and res["removed"] is True
+
+
+def test_stop_never_signals_a_recycled_macos_pid(tmp_path, monkeypatch):
+    roster, kills = _stop_setup(monkeypatch, tmp_path, alive_seq=[], proc_start=_LSTART)
+    monkeypatch.setattr(supervisor.sys, "platform", "darwin")
+    monkeypatch.setattr(supervisor, "worker_alive", _REAL_WORKER_ALIVE)
+    _fake_worker(monkeypatch, ticks=None, create_time=_LSTART_EPOCH + 7.0, btime=0.0)
+    res = supervisor.stop_background_job(_JID, roster_json=roster)
+    assert kills == []
+    assert res["settled"] is False
 
 
 def test_stop_no_live_worker_is_unconfirmed_not_clean(tmp_path, monkeypatch, caplog):
