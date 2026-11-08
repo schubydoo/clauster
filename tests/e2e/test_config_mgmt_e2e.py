@@ -1654,6 +1654,95 @@ def test_config_mgmt_skill_visibility_local_and_user_scope(
     assert user["skillOverrides"] == {"anthropic-skills:pdf": "user-invocable-only"}
 
 
+def test_config_mgmt_skill_visibility_local_lists_user_skill_folders(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """Local rows name the user skill folders too: a local key acts on a user skill (TASK-494)."""
+    alpha = _projects_root(config_mgmt_server) / "alpha"
+    home = Path(config_mgmt_server.state_dir).parent / "home"
+    _seed_skill(alpha, "greeter")
+    _seed_skill(home, "helper")  # a user skill folder: ~/.claude/skills/helper
+    _seed_skill(home, "greeter")  # the same name at both scopes is one row
+
+    _open_skill_visibility(browser, config_mgmt_server)
+    browser.expect_hidden('[data-test="cm-skill-ov-row-helper"]')  # Project: not listed
+    browser.click('[data-test="cm-scope-local"]')
+    browser.expect_visible('[data-test="cm-skill-local-note"]')
+    browser.expect_visible('[data-test="cm-skill-ov-row-helper"]')
+    browser.expect_value('[data-test="cm-skill-ov-helper"]', "")
+    browser.expect_hidden('[data-test="cm-skill-ov-unlisted-helper"]')
+    assert (
+        browser.eval_json(
+            "document.querySelectorAll('[data-test=\"cm-skill-ov-row-greeter\"]').length"
+        )
+        == 1
+    )
+    browser.select('[data-test="cm-skill-ov-helper"]', "off")
+    _save_skill_visibility(browser, "alpha (local)")
+    browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
+
+    local = json.loads((alpha / ".claude" / "settings.local.json").read_text(encoding="utf-8"))
+    assert local["skillOverrides"] == {"helper": "off"}
+    assert not (home / ".claude" / "settings.json").exists()  # User scope untouched
+
+
+_FAIL_USER_SKILLS_GET = """(() => {
+  const orig = window.fetch;
+  window.fetch = (url, opts) => {
+    if (String(url).includes("/api/config-write/skills?scope=user")) return %s;
+    return orig(url, opts);
+  };
+  return "stubbed";
+})()"""
+
+
+@pytest.mark.parametrize(
+    ("failure", "message"),
+    [
+        (
+            'Promise.resolve(new Response("{}", { status: 500 }))',
+            "User skills: Failed to load (500).",
+        ),
+        ('Promise.reject(new TypeError("Failed to fetch"))', "Failed to load user skills."),
+    ],
+    ids=["http-error", "network-error"],
+)
+def test_config_mgmt_skill_visibility_local_failed_user_list_keeps_project_rows(
+    browser: AgentBrowser, config_mgmt_server: Server, failure: str, message: str
+) -> None:
+    """A failed user list keeps the project's Local rows and names itself in the banner."""
+    alpha = _projects_root(config_mgmt_server) / "alpha"
+    home = Path(config_mgmt_server.state_dir).parent / "home"
+    _seed_skill(alpha, "greeter")
+    _seed_skill(home, "helper")
+
+    _open_skill_visibility(browser, config_mgmt_server)
+    assert browser.eval_json(_FAIL_USER_SKILLS_GET % failure) == "stubbed"
+    browser.click('[data-test="cm-scope-local"]')
+    browser.expect_visible('[data-test="cm-skill-ov-row-greeter"]')
+    browser.expect_text('[data-test="cm-error"]', message)
+    browser.expect_count('[data-test="cm-skill-ov-row-helper"]', 0)
+
+
+def test_config_mgmt_skill_visibility_local_without_user_scope_lists_project_only(
+    browser: AgentBrowser, config_mgmt_project_only_server: Server
+) -> None:
+    """Without allow_user_scope the Local rows stay the project's, with no error banner."""
+    server = config_mgmt_project_only_server
+    alpha = _projects_root(server) / "alpha"
+    home = Path(server.state_dir).parent / "home"
+    _seed_skill(alpha, "greeter")
+    _seed_skill(home, "helper")
+
+    _open_skill_visibility(browser, server)
+    browser.click('[data-test="cm-scope-local"]')
+    browser.expect_visible('[data-test="cm-skill-local-note"]')
+    browser.expect_visible('[data-test="cm-skill-ov-row-greeter"]')
+    browser.expect_value('[data-test="cm-skill-ov-greeter"]', "")
+    browser.expect_hidden('[data-test="cm-skill-ov-row-helper"]')
+    browser.expect_hidden('[data-test="cm-error"]')
+
+
 def test_config_mgmt_skill_visibility_refused_key_shows_backend_message(
     browser: AgentBrowser, config_mgmt_server: Server
 ) -> None:

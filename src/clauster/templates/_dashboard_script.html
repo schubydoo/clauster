@@ -360,7 +360,8 @@
           // Visibility (TASK-249): the `skillOverrides` settings key, all three scopes. One
           // row per listed skill folder and per key already in the file, so a key that
           // matches no folder stays visible and removable. `stored` is the map as read;
-          // `listed` the folder names (the project's at local scope, which has no folder).
+          // `listed` the folder names (at local scope, which has no folder, the project's
+          // and the user's).
           // `ready` stays false until the map loads, so a failed read shows a notice, not
           // empty rows whose save would clear real overrides. Own `confirm`/`ops` so a
           // skill save and a visibility save never share a gate.
@@ -4006,6 +4007,13 @@
       // never sent here. Same ops-counter concurrency idiom as subagents.
       // At Local scope the folder list is the project's (Local has no skills folder): it
       // only names the visibility rows, so `list` stays empty and no folder action shows.
+      // Local rows also name the user skill folders (TASK-494): Claude Code merges every
+      // settings file's `skillOverrides` and matches each key against the folder name of
+      // every loaded skill, so a local key acts on a user skill too (its own /skills
+      // screen writes them to settings.local.json). They are listed only when this
+      // Clauster reads User scope (config_write.allow_user_scope). A Project or User key
+      // acts on skills from other scopes too, but those rows stay the scope's own folders,
+      // as the CLI's own screen only writes Local; Add a skill name covers the rest.
       // `keepOvEdits` is set by a skill save or delete: that write never touches
       // settings.json, so unsaved visibility choices survive it instead of being reloaded.
       // The list fetch is guarded by `listId`, not `c.gen`, for the reason the map load is:
@@ -4040,6 +4048,23 @@
         } catch (e) {
           if (c.skills.listId !== listId) return;
           c.skills.list = []; c.error = "Failed to load skills.";
+        }
+        if (local && this.configMgmtSkillOvListsUser()) {
+          // A failed user list keeps the project rows; its error shows in the banner.
+          try {
+            const res = await fetch(ROOT + "/api/config-write/skills?scope=user");
+            if (c.skills.listId !== listId) return;
+            if (this._authExpired(res)) return;
+            if (!res.ok) { if (!c.error) c.error = "User skills: " + this._configMgmtLoadErr(res); }
+            else {
+              const d = await res.json();
+              if (c.skills.listId !== listId) return;
+              names = names.concat((d.skills || []).map(sk => sk.name));
+            }
+          } catch (e) {
+            if (c.skills.listId !== listId) return;
+            if (!c.error) c.error = "Failed to load user skills.";
+          }
         }
         await this._loadSkillOverrides(names, keepOvEdits);
       },
@@ -4153,9 +4178,18 @@
         return ov.error
           || "Could not load skill visibility. Change the scope or reopen this window to try again.";
       },
+      // Whether Local rows also name the user skill folders: only when User scope is
+      // readable here, since the user list route is behind the same opt-in.
+      configMgmtSkillOvListsUser() {
+        return {{ config_write_allow_user_scope | tojson }};
+      },
       configMgmtSkillOvRowsHint() {
-        const where = this.configMgmt.scope === "local" ? "this project's skill folders"
-          : "the skill folders at this scope";
+        let where = "the skill folders at this scope";
+        if (this.configMgmt.scope === "local") {
+          where = this.configMgmtSkillOvListsUser()
+            ? "this project's skill folders, your user skill folders,"
+            : "this project's skill folders";
+        }
         return "Rows show " + where + " and every key already in the file.";
       },
       configMgmtSkillOvChanged(row) {
@@ -4163,7 +4197,8 @@
         const was = !row.stored ? "" : (row.unknown ? "?" : row.raw);
         return row.value !== was;
       },
-      // Add a name that no row shows (a bundled, plugin or frontmatter name). The name is
+      // Add a name that no row shows (a bundled or plugin skill). Claude Code matches a key
+      // against a skill's folder name, never its frontmatter `name` (TASK-494). The name is
       // sent as typed, never trimmed or checked here: the backend decides what is valid
       // and its refusal is the message shown. An existing row only takes the new value.
       configMgmtCanAddSkillOv() {

@@ -9,13 +9,13 @@ stale-hash -> atomic write). It owns no gate, no writer, and no redaction
 primitive of its own -- it *consumes* :mod:`clauster.config_write`.
 
 **The carve (#772 scope, locked 2026-06-29; narrowed for TASK-449.2).** :data:`OWNED_KEYS`
--- ``permissions``, ``autoMode`` (added for TASK-449.1), ``hooks``, ``enabledPlugins`` --
-are excluded from this surface: each has a dedicated config-write surface that writes
-it, and writing them here would race/duplicate that surface's own validation. A key
-that another tab only reads (the settings-file MCP approval lists) or that nothing reads
-(``disabledPlugins``) is not carved, so this tab can show and remove it. A write
-candidate naming a carved key is rejected **whole** (422), never silently stripped;
-the error names the tab that owns each key. Every *other*
+-- ``permissions``, ``autoMode`` (added for TASK-449.1), ``hooks``, ``enabledPlugins``,
+``skillOverrides`` (TASK-499) -- are excluded from this surface: each has a dedicated
+config-write surface that writes it, and writing them here would race/duplicate that
+surface's own validation. A key that another tab only reads (the settings-file MCP
+approval lists) or that nothing reads (``disabledPlugins``) is not carved, so this tab
+can show and remove it. A write candidate naming a carved key is rejected **whole**
+(422), never silently stripped; the error names the tab that owns each key. Every *other*
 top-level key -- ``env``, ``model``, and the wide (and still-growing) vocabulary
 of "documented misc" keys Claude Code ships (``apiKeyHelper``,
 ``cleanupPeriodDays``, ``includeCoAuthoredBy``, ``statusLine``, ``outputStyle``,
@@ -150,12 +150,15 @@ from .claude_json import locked_replace_json_file
 #: absent from its bundle). ``enabledMcpjsonServers``/``disabledMcpjsonServers`` are not
 #: either: the MCP tab writes approvals to ``~/.claude.json`` and shows a settings-file
 #: approval read-only, so the Settings tab is where a settings-file list is edited.
-#: ``skillOverrides`` stays here until the Skills tab has an editor for it (TASK-249).
+#: ``skillOverrides`` is carved since the Skills tab's visibility panel writes it
+#: (TASK-249). Its one write path is then the Skills route, which runs the key checks of
+#: ``config_write_skills.validate_skill_overrides`` (TASK-499).
 OWNED_KEY_TABS: dict[str, str] = {
     "permissions": "Permissions",
     "autoMode": "Permissions",
     "hooks": "Hooks",
     "enabledPlugins": "Plugins",
+    "skillOverrides": "Skills",
 }
 
 OWNED_KEYS = frozenset(OWNED_KEY_TABS)
@@ -519,7 +522,6 @@ ROW_KEY_TYPES: dict[str, str | tuple[str, ...]] = {
     "pluginConfigs": "object",
     "prependPlugins": "list",
     "sandbox": "object",
-    "skillOverrides": "object",
     "spellcheck": "object",
     "spinnerTipsOverride": "object",
     "spinnerVerbs": "object",

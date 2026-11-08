@@ -348,12 +348,14 @@ row tells the first two apart:
 
 The Settings tab edits each top-level key of the settings file for the scope,
 except the keys that another tab writes. These are `permissions` and `autoMode`
-(the Permissions tab), `hooks` (the Hooks tab) and `enabledPlugins` (the Plugins
-tab). A save that names one of them is refused (`422`), and the error names the
-tab to use. Clauster checks the shape of `env` only. It does not run or interpret
-any other value. Claude Code reads the values when a session starts. A save
-whose objects and lists nest more than 64 levels deep is refused (`422`,
-"settings is nested too deeply"). The settings object itself is level 1.
+(the Permissions tab), `hooks` (the Hooks tab), `enabledPlugins` (the Plugins
+tab) and `skillOverrides` (the Skills tab). A save that names one of them is
+refused (`422`), and the error names the tab to use. The Settings tab does not
+show these keys, and a Settings save keeps their stored values. Clauster checks
+the shape of `env` only. It does not run or interpret any other value. Claude
+Code reads the values when a session starts. A save whose objects and lists nest
+more than 64 levels deep is refused (`422`, "settings is nested too deeply"). The
+settings object itself is level 1.
 
 The tab has two modes, Rows and Raw JSON. In Rows mode, each top-level key of the
 file is one row, and the editor follows the JSON type of the value:
@@ -401,7 +403,6 @@ No other tab writes these keys in a settings file, so the Settings tab shows the
 - `enabledMcpjsonServers` and `disabledMcpjsonServers`. The MCP tab shows an
   approval from a settings file as read-only, with a `settings` badge. Change
   it here.
-- `skillOverrides`. The Skills tab has no editor for it yet.
 - `disabledPlugins`. Claude Code 2.1.318 does not read this key. If a file
   still has it, remove it here.
 
@@ -469,7 +470,8 @@ object such as `env` key by key and combines the lists from each file. A plain
 value from a higher scope replaces the lower one, and `fallbackModel` comes
 whole from one file. A key or value that a file is not allowed to set is left
 out. When more than one file makes up a value, the **From** column names each file.
-Managed settings and the `--settings` flag are not part of the view.
+Managed settings and the `--settings` flag are not part of the view. The keys
+that another tab writes, such as `skillOverrides`, are not part of it either.
 
 If a scope fails to load, the tab clears its rows. A save therefore cannot write
 the values of the scope that you looked at before into the new scope.
@@ -1292,9 +1294,12 @@ no key is `on`.
 
 The panel shows one row for each skill folder at the scope, and one row for
 each key that is already in the file. At Local scope, the rows show the skill
-folders of the project. A key that matches no folder gets a **no skill folder**
-badge, so you can see it and remove it. A stored value that Claude Code does
-not read shows as **Not valid**. Clauster refuses a save until you choose a
+folders of the project and your user skill folders, because Claude Code applies
+a key in `.claude/settings.local.json` to a user skill too. The user folders show
+only when `config_write.allow_user_scope` is on. Without it, type the name of a
+user skill in **Add a skill name**. A key that matches no folder gets a
+**no skill folder** badge, so you can see it and remove it. A stored value that
+Claude Code does not read shows as **Not valid**. Clauster refuses a save until you choose a
 value for that row.
 
 To change the visibility of skills:
@@ -1312,10 +1317,13 @@ It does not change the other keys in the settings file. If the file changed
 after the panel loaded it, Clauster refuses the save and writes nothing. Close
 and reopen the panel to load the file again.
 
-A key is the name of a skill, as Claude Code shows it. The key can be a
-frontmatter `name`, the name of a bundled skill such as `doctor`, or a name with
-a colon such as `anthropic-skills:pdf`. Clauster refuses an empty key, the key
-`__proto__`, and a name that Claude Code cannot show. The refusal names the key,
+A key is the name of a skill, as Claude Code shows it. For a skill in a skills
+folder, the name is the name of its folder, not the `name` in its frontmatter.
+Claude Code 2.1.319 uses the frontmatter `name` for display only, and a key with
+that name has no effect. Clauster saves such a key and marks its row
+**no skill folder**. The key can also be the name of a bundled skill such as
+`doctor`, or a name with a colon such as `anthropic-skills:pdf`. Clauster refuses
+an empty key, the key `__proto__`, and a name that Claude Code cannot show. The refusal names the key,
 and Clauster writes nothing. The panel sends each name as you typed it, so a
 space at the start or the end is part of the name.
 

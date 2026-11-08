@@ -61,7 +61,44 @@ def test_owned_keys_are_exactly_the_keys_another_tab_writes() -> None:
         "autoMode": "Permissions",
         "hooks": "Hooks",
         "enabledPlugins": "Plugins",
+        "skillOverrides": "Skills",
     }
+
+
+@pytest.mark.parametrize("scope", ["user", "project", "local"])
+@pytest.mark.parametrize(
+    "value",
+    [
+        # Each would pass the Settings tab's own checks, and each is one that
+        # validate_skill_overrides refuses (TASK-499): an empty name, `__proto__`, a name
+        # Claude Code cannot show, and a value outside SKILL_OVERRIDE_VALUES.
+        {"": "off"},
+        {"__proto__": "off"},
+        {"a<b": "off"},
+        {"greeter": "maybe"},
+        # A valid map is refused too: the Skills tab is the one write path.
+        {"greeter": "off"},
+    ],
+)
+def test_settings_tab_refuses_skill_overrides_and_names_the_skills_tab(
+    tmp_path: Path, scope: str, value: dict[str, str]
+) -> None:
+    with pytest.raises(cws.SettingsCarveError, match="skillOverrides on the Skills tab"):
+        _write(scope, tmp_path, {"model": "opus", "skillOverrides": value})
+    assert not (tmp_path / "home" / "settings.json").exists()
+    assert not cw.project_settings_path(tmp_path).exists()
+    assert not cw.project_local_settings_path(tmp_path).exists()
+
+
+def test_settings_tab_keeps_a_stored_skill_overrides_map(tmp_path: Path) -> None:
+    # The carved key is hidden from the Settings view and carried through its save, as
+    # every other owned key is, so a Settings save never drops the Skills tab's map.
+    h = _seed(cw.project_settings_path(tmp_path), {"skillOverrides": {"x": "off"}, "a": 1})
+    view, h2 = cws.read_project_settings(tmp_path)
+    assert view == {"a": 1} and h2 == h
+    cws.write_project_settings(tmp_path, {"model": "opus"}, h)
+    on_disk = json.loads(cw.project_settings_path(tmp_path).read_text(encoding="utf-8"))
+    assert on_disk == {"skillOverrides": {"x": "off"}, "model": "opus"}
 
 
 @pytest.mark.parametrize(
@@ -72,8 +109,6 @@ def test_owned_keys_are_exactly_the_keys_another_tab_writes() -> None:
         # The MCP tab writes approvals to ~/.claude.json and shows these read-only.
         ("enabledMcpjsonServers", ["a"]),
         ("disabledMcpjsonServers", ["b"]),
-        # The Skills tab has no editor for it yet (TASK-249).
-        ("skillOverrides", {"x": "off"}),
     ],
 )
 def test_uncarved_key_round_trips_through_the_settings_tab(
@@ -526,6 +561,31 @@ def test_route_refuses_an_ignored_key_with_its_message(write_config, tmp_path, p
         assert r.status_code == 422
         assert "only from user settings" in r.json()["detail"]
         assert not (projects_root / "alpha" / ".claude" / "settings.json").exists()
+
+
+def test_route_sends_skill_overrides_to_the_skills_tab(write_config, tmp_path, projects_root):
+    # TASK-499: a Settings save of skillOverrides is refused and names the Skills tab,
+    # whose route runs validate_skill_overrides. The bad key would pass the Settings checks.
+    fake = Path(__file__).resolve().parent / "fixtures" / "fake_claude" / "claude"
+    cfg = write_config(
+        f"claude:\n  binary: {fake}\nstate_dir: {tmp_path}/.s\nconfig_write:\n  enabled: true\n"
+    )
+    with TestClient(create_app(load_config(cfg))) as c:
+        r0 = c.get("/api/config-write/settings?project=alpha&scope=local")
+        r = c.put(
+            "/api/config-write/settings",
+            json={
+                "scope": "local",
+                "project": "alpha",
+                "confirm": "alpha (local)",
+                "settings": {"skillOverrides": {"__proto__": "off"}},
+                "hash": r0.json()["hash"],
+            },
+        )
+        assert r.status_code == 422
+        assert "edit skillOverrides on the Skills tab" in r.json()["detail"]
+        assert r0.json()["owned_keys"]["skillOverrides"] == "Skills"
+        assert not (projects_root / "alpha" / ".claude" / "settings.local.json").exists()
 
 
 # --- the merged view follows Claude Code's merge -------------------------------------

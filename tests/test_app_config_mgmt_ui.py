@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import re
 
+import pytest
 from fastapi.testclient import TestClient
 
 from clauster.app import create_app
@@ -495,6 +496,26 @@ def test_skill_visibility_panel_present_when_enabled(write_config):
     # copy of the backend check.
     assert "Object.fromEntries(this.configMgmt.skills.ov.rows" in html
     assert "ov.addName.trim()" not in html
+
+
+@pytest.mark.parametrize(("extra", "lists_user"), [(_ON, "false"), (_ON_USER, "true")])
+def test_local_skill_visibility_lists_user_folders_only_with_user_scope(
+    write_config, extra, lists_user
+):
+    # TASK-494: Claude Code applies a settings.local.json key to a user skill too, so the
+    # Local rows name the user folders, read from the user-scope list route. That route is
+    # 404 without allow_user_scope, so the flag is baked in from the same opt-in.
+    html = _html(write_config, extra)
+    flag = _between(html, "configMgmtSkillOvListsUser() {", "},")
+    assert f"return {lists_user};" in flag
+    assert "if (local && this.configMgmtSkillOvListsUser()) {" in html
+    assert '"/api/config-write/skills?scope=user"' in html
+    # The hint names the user folders only on the same flag that lists them.
+    hint = _between(html, "configMgmtSkillOvRowsHint() {", "return ")
+    assert "this.configMgmtSkillOvListsUser()" in hint
+    assert "this project's skill folders, your user skill folders," in hint
+    # A frontmatter `name` is a display name only: no copy says a key can match it.
+    assert "or frontmatter name" not in html
 
 
 def test_skill_visibility_values_match_the_backend(write_config):

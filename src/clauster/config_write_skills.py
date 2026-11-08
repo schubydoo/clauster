@@ -2937,8 +2937,11 @@ def validate_skill_overrides(candidate: Any) -> None:
     the whole write (→ 422), so a partial/garbled override map never lands.
 
     The CLI's schema takes any string key and matches it, exactly, against skill names. A
-    skill name is the directory name, a frontmatter ``name`` or a bundled skill's name, so
-    a key is accepted when Claude Code can show it as a name (:func:`cli_shows_name`).
+    folder skill's name is its directory name, never its frontmatter ``name``, which is a
+    display name only (TASK-494: 2.1.319 builds the skill with ``name: skillName``, the
+    ``readdir`` entry, and looks keys up by that name). A bundled or plugin skill has its
+    own name, so a key is accepted when Claude Code can show it as a name
+    (:func:`cli_shows_name`).
     ``__proto__`` is refused: the CLI drops that key when it loads settings.
     """
     if not isinstance(candidate, dict):
