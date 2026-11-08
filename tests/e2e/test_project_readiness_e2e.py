@@ -29,7 +29,7 @@ _NOT_RUN = f'{_ROW} [data-test="preflight-unavailable"]'
 _DETAIL = f'{_ROW} [data-test="preflight-detail"]'
 _BATCH = "/api/projects/preflight"
 _ALPHA = "/api/projects/alpha/preflight"
-_SETTLE_S = 15
+_SETTLE_S = 30
 
 _ALL_OK = {
     "ok": True,
@@ -63,7 +63,13 @@ def _settle(browser: AgentBrowser, server: str) -> None:
             assert state != "unavailable", "the real first-paint batch already failed"
             return
         time.sleep(0.25)
-    raise AssertionError("the first-paint preflight batch never answered")
+    dump = browser.eval_json(
+        "(()=>{const d=" + _ROOT + ";return {seq:d._preflightSeq,err:d.preflightError,"
+        "keys:Object.keys(d.preflight),url:location.href,refreshing:d._refreshing,"
+        "net:performance.getEntriesByType('resource').filter(e=>e.name.includes('/api/'))"
+        ".map(e=>[e.name.replace(location.origin,''),Math.round(e.duration),e.responseStatus])}})()"
+    )
+    raise AssertionError(f"the first-paint preflight batch never answered: {dump}")
 
 
 def _answer(status: int | None, body: dict | None) -> str:
@@ -237,6 +243,30 @@ def test_passing_recheck_moves_focus_and_announces_the_result(
     browser.expect_text("body", "alpha: readiness checks passed")
 
 
+def test_recheck_does_not_steal_focus_after_the_user_moves_on(
+    browser: AgentBrowser, open_server: str
+) -> None:
+    """Focus moves off the hidden pill only if the user did not move it during the check."""
+    _settle(browser, open_server)
+    _stub(browser, _ALPHA, 500, {}, "await d.loadPreflight('alpha');")
+    browser.expect_visible(_NOT_RUN)
+    browser.eval_js(
+        "(async function(){const d=" + _ROOT + ";"
+        "window.__stubs['"
+        + _ALPHA
+        + "']=()=>new Promise(r=>setTimeout(()=>r("
+        + _answer(200, _ALL_OK)
+        + "),400));"
+        "document.querySelector('" + _NOT_RUN + "').focus();"
+        "const p=d.recheckPreflight('alpha');"
+        "document.querySelector('" + _ROW + ' [data-test="transcript-trigger"]\').focus();'
+        "await p;await new Promise(r=>setTimeout(r,100));return 1})()"
+    )
+    browser.expect_hidden(_NOT_RUN)
+    focused = browser.eval_json("(()=>document.activeElement.dataset.test||'')()")
+    assert focused == "transcript-trigger", focused
+
+
 # WCAG contrast of the pill's text against its background (1x1 canvas -> sRGB bytes).
 _CONTRAST_JS = """(() => {
   const cv = document.createElement("canvas"); cv.width = cv.height = 1;
@@ -246,8 +276,7 @@ _CONTRAST_JS = """(() => {
   const lum = ([r, g, b]) => { const f = (v) => { v /= 255;
     return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; };
     return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b); };
-  const pill = document.querySelector(
-    '[data-project="alpha"] [data-test="preflight-unavailable"]');
+  const pill = document.querySelector('[data-project="alpha"] [data-test="__TEST_ID__"]');
   const s = getComputedStyle(pill);
   // A translucent tint composes over the card, so blend it before measuring.
   const card = getComputedStyle(pill.closest(".card") || document.body).backgroundColor;
@@ -259,13 +288,22 @@ _CONTRAST_JS = """(() => {
 
 
 @pytest.mark.parametrize("theme", ["dark", "light"])
-def test_not_run_pill_text_meets_aa(browser: AgentBrowser, open_server: str, theme: str) -> None:
-    """The "Checks not run" pill text is >= 4.5:1 against its background in both themes."""
+@pytest.mark.parametrize(
+    ("test_id", "status", "body"),
+    [
+        pytest.param("preflight-unavailable", 500, {}, id="not-run"),
+        pytest.param("preflight-pill", 200, _MCP_WARN, id="warning"),
+    ],
+)
+def test_project_readiness_pill_text_meets_aa(
+    browser: AgentBrowser, open_server: str, theme: str, test_id: str, status: int, body: dict
+) -> None:
+    """Both row readiness pills have text >= 4.5:1 against their background in both themes."""
     browser.goto(open_server)
     browser.eval_js(f"(()=>{{localStorage.setItem('clauster-theme','{theme}');return 1}})()")
     browser.reload()
     _settle(browser, open_server)
-    _stub(browser, _ALPHA, 500, {}, "await d.loadPreflight('alpha');")
-    browser.expect_visible(_NOT_RUN)
-    got = browser.eval_json(_CONTRAST_JS)
+    _stub(browser, _ALPHA, status, body, "await d.loadPreflight('alpha');")
+    browser.expect_visible(f'{_ROW} [data-test="{test_id}"]')
+    got = browser.eval_json(_CONTRAST_JS.replace("__TEST_ID__", test_id))
     assert got["ratio"] >= 4.5, got

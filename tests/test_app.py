@@ -1269,9 +1269,17 @@ def test_project_readiness_pill_shows_not_run_instead_of_hiding(write_config):
     assert 'this._allPreflightFailed(seqs, "the request failed or timed out");' in page
     assert page.count("setTimeout(() => ctrl.abort(), this.preflightTimeoutMs);") == 2
     # A failed run keeps the earlier result (the MCP soft-block fails closed), and the
-    # save paths also block when the re-check after a write failed.
+    # save paths set the block BEFORE their reload, so a failed or superseded reload
+    # cannot leave the gate open; only the newest successful load clears it.
     assert "delete this.preflight[name]" not in page
-    assert page.count("if (this.preflightError[c.project] || !this.preflight[c.project])") == 2
+    assert (
+        page.count(
+            "this.mcpBlockUntilReloaded[c.project] = true; await this._loadMcp(gen); "
+            "await this.loadPreflight(c.project); }"
+        )
+        == 2
+    )
+    assert "if (seq !== this._preflightSeq[name]) return false;" in page
     # The old silent-on-failure paths are gone.
     assert "advisory — pill hides on failure" not in page
     assert "advisory — leave per-project pills hidden" not in page

@@ -51,7 +51,7 @@
                    click to expand the specific checks. Silent when the project is launch-ready.
                    Backed by the preflight* API/state; "readiness" is the user-facing term, scoped
                    to this project vs the header's System readiness pill (UX-07). -->
-              <button type="button" class="badge bg-yellow-lt border-0" x-cloak data-test="preflight-pill"
+              <button type="button" class="badge bg-yellow-lt border-0 preflight-badge" x-cloak data-test="preflight-pill"
                       x-show="preflightState('{{ p.name }}') === 'warning'"
                       @click="togglePreflight('{{ p.name }}')"
                       :aria-expanded="!!preflightOpen['{{ p.name }}']"
@@ -61,7 +61,7 @@
               <!-- TASK-489: the checks for this project did not run (a failed request, an
                    HTTP error, or a result with no rows). Shown, not silent, so it never
                    reads as launch-ready; click to run the checks again. -->
-              <button type="button" class="badge bg-yellow-lt border-0 preflight-not-run" x-cloak data-test="preflight-unavailable"
+              <button type="button" class="badge bg-yellow-lt border-0 preflight-badge" x-cloak data-test="preflight-unavailable"
                       x-show="preflightState('{{ p.name }}') === 'unavailable'"
                       @click="recheckPreflight('{{ p.name }}')"
                       :aria-busy="preflightRechecking['{{ p.name }}'] ? 'true' : 'false'"
