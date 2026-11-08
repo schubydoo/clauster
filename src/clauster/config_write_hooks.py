@@ -772,18 +772,21 @@ def _destination(view: dict[str, Any]) -> tuple[Any, ...] | None:
     and it never becomes a dict key, so it cannot block a save that removes or replaces
     it. Incoming hooks are validated first, so theirs are always strings.
     """
-    # TASK-524: a field outside the type's row saves with a warning, and nothing says it
-    # does not name where the data goes, so its shown value is part of the destination.
     if view.get("type") == HTTP_TYPE and isinstance(view.get("url"), str):
-        return (HTTP_TYPE, view["url"].split("#", 1)[0].split("?", 1)[0], _unknown_fields(view))
+        return (HTTP_TYPE, view["url"].split("#", 1)[0].split("?", 1)[0])
     server, tool = view.get("server"), view.get("tool")
     if view.get("type") == MCP_TOOL_TYPE and isinstance(server, str) and isinstance(tool, str):
-        return (MCP_TOOL_TYPE, server, tool, _unknown_fields(view))
+        return (MCP_TOOL_TYPE, server, tool)
     return None
 
 
 def _unknown_fields(view: dict[str, Any]) -> str:
-    """Return the fields of a hook view outside its type's row, as a stable key."""
+    """Return the fields of a hook view outside its type's row, as a stable key.
+
+    TASK-524: such a field saves with a warning, and nothing says it does not name where
+    the data goes, so a kept mask is bound to its exact shown value too
+    (:func:`_restore_destination`).
+    """
     required, optional = _TYPE_FIELDS.get(str(view.get("type")), (frozenset(), frozenset()))
     known = _COMMON_FIELDS | required | optional
     return _key({str(k): v for k, v in view.items() if k not in known})
@@ -845,7 +848,8 @@ def _restore_destination(incoming: list[_Placed], stored: list[_Placed]) -> None
     * **One secret for the destination.** If every stored hook there hides the same raw
       values (:func:`_hidden`), a masked hook whose restorable fields equal one stored
       hook's view exactly takes that hook's raw values. Any edit to a masked field (the
-      URL, a header, an ``input`` argument) needs its masks retyped. Other fields
+      URL, a header, an ``input`` argument) or to a field outside the type's row
+      (:func:`_unknown_fields`, TASK-524) needs its masks retyped. Other fields
       (``timeout``, ``statusMessage``, the event, ...) change freely.
     * **Several secrets for the destination** (two Slack webhooks, one MCP tool with two
       keys). A masked hook cannot be told apart from its neighbour by its masked fields,
@@ -869,9 +873,9 @@ def _restore_destination(incoming: list[_Placed], stored: list[_Placed]) -> None
     if len({_hidden(h, v) for _ev, _m, h, v in stored}) == 1:
         by_view: dict[str, dict[str, Any]] = {}
         for _ev, _m, h, v in stored:
-            by_view.setdefault(_key(_restorable(v)), h)
+            by_view.setdefault(_key([_restorable(v), _unknown_fields(v)]), h)
         for entry, where in masked:
-            source = by_view.get(_key(_restorable(entry)))
+            source = by_view.get(_key([_restorable(entry), _unknown_fields(entry)]))
             if source is None:
                 raise cw.InvalidCandidateError(f"{where} {refusal}")
             entry.update(_restorable(source))

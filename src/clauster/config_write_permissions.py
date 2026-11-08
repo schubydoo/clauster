@@ -212,8 +212,7 @@ def validate_permissions(candidate: Any) -> None:
     for key in sorted(set(candidate) - _PERMISSION_KEYS, key=str):
         # A misspelled key such as `defaultmode` saves with a warning; it must never carry
         # bypass mode past the gate, should a later Claude Code read it.
-        value = candidate[key]
-        if isinstance(value, str) and is_bypass_mode(value):
+        if any(is_bypass_mode(s) for s in _string_leaves(candidate[key])):
             raise cw.InvalidCandidateError(
                 f"permissions {key!r} cannot be 'bypassPermissions' (footgun-gated)"
             )
@@ -249,6 +248,21 @@ def validate_permissions(candidate: Any) -> None:
             )
         if mode not in SETTINGS_DEFAULT_MODES:
             cw.warn_unknown_value("permissions 'defaultMode'", mode, SETTINGS_DEFAULT_MODES)
+
+
+def _string_leaves(value: Any) -> list[str]:
+    """Return every string in ``value``, nested dicts and lists included (iterative)."""
+    found: list[str] = []
+    stack = [value]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, str):
+            found.append(node)
+        elif isinstance(node, dict):
+            stack.extend(node.values())
+        elif isinstance(node, list):
+            stack.extend(node)
+    return found
 
 
 def _mask_outside_list_entries(value: Any) -> bool:

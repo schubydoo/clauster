@@ -224,8 +224,13 @@ These checks still stop the save with a `422`, and nothing is written:
 - A scope rule, for example `autoMode` or `defaultMode: "auto"` at Project or
   Local scope.
 - A security gate. Examples are `bypassPermissions` as a mode in any spelling,
-  and a masked value (`********`) that Clauster cannot bind to its stored
-  value.
+  also under a misspelled key such as `defaultmode`, and a masked value
+  (`********`) that Clauster cannot bind to its stored value.
+- A masked value in a hook or an MCP server when you changed a field or key
+  that is not in the known lists, also inside `oauth` or a `tools` item.
+  Clauster cannot tell whether that field names where the stored value goes.
+  Type the masked values again, or undo the change. A masked value in a hook or
+  server whose `type` is not in the known lists is refused for the same reason.
 - The mode `inherit`, which is Clauster's own launch setting and not a Claude
   Code mode.
 
@@ -328,6 +333,9 @@ values, because Claude Code refuses, skips or ignores them:
   compares the text exactly. It does not hand a stored value to a new command.
   Type the masked values again. A change to an unmasked `env` value keeps the
   other masked values.
+- A masked value in any server when you changed a key that is not in the lists
+  above, also a key inside `oauth` or a `tools` item. See
+  [Known values are suggestions](#known-values-are-suggestions).
 - A reserved name, such as `workspace`, `claude-in-chrome` or `computer-use`.
 - An entry with a `url` and no `type`. Claude Code reads such an entry as a
   stdio server and skips it.

@@ -867,13 +867,10 @@ def _destination(entry: dict[str, Any], stored: dict[str, Any]) -> tuple[Any, ..
     except cw.InvalidCandidateError:
         return None
     # TASK-524: a key outside the known lists saves with a warning, and nothing says it
-    # does not name where a value goes, so its exact value binds the masks too.
+    # does not name where a value goes, so its exact value binds the masks too: as it will
+    # be written, a nested mask resolved as merge_redacted resolves it.
     unknown = json.dumps(
-        {
-            str(k): stored.get(k) if v == cw.REDACTION_SENTINEL else v
-            for k, v in entry.items()
-            if k not in _KEYS_BY_TRANSPORT[transport]
-        },
+        cw.merge_redacted(_unknown_part(entry, transport), _unknown_part(stored, transport)),
         sort_keys=True,
         default=repr,
     )
@@ -891,6 +888,30 @@ def _destination(entry: dict[str, Any], stored: dict[str, Any]) -> tuple[Any, ..
             ]
         return "stdio", command, args, unknown
     return transport, _url_texts(entry, stored), unknown
+
+
+def _unknown_part(entry: dict[str, Any], transport: str) -> dict[str, Any]:
+    """Return the keys of ``entry`` outside the known lists, with those of ``oauth``/``tools``.
+
+    The top-level keys outside the transport's known keys, the ``oauth`` keys outside
+    :data:`_OAUTH_KEYS` and, per ``tools`` item, the keys other than ``name`` and
+    ``permission_policy`` (TASK-524). Part of :func:`_destination`.
+    """
+    part: dict[str, Any] = {
+        "top": {str(k): v for k, v in entry.items() if k not in _KEYS_BY_TRANSPORT[transport]}
+    }
+    oauth = entry.get("oauth")
+    if isinstance(oauth, dict):
+        part["oauth"] = {str(k): v for k, v in oauth.items() if k not in _OAUTH_KEYS}
+    tools = entry.get("tools")
+    if isinstance(tools, list):
+        part["tools"] = [
+            {str(k): v for k, v in t.items() if k not in ("name", "permission_policy")}
+            if isinstance(t, dict)
+            else None
+            for t in tools
+        ]
+    return part
 
 
 def _check_destination(name: str, entry: Any, stored: Any, *, masked: bool) -> None:
@@ -934,6 +955,12 @@ def _check_destination(name: str, entry: Any, stored: Any, *, masked: bool) -> N
             "every masked value"
         )
     if now != then:
+        if then is not None and now[:-1] == then[:-1]:
+            raise cw.InvalidCandidateError(
+                f"server {name!r} keeps a masked value '********' but a key that is not on "
+                "the known list changed; Clauster cannot tell whether it names where the "
+                "stored value goes. Retype every masked value, or undo that change"
+            )
         if now is not None and then is not None and now[0] == then[0] == "stdio":
             raise cw.InvalidCandidateError(
                 f"server {name!r} keeps a masked value '********' but its command or args "

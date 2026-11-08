@@ -469,7 +469,9 @@ def test_a_changed_unknown_mcp_key_refuses_a_kept_masked_header(tmp_path: Path) 
     view, file_hash = mcp.read_project_servers(tmp_path)
     edited = json.loads(json.dumps(view))
     edited["srv"]["endpoint"] = "https://evil.example.net/mcp"
-    with pytest.raises(cw.InvalidCandidateError, match="type or a url changed"):
+    with pytest.raises(
+        cw.InvalidCandidateError, match="a key that is not on the known list changed"
+    ):
         mcp.write_project_servers(tmp_path, edited, file_hash)
     # Unchanged, the same masked header is kept.
     mcp.write_project_servers(tmp_path, view, file_hash)
@@ -497,6 +499,8 @@ def test_invisible_and_fullwidth_bypass_spellings_stay_refused(mode: str) -> Non
 def test_an_unknown_permissions_key_never_carries_bypass_mode() -> None:
     with pytest.raises(cw.InvalidCandidateError, match="'defaultmode' cannot be"):
         perms.validate_permissions({"defaultmode": "bypassPermissions"})
+    with pytest.raises(cw.InvalidCandidateError, match="'mode' cannot be"):
+        perms.validate_permissions({"mode": {"default": ["bypassPermissions"], "n": 1}})
 
 
 def test_record_value_warnings_adds_to_the_active_save_only() -> None:
@@ -511,3 +515,78 @@ def test_a_skill_member_with_no_restored_text_keeps_all_its_warnings() -> None:
     with cw.collect_value_warnings() as warnings:
         sk._validate_member(sk.SKILL_FILENAME, text, sent=text)
     assert len(warnings) == 1 and "'shell' 'zsh'" in warnings[0]
+
+
+# --- review round 2 -----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "stored",
+    [
+        {
+            "type": "http",
+            "url": "https://x.example/mcp",
+            "headers": {"Authorization": "Bearer REAL"},
+            "extra": {"api_key": "sk-nested-secret"},
+        },
+        {"command": "run", "env": {"TOKEN": "s3cret"}, "extra": {"password": "hunter2"}},
+    ],
+)
+def test_an_unchanged_resave_keeps_a_nested_mask_under_an_unknown_key(
+    tmp_path: Path, stored: dict
+) -> None:
+    (tmp_path / ".mcp.json").write_text(json.dumps({"mcpServers": {"srv": stored}}))
+    view, file_hash = mcp.read_project_servers(tmp_path)
+    assert cw.REDACTION_SENTINEL in json.dumps(view["srv"]["extra"])
+    mcp.write_project_servers(tmp_path, view, file_hash)
+    assert json.loads((tmp_path / ".mcp.json").read_text())["mcpServers"] == {"srv": stored}
+
+
+@pytest.mark.parametrize("where", ["oauth", "tools"])
+def test_a_changed_unknown_nested_mcp_key_refuses_a_kept_mask(tmp_path: Path, where: str) -> None:
+    stored: dict = {
+        "type": "http",
+        "url": "https://x.example/mcp",
+        "headers": {"Authorization": "Bearer REAL"},
+    }
+    if where == "oauth":
+        stored["oauth"] = {"clientId": "c", "tokenEndpoint": "https://good.example/"}
+    else:
+        stored["tools"] = [{"name": "t", "endpoint": "https://good.example/"}]
+    (tmp_path / ".mcp.json").write_text(json.dumps({"mcpServers": {"srv": stored}}))
+    view, file_hash = mcp.read_project_servers(tmp_path)
+    edited = json.loads(json.dumps(view))
+    if where == "oauth":
+        edited["srv"]["oauth"]["tokenEndpoint"] = "https://evil.example/"
+    else:
+        edited["srv"]["tools"][0]["endpoint"] = "https://evil.example/"
+    with pytest.raises(cw.InvalidCandidateError, match="not on the known list changed"):
+        mcp.write_project_servers(tmp_path, edited, file_hash)
+
+
+def test_an_edit_to_an_unknown_hook_field_never_takes_another_hooks_secret() -> None:
+    # Two hooks to one URL with two secrets: deleting B and editing A's unknown field to
+    # B's value must not hand A B's secret (it once split them into two destinations).
+    def hook(secret: str, to: str) -> dict:
+        return {"type": "http", "url": "https://h.example/x", "headers": {"A": secret}, "to": to}
+
+    stored = {"Stop": [{"hooks": [hook("secretA", "1"), hook("secretB", "2")]}]}
+    view = hooks._redact_hooks(stored)
+    edited = {"Stop": [{"hooks": [{**view["Stop"][0]["hooks"][0], "to": "2", "timeout": 30}]}]}
+    with pytest.raises(cw.InvalidCandidateError, match="cannot tell which"):
+        hooks._merge_hooks(edited, stored)
+
+
+def test_the_route_decorator_resolves_string_annotations_in_the_handler_module() -> None:
+    # FastAPI before 0.124 reads the wrapper's signature with the wrapper's globals, so the
+    # wrapper must carry annotations already resolved in the handler's own module.
+    import inspect
+    import typing
+
+    from clauster.config import ClausterConfig
+    from clauster.routes.config_write import hooks as hooks_routes
+
+    sig = inspect.signature(hooks_routes.api_config_write_hooks_write, follow_wrapped=False)
+    for param in sig.parameters.values():
+        assert not isinstance(param.annotation, str), param
+    assert typing.get_args(sig.parameters["config"].annotation)[0] is ClausterConfig
