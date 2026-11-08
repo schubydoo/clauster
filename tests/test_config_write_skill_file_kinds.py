@@ -161,10 +161,6 @@ def test_the_walk_stops_listing_a_huge_directory_at_the_cap(tmp_path: Path, monk
         return out
 
     monkeypatch.setattr(sk, "_list_stored_dir", _recording)
-    # The key matcher refuses such a root first (the test below); step past it to the walk.
-    monkeypatch.setattr(
-        sk, "_replaced_by", lambda *_a, **_k: lambda member: member == Path(sk.SKILL_FILENAME)
-    )
     with pytest.raises(cw.InvalidCandidateError, match="holds more than 3"):
         _save(tmp_path, {sk.SKILL_FILENAME: _VALID_MD})
     assert lengths == [4]  # the listing stopped one past the cap, not at 42 entries
@@ -538,9 +534,40 @@ def test_matching_a_key_never_lists_a_huge_directory_in_full(tmp_path: Path, mon
                 yield entry
 
     monkeypatch.setattr(sk.os, "scandir", _Counting)
-    with pytest.raises(cw.InvalidCandidateError, match="holds more than 3"):
-        sk._replaced_by(skill_dir, {"f0": ""}, name="s")
+    replaced = sk._replaced_by(skill_dir, {"f0": ""})
     assert max(seen) == 4  # one past the cap, never all 42 entries
+    assert replaced(Path("f0"))  # the key's own spelling still names its stored file
+    monkeypatch.setattr(sk.os, "scandir", real_scandir)
+    with pytest.raises(cw.InvalidCandidateError, match="holds more than 3"):
+        _save(tmp_path, {sk.SKILL_FILENAME: _VALID_MD, "f0": ""})  # the walk refuses
+
+
+def test_the_matcher_lists_a_directory_of_exactly_the_cap(tmp_path: Path, monkeypatch) -> None:
+    directory = tmp_path / "d"
+    directory.mkdir()
+    for index in range(3):
+        (directory / f"f{index}").write_bytes(b"")
+    monkeypatch.setattr(sk, "MAX_STORED_ENTRIES", 3)
+    assert sorted(sk._bounded_names(directory) or []) == ["f0", "f1", "f2"]
+    (directory / "f3").write_bytes(b"")
+    assert sk._bounded_names(directory) is None
+
+
+@needs_symlink
+def test_a_huge_directory_behind_a_stored_symlink_is_refused_as_the_symlink(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # The matcher follows a symlink in a parent part of a key; the walk names the true cause.
+    skill_dir = _store(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    for index in range(10):
+        (outside / f"f{index}").write_bytes(b"")
+    (skill_dir / "link").symlink_to(outside, target_is_directory=True)
+    monkeypatch.setattr(sk, "MAX_STORED_ENTRIES", 5)
+    with pytest.raises(cw.InvalidCandidateError, match="'link' is a symlink or not a regular"):
+        _save(tmp_path, {sk.SKILL_FILENAME: _VALID_MD, "link/new.md": "x"})
+    assert sorted(p.name for p in outside.iterdir()) == [f"f{i}" for i in range(10)]
 
 
 @_FIFO

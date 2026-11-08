@@ -1547,8 +1547,9 @@ def _keep_replaced_mode(
     walk recorded as replaced (the same ``st_dev`` and ``st_ino``), so a new member keeps
     the default mode, and an executable script keeps its x bit when its text is saved
     (TASK-500), as :func:`~clauster.config_file_writer.write_file` keeps a mode on replace.
-    As for a kept file (:func:`_copy_stored_file`), setuid and setgid are cleared (the sticky
-    bit too), and the stored group is set back or the group bits are cleared.
+    As for a kept file (:func:`_copy_stored_file`), setuid and setgid are cleared, and the
+    stored group is set back or the group bits are cleared. Unlike a kept file, the sticky
+    bit is cleared too.
     """
     try:
         now = os.lstat(stored_path)
@@ -1576,23 +1577,20 @@ def _too_many_entries(name: str) -> cw.InvalidCandidateError:
     )
 
 
-def _bounded_names(directory: Path, *, name: str) -> list[str]:
-    """Return the entry names of the stored ``directory``, or refuse one over the entry cap.
+def _bounded_names(directory: Path) -> list[str] | None:
+    """Return the entry names of the stored ``directory``, or None when it holds too many.
 
     Listed one past :data:`MAX_STORED_ENTRIES` at most, so matching a request key costs no
-    more than the walk's cap allows: a directory that holds more is refused (→ 422), as the
-    walk would refuse the tree.
+    more than the walk's cap allows. None leaves the refusal to the walk, which names the
+    true cause: the cap for a huge directory in the skill, or the symlink that a listing
+    through a parent component followed out of it.
     """
     with os.scandir(directory) as entries:
         names = [entry.name for entry in itertools.islice(entries, MAX_STORED_ENTRIES + 1)]
-    if len(names) > MAX_STORED_ENTRIES:
-        raise _too_many_entries(name)
-    return names
+    return None if len(names) > MAX_STORED_ENTRIES else names
 
 
-def _stored_spelling(
-    skill_dir: Path, parts: tuple[str, ...], *, name: str
-) -> tuple[str, ...] | None:
+def _stored_spelling(skill_dir: Path, parts: tuple[str, ...]) -> tuple[str, ...] | None:
     """Return the stored names of the entry the file system maps ``parts`` to, or None.
 
     Component by component: a name stored exactly is that entry. Otherwise the file
@@ -1606,14 +1604,16 @@ def _stored_spelling(
     write refuses if the key then collides with that copy. A wrong None only refuses or
     over-counts. A wrong match would delete a stored file. The listing follows a stored
     symlink in a parent component, which does no harm: the walk refuses the link. Each
-    listing is bounded (:func:`_bounded_names`, skill ``name``), so a huge directory is
-    refused before it is read in full (TASK-500).
+    listing is bounded (:func:`_bounded_names`), so a huge directory is never read in
+    full here; it gives None, and the walk refuses the tree (TASK-500).
     """
     current = skill_dir
     out: list[str] = []
     for part in parts:
         try:
-            names = _bounded_names(current, name=name)
+            names = _bounded_names(current)
+            if names is None:
+                return None  # too many to match: the walk refuses the tree
             if part in names:
                 out.append(part)
                 current = current / part
@@ -1634,7 +1634,7 @@ def _stored_spelling(
     return tuple(out)
 
 
-def _replaced_by(skill_dir: Path, files: dict[str, Any], *, name: str) -> Callable[[Path], bool]:
+def _replaced_by(skill_dir: Path, files: dict[str, Any]) -> Callable[[Path], bool]:
     """Return a test of whether a stored file is one of the members the request names.
 
     A key names a member by its parts, as :func:`~clauster.config_file_writer.resolve_
@@ -1649,7 +1649,7 @@ def _replaced_by(skill_dir: Path, files: dict[str, Any], *, name: str) -> Callab
     for parts in named:
         if Path(*parts).is_absolute() or any(p in ("", ".", "..") for p in parts):
             continue  # not a path the save can write: resolve_contained_path refuses it
-        stored = _stored_spelling(skill_dir, parts, name=name)
+        stored = _stored_spelling(skill_dir, parts)
         if stored is not None:
             spelled.add(stored)
 
@@ -2770,7 +2770,7 @@ def write_skill(
             kept_dirs, replaced_files = _keep_stored_members(
                 skill_dir,
                 staging,
-                _replaced_by(skill_dir, files, name=name),
+                _replaced_by(skill_dir, files),
                 name=name,
                 sent=sent,
             )

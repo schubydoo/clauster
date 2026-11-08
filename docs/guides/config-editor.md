@@ -703,9 +703,10 @@ A block without any of them gets only the line masks. These are the cases:
 - It is larger than the 256 KiB file cap.
 
 For `SKILL.md`, a save of such a file is refused, except when the frontmatter is
-valid only after Claude Code re-quotes it. The refusal names the problem in the
-stored file, the same error that the skill list shows. To change the file, type
-the whole frontmatter again or edit the file on the host.
+valid only after Claude Code re-quotes it. When the stored frontmatter fails a
+check, the refusal names that problem, the same error that the skill list
+shows. To change the file, type the whole frontmatter again or edit the file on
+the host.
 
 A masked line keeps its stored text on save only when every other character of
 the line is unchanged. For a frontmatter `url`, the scheme, the host, the port,
@@ -1130,9 +1131,9 @@ their group, with these changes:
   It never gives them to another group.
 
 On Linux and macOS, a file that the save sends keeps the mode and group of the
-stored file that it replaces, with the same changes. So a script that is executable stays
-executable when you save its text. A new file gets the default mode for a new
-file.
+stored file that it replaces, with the same changes. Clauster also clears the
+sticky bit of that file. So a script that is executable stays executable when
+you save its text. A new file gets the default mode for a new file.
 
 While Clauster builds the new copy, every directory in it is private to the
 owner. Clauster sets the final modes only as the last step before the new copy
