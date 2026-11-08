@@ -2916,7 +2916,9 @@
       },
       configMgmtAddHookRow() {
         const h = this.configMgmt.hooks;
-        h.rows.push({ id: ++h.rowSeq, event: HOOK_EVENTS[0] || "", matcher: "", type: "command",
+        // An empty event box shows every known event as a suggestion (TASK-524); a filled
+        // row with no event blocks Save (configMgmtHooksRowsWarning).
+        h.rows.push({ id: ++h.rowSeq, event: "", matcher: "", type: "command",
           command: "", url: "", server: "", tool: "", prompt: "", timeout: "" });
         this.$nextTick(() => {
           const inputs = document.querySelectorAll('[data-test="cm-hook-command"]');
@@ -4570,12 +4572,12 @@
           if (c.gen === gen) this._configMgmtRevealResult(origin);
         }
       },
-      // The cm-saved banner text: an update's summary on the Plugins tab, else "Saved.".
       // TASK-524: the last save's known-value warnings, only while its Saved banner shows.
       configMgmtSaveWarnings() {
         const c = this.configMgmt;
         return c.saved ? c.warnings : [];
       },
+      // The cm-saved banner text: an update's summary on the Plugins tab, else "Saved.".
       configMgmtSavedText() {
         const c = this.configMgmt;
         return c.surface === "plugins" && c.plugins.result ? c.plugins.result : "Saved.";

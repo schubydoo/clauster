@@ -896,21 +896,30 @@ def _unknown_part(entry: dict[str, Any], transport: str) -> dict[str, Any]:
     The top-level keys outside the transport's known keys, the ``oauth`` keys outside
     :data:`_OAUTH_KEYS` and, per ``tools`` item, the keys other than ``name`` and
     ``permission_policy`` (TASK-524). Part of :func:`_destination`.
+
+    Only keys outside the lists count: an empty part is left out, so adding or removing an
+    ``oauth`` block or a tool that holds only known keys never changes the destination. A
+    tool's part is keyed by its index, so :func:`~clauster.config_write.merge_redacted`
+    resolves a mask in it from the stored tool at the same index, as the real write does.
     """
     part: dict[str, Any] = {
         "top": {str(k): v for k, v in entry.items() if k not in _KEYS_BY_TRANSPORT[transport]}
     }
     oauth = entry.get("oauth")
     if isinstance(oauth, dict):
-        part["oauth"] = {str(k): v for k, v in oauth.items() if k not in _OAUTH_KEYS}
+        extra = {str(k): v for k, v in oauth.items() if k not in _OAUTH_KEYS}
+        if extra:
+            part["oauth"] = extra
     tools = entry.get("tools")
     if isinstance(tools, list):
-        part["tools"] = [
-            {str(k): v for k, v in t.items() if k not in ("name", "permission_policy")}
+        items = {
+            str(i): {str(k): v for k, v in t.items() if k not in ("name", "permission_policy")}
+            for i, t in enumerate(tools)
             if isinstance(t, dict)
-            else None
-            for t in tools
-        ]
+        }
+        items = {i: d for i, d in items.items() if d}
+        if items:
+            part["tools"] = items
     return part
 
 

@@ -2087,9 +2087,11 @@
             {# TASK-524: a value outside a list of known values saves as typed, and the save
                response names each one. text-warning-emphasis: plain .alert-warning text
                misses AA contrast in the light theme. #}
-            {# text-break: a quoted value can be 80 characters with no space (phone width). #}
+            {# text-break: a quoted value can be 80 characters with no space (phone width).
+               Not aria-hidden, unlike cm-saved: the warnings stay on screen, so a screen
+               reader must find them in browse mode, not only hear the live region once. #}
             <div class="alert alert-warning text-warning-emphasis text-break py-2 small" data-test="cm-save-warnings"
-                 aria-hidden="true" x-show="configMgmtSaveWarnings().length" x-cloak>
+                 x-show="configMgmtSaveWarnings().length" x-cloak>
               <ul class="mb-0 ps-3">
                 <template x-for="(w, i) in configMgmtSaveWarnings()" :key="i">
                   <li x-text="w"></li>
@@ -2687,7 +2689,7 @@
                                below the table); any other name saves with a warning. -->
                           <input type="text" class="form-control form-control-sm font-monospace cm-hook-event-input"
                                  data-test="cm-hook-event" {{ NO_AUTOFILL }} spellcheck="false"
-                                 list="cm-hook-event-options"
+                                 list="cm-hook-event-options" placeholder="event name"
                                  :id="'cm-hook-event-' + row.id" :name="'cm-hook-event-' + row.id"
                                  :aria-label="'Event for hook ' + (idx + 1)"
                                  :aria-describedby="configMgmtHookEventWarning(row) ? 'cm-hook-event-warn-' + row.id : null"

@@ -564,9 +564,45 @@ def test_a_changed_unknown_nested_mcp_key_refuses_a_kept_mask(tmp_path: Path, wh
         mcp.write_project_servers(tmp_path, edited, file_hash)
 
 
+@pytest.mark.parametrize(
+    "edit",
+    ["add-tool", "remove-tool", "add-tools", "add-oauth", "remove-oauth"],
+)
+def test_a_known_key_edit_still_keeps_a_masked_header(tmp_path: Path, edit: str) -> None:
+    # Adding or removing an `oauth` block or a tool with only known keys changes no key
+    # outside the lists, so the kept mask is still bound (review round 3).
+    stored: dict = {
+        "type": "http",
+        "url": "https://x.example/mcp",
+        "headers": {"Authorization": "Bearer REAL"},
+    }
+    if edit in ("add-tool", "remove-tool"):
+        stored["tools"] = [{"name": "a", "permission_policy": "always_ask"}]
+    if edit == "remove-oauth":
+        stored["oauth"] = {"clientId": "c"}
+    (tmp_path / ".mcp.json").write_text(json.dumps({"mcpServers": {"srv": stored}}))
+    view, file_hash = mcp.read_project_servers(tmp_path)
+    edited = json.loads(json.dumps(view))
+    srv = edited["srv"]
+    if edit == "add-tool":
+        srv["tools"].append({"name": "b"})
+    elif edit == "remove-tool":
+        srv["tools"].pop()
+    elif edit == "add-tools":
+        srv["tools"] = [{"name": "b"}]
+    elif edit == "add-oauth":
+        srv["oauth"] = {"clientId": "c"}
+    else:
+        del srv["oauth"]
+    mcp.write_project_servers(tmp_path, edited, file_hash)
+    saved = json.loads((tmp_path / ".mcp.json").read_text())["mcpServers"]["srv"]
+    assert saved["headers"] == {"Authorization": "Bearer REAL"}
+
+
 def test_an_edit_to_an_unknown_hook_field_never_takes_another_hooks_secret() -> None:
     # Two hooks to one URL with two secrets: deleting B and editing A's unknown field to
-    # B's value must not hand A B's secret (it once split them into two destinations).
+    # B's value must not hand A B's secret. This goes through the several-secrets pairing,
+    # which compares whole views (the unknown fields once split the destination instead).
     def hook(secret: str, to: str) -> dict:
         return {"type": "http", "url": "https://h.example/x", "headers": {"A": secret}, "to": to}
 
