@@ -145,8 +145,11 @@ _RE_SPACE_RUN = re.compile(rb"\s+")
 # A run of complete escape sequences (no C0 controls): what may sit between an id and the
 # next byte. The last alternative leaves out `[` and `]` as final bytes, so a CSI or OSC that
 # a read cut short is not taken for a finished two-byte escape: the run stops at its ESC.
+# That final-byte class is 0x30-0x7E without 0x5B and 0x5D, spelled out byte range by byte
+# range so it reads as deliberate.
 _RE_ESCAPE_RUN = re.compile(
-    rb"(?:\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?|\x1b[ -/]*[0-Z\\^-~])*"
+    rb"(?:\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?"
+    rb"|\x1b[ -/]*[\x30-\x5a\x5c\x5e-\x7e])*"
 )
 # How far past an id the escape run is read. It bounds the work per hit on hostile output.
 _ESCAPE_RUN_LIMIT = 512
