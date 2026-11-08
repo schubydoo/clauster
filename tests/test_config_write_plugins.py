@@ -2803,6 +2803,59 @@ def test_cli_list_offered_plugins_sorts_by_shown_name(tmp_path: Path) -> None:
     assert [p["name"] for p in out] == sorted(i.split("@")[0] for i in ids)
 
 
+def test_cli_list_offered_plugins_sort_ignores_case_then_breaks_ties_by_id(
+    tmp_path: Path,
+) -> None:
+    ids = ["B@probe", "a@probe", "A@probe"]
+    payload = {"available": [{"pluginId": i, "marketplaceName": "probe"} for i in ids]}
+    run, _calls = _fake_run(rc=0, stdout=json.dumps(payload))
+    out = plugins.cli_list_offered_plugins(str(FAKE_CLAUDE), tmp_path, "probe", run=run)
+    assert [p["id"] for p in out] == ["A@probe", "a@probe", "B@probe"]
+
+
+@pytest.mark.parametrize("value", ["a\n@probe", "a@probe\n", "a\n"])
+def test_validate_plugin_id_rejects_a_trailing_newline(value: str) -> None:
+    # `$` also matches before a trailing newline; the segment check must use fullmatch.
+    with pytest.raises(cw.InvalidCandidateError):
+        plugins.validate_plugin_id(value)
+
+
+def test_validate_marketplace_name_rejects_a_trailing_newline() -> None:
+    with pytest.raises(cw.InvalidCandidateError):
+        plugins.validate_marketplace_name("probe\n")
+
+
+def test_cli_list_offered_plugins_drops_an_id_with_a_newline(tmp_path: Path) -> None:
+    payload = {
+        "available": [
+            {"pluginId": "a\n@probe", "marketplaceName": "probe"},
+            {"pluginId": "ok@probe", "marketplaceName": "probe"},
+        ]
+    }
+    run, _calls = _fake_run(rc=0, stdout=json.dumps(payload))
+    out = plugins.cli_list_offered_plugins(str(FAKE_CLAUDE), tmp_path, "probe", run=run)
+    assert [p["id"] for p in out] == ["ok@probe"]
+
+
+def test_run_decodes_cli_output_as_utf8_on_every_os(tmp_path: Path) -> None:
+    # "Ł" is C5 81 in UTF-8, and cp1252 (the Windows default) has no 0x81: a locale
+    # decode raised UnicodeDecodeError, a 500. A real child writes the bytes, so the
+    # decode `_run` asks for is the one that runs.
+    payload = {"available": [{"pluginId": "p@m", "marketplaceName": "m", "description": "Ł"}]}
+    raw = json.dumps(payload, ensure_ascii=False).encode("utf-8") + b"\xff"
+    code = f"import sys; sys.stdout.buffer.write({raw!r})"
+
+    def run(argv, **kwargs):
+        return subprocess.run([sys.executable, "-c", code], **kwargs)
+
+    with pytest.raises(plugins.PluginCliError, match="invalid JSON"):
+        # The trailing 0xFF is not UTF-8: replaced, never a UnicodeDecodeError.
+        plugins.cli_list_offered_plugins(str(FAKE_CLAUDE), tmp_path, "m", run=run)
+    code = f"import sys; sys.stdout.buffer.write({raw[:-1]!r})"
+    [entry] = plugins.cli_list_offered_plugins(str(FAKE_CLAUDE), tmp_path, "m", run=run)
+    assert entry["description"] == "Ł"
+
+
 def test_cli_list_offered_plugins_row_names_the_id_it_installs(tmp_path: Path) -> None:
     # The list installs without a retype, so a row's label is its own id's name part, and
     # an id that is not a valid id of this marketplace is never offered (backend review).

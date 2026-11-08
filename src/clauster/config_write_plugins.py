@@ -285,7 +285,9 @@ def _validate_name_segment(value: Any, label: str) -> str:
     """Reject ``value`` unless it is a non-empty, option-safe identifier; return it."""
     if not isinstance(value, str) or not value:
         raise cw.InvalidCandidateError(f"{label} must be a non-empty string")
-    if not _NAME_SEGMENT_RE.match(value):
+    # fullmatch, not match: `$` also matches before a trailing newline, so `match` let
+    # "a\n" pass. A marketplace's own list now supplies ids (TASK-516).
+    if not _NAME_SEGMENT_RE.fullmatch(value):
         raise cw.InvalidCandidateError(
             f"{label} {value!r} must match {_NAME_SEGMENT_RE.pattern} "
             "(identifier chars, no leading '-')"
@@ -393,6 +395,10 @@ def _run(
             cwd=str(cwd),
             capture_output=True,
             text=True,
+            # The CLI writes UTF-8. Without this, Windows decodes with the locale code page
+            # (cp1252 has no 0x81), and a UnicodeDecodeError escaped as a 500.
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
             env=procutil.child_env(),
             stdin=subprocess.DEVNULL,

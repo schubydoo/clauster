@@ -3692,10 +3692,10 @@
                     </tr>
                     <tr x-show="configMgmtOfferedOpen(m.name)" x-cloak>
                       <td colspan="2" :data-test="'cm-market-offered-' + m.name">
-                        {# A refresh after an action keeps the old rows on screen (busy
-                           disables their buttons); "Reading" shows only on a first read. #}
+                        {# A refresh keeps the old rows on screen with their Install buttons
+                           disabled; this line says why. The live region stays quiet then. #}
                         <div class="text-secondary small" aria-hidden="true"
-                             x-show="configMgmtOffered(m.name).loading && configMgmtOffered(m.name).plugins.length === 0" x-cloak>
+                             x-show="configMgmtOffered(m.name).loading" x-cloak>
                           Reading the plugins this marketplace offers…
                         </div>
                         <div class="text-danger small" aria-hidden="true" :data-test="'cm-market-offered-error-' + m.name"
