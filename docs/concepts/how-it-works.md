@@ -195,8 +195,8 @@ comes depends on the case:
 - After `the reconnect failed`, Clauster does not retry by itself. The next new
   Direct Session, or a Resume or Restart of a Direct Session, connects again.
 - If a reattach at startup timed out, the next connection comes only when this
-  connection drops, or when a `/healthz` check or a new Direct Session finds that
-  it no longer answers.
+  connection drops, or when a `/healthz` check, a new Direct Session, or a Resume
+  or Restart finds that it no longer answers.
 
 **Resume** does not wait for that retry. On an `Error` card, Resume first ends
 the old agent through the daemon and waits for the answer. If the daemon refuses

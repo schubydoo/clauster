@@ -1464,6 +1464,8 @@ class HostedManager:
             # Mark the intent so a restart shows it as stopped, not "lost"/crashed. Not
             # for a session that ended in ERROR (TASK-461): its agent may still run, and
             # a stopped row skips the restart's reattach and Resume's kill of the agent.
+            # An ERROR stop whose agent is known to be dead loses the flag too: after a
+            # restart it then reads crashed, not stopped, which is safe.
             if session.status != InstanceStatus.ERROR:
                 instance.intentional_stop = True
             await self._persist()
