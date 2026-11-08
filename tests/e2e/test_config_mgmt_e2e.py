@@ -2792,6 +2792,14 @@ def test_config_mgmt_marketplaces_remove_only_where_the_scope_declares(
         "Declared at User scope, not at Project scope. Remove it there.",
     )
     browser.expect_visible('[data-test="cm-market-update-empty"]')
+    # No scope of alpha (nor User) declares `loose`: no Remove, no link.
+    browser.expect_text(
+        '[data-test="cm-market-readonly-loose"]',
+        "Not declared at Project scope, so Remove is not offered here. No other scope of this "
+        "project that Clauster reads declares it.",
+    )
+    assert browser.get_count('[data-test="cm-market-remove-loose"]') == 0
+    assert not browser.is_visible('[data-test="cm-market-switch-scope-loose"]')
 
     # The link opens User scope, where only `empty` can be removed.
     browser.expect_text('[data-test="cm-market-switch-scope-empty"]', "Switch to User scope")
@@ -2844,6 +2852,12 @@ def test_config_mgmt_marketplaces_unreadable_declarations_offer_no_remove(
     browser.select('[data-test="cm-project"]', "alpha")
     browser.click('[data-test="cm-surface-plugins"]')
     browser.expect_visible('[data-test="cm-market-remove-market"]')
+    # At Project scope a row no readable scope declares names the scope it could not read.
+    browser.expect_text(
+        '[data-test="cm-market-readonly-loose"]',
+        "No other scope that Clauster could read declares it. Clauster could not read Local "
+        "scope.",
+    )
     browser.click('[data-test="cm-scope-local"]')
     browser.expect_attr('[data-test="cm-scope-local"]', "aria-pressed", "true")
     browser.expect_text(

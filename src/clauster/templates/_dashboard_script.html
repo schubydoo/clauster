@@ -4806,8 +4806,9 @@
         const failed = read.filter((s) => s !== c.scope && !Array.isArray(c.plugins.declared[s]));
         let tail = " No other scope of this project that Clauster reads declares it.";
         if (failed.length) {
-          tail += " Clauster could not read " + failed.map((s) => this._configMgmtScopeWord(s)).join(" and ")
-            + (failed.length === 1 ? " scope." : " scopes.");
+          const words = failed.map((s) => this._configMgmtScopeWord(s)).join(" and ");
+          tail = " No other scope that Clauster could read declares it. Clauster could not read "
+            + words + (failed.length === 1 ? " scope." : " scopes.");
         }
         if (!read.includes("user")) tail += " User scope can declare it, and this editor does not open User scope.";
         return none + tail;

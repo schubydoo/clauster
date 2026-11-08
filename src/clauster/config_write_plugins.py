@@ -1090,7 +1090,7 @@ def marketplace_plugin_names(
     """Return ``{marketplace: plugin names or None}`` for ``name`` (or every marketplace).
 
     Reads ``marketplace list --json`` for each listed location
-    (:func:`_marketplace_list_location`), then that location's ``marketplace.json``
+    (:func:`_marketplace_list_location`), then the plugin list at that location
     (:func:`_read_marketplace_plugin_names`). The second value names
     the marketplaces whose source is not a known copy
     (:data:`CHECKOUT_MARKETPLACE_SOURCES`): a read of one before an update is no

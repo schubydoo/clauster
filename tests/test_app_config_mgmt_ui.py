@@ -568,6 +568,10 @@ def test_marketplace_remove_renders_only_where_the_scope_declares_it(write_confi
     # ...and the read reaches the rows: started with the list, set together with it.
     assert "const declaredRead = this._loadDeclared(myGen);" in html
     assert "pl.declared = declared;" in html
+    # A row no read scope declares names what was not read (the E2E covers a failed read;
+    # this editor's User-scope-off wording has no browser test).
+    assert 'if (!read.includes("user")) tail += " User scope can declare it' in html
+    assert '" No other scope that Clauster could read declares it.' in html
     assert 'if (op === "remove" && !this.configMgmtMarketAtScope({ name: name })) return;' in html
     assert "data-test=\"'cm-market-readonly-' + m.name\"" in html
     assert "data-test=\"'cm-market-switch-scope-' + m.name\"" in html

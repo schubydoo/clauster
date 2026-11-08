@@ -2300,11 +2300,18 @@ def test_marketplace_plugin_names_reads_a_file_source_at_its_path(tmp_path: Path
     listing += [
         {"name": "nopath", "source": "file", "installLocation": str(tmp_path)},
         {"name": "badpath", "source": "file", "path": 7, "installLocation": str(tmp_path)},
+        # Only a file source reads its `path`.
+        {
+            "name": "d",
+            "source": "directory",
+            "path": str(tmp_path / "sub" / "my-market.json"),
+            "installLocation": str(tmp_path),
+        },
     ]
     run, _calls = _fake_run(stdout=json.dumps(listing))
     assert plugins.marketplace_plugin_names(str(FAKE_CLAUDE), tmp_path, None, run=run) == (
-        {"f": ["q1"], "nopath": ["wrong"], "badpath": ["wrong"]},
-        frozenset({"f", "nopath", "badpath"}),
+        {"f": ["q1"], "nopath": ["wrong"], "badpath": ["wrong"], "d": ["wrong"]},
+        frozenset({"f", "nopath", "badpath", "d"}),
     )
 
 
