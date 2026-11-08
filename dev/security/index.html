@@ -803,6 +803,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="Redaction guarantee">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#config-write-masking-best-effort" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Config-write masking (best effort)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -1778,6 +1795,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="Redaction guarantee">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#config-write-masking-best-effort" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Config-write masking (best effort)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -2155,7 +2189,8 @@ flags yourself.</p>
 <li><strong>Shapes (best effort).</strong> Every other secret is masked by its shape: ids and
    UUIDs that Clauster did not learn, and third-party tokens that Claude prints.
    <a href="#log-redaction">Log redaction</a> below describes these masks and their known
-   residue. A new gap in a shape mask goes to a later milestone. It does not
+   residue. <a href="#config-write-masking-best-effort">Config-write masking</a> describes
+   the masks of the config editor. A new gap in a shape mask goes to a later milestone. It does not
    block a release.</li>
 </ol>
 <div class="admonition warning">
@@ -2223,6 +2258,22 @@ flags yourself.</p>
 <li>When <code>logs.redact_session_url</code> is false (the default), the debug log on
   disk keeps every id verbatim. See <a href="#hybrid-by-default">Hybrid by default</a>.</li>
 </ul>
+</div>
+<h3 id="config-write-masking-best-effort">Config-write masking (best effort)<a class="headerlink" href="#config-write-masking-best-effort" title="Permanent link">&para;</a></h3>
+<p>When <code>config_write.enabled</code> is true, the dashboard reads Claude Code settings,
+MCP servers, hooks, subagents and skills from disk and shows them in the
+browser. Clauster masks the secrets in them by shape and by their place in the
+file, so this masking is best effort under the rule above. The
+<a href="../guides/config-editor/">config editor guide</a> describes what each tab masks.</p>
+<div class="admonition warning">
+<p class="admonition-title">A credential used as a key shows in clear</p>
+<p>The config editor masks values, not keys (the function <code>redact_secrets</code> in
+<code>src/clauster/config_write.py</code>). It masks a value under a
+secret-shaped key, a <code>${...}</code> reference, a URL with a user name or
+password, and every <code>env</code> and <code>headers</code> value of an MCP server. It does not
+mask a key by its name. A credential that is itself a key, for example the
+name of an entry in an <code>env</code> or <code>headers</code> map, therefore shows in clear on
+the config-write read surfaces. Do not use a credential as a key.</p>
 </div>
 <h2 id="log-redaction">Log redaction<a class="headerlink" href="#log-redaction" title="Permanent link">&para;</a></h2>
 <p>The bridge debug log is streamed over a WebSocket and sanitized line by line

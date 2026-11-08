@@ -2482,14 +2482,57 @@ tab, or the end of the line) is part of the value too. In the body of
 <code>SKILL.md</code>, a bullet list under a line such as <code>Tokens:</code> therefore also shows
 as <code>********</code>. The body of <code>SKILL.md</code> is masked too, because skills often hold
 commands.</p>
+<p>A secret value can also go on past the end of its line. The editor then masks
+the next lines too. Each of those lines shows only its indent and <code>********</code>.
+A blank line stays blank. A comment line that is not indented deeper stays
+visible and does not end the value. These values go on past their line:</p>
+<ul>
+<li>In a flow mapping or list: a value that is empty at the end of the line
+  (<code>env: {token:</code>), a quoted value with no closing quote on the line, a value
+  behind an anchor or a tag, a <code>{...}</code> or <code>[...]</code> value, or a plain value with
+  no <code>,</code>, <code>}</code> or <code>]</code> after it. The value goes on in the lines that are indented
+  deeper than its line.</li>
+<li>After a secret-shaped key: a quoted value with no closing quote on the line,
+  or a <code>{...}</code> or <code>[...]</code> value, also behind an anchor or a tag. The value goes
+  on in the lines that are indented deeper than its line. In a list item such as
+  <code>- token: "abc</code>, its line starts at the <code>-</code>. The same applies to any value
+  after a secret-shaped key when a flow value of the first kind comes after it on
+  the line, as in <code>token: "a", password: "b</code>.</li>
+<li>After a secret-shaped key: a plain value, as in <code>token: abc</code>. The value goes
+  on in the lines that are indented deeper than the key. A line that starts with
+  a key, a <code>:</code> and then a space or the end of the line (also in a list item, as
+  in <code>- key:</code>), or with a <code>#</code>, is not part of the value, so the value ends there.</li>
+</ul>
+<p>A value of the first two kinds ends at the first line that is not indented
+deeper, also after
+the line that closes a quote, because the rest of that line can hold another
+secret value. The lines after the value that are indented deeper therefore also
+show as <code>********</code>. A line of the value that is not indented deeper is not
+detected and shows in clear.</p>
 <p>In the frontmatter of <code>SKILL.md</code>, the Skills editor also masks each value that
-the MCP and Hooks tabs mask, whatever its key name, and every <code>args</code> value. In
-<code>mcpServers</code>, every <code>headers</code>, <code>env</code> and <code>args</code> value and a <code>headersHelper</code>
-command show as <code>********</code>. For example, <code>headers: {X-Custom: abc}</code> shows as
-<code>headers: {X-Custom: ********}</code>. The MCP tab shows an <code>args</code> item unless it
-holds a <code>${...}</code> reference or is a URL with a user name or password, but the
-Skills editor masks every <code>args</code> value. In <code>hooks</code>, every <code>headers</code> value shows as
-<code>********</code>.
+the MCP and Hooks tabs mask, whatever its key name. In <code>mcpServers</code>, every
+<code>headers</code> and <code>env</code> value and a <code>headersHelper</code> command show as <code>********</code>. For
+example, <code>headers: {X-Custom: abc}</code> shows as <code>headers: {X-Custom: ********}</code>.
+An <code>args</code> item is not masked by its place in the file. It shows in clear unless
+the line masking above masks it, for example a <code>${...}</code> reference, a URL with a
+user name or password, or a list item such as <code>- --token=abc</code>. In a flow list,
+<code>[--token=abc]</code> shows in clear, as it does on the MCP tab. In <code>hooks</code>, every
+<code>headers</code> value shows as <code>********</code>.
+The editor also reads each frontmatter value as YAML loads it, as the MCP and
+Hooks tabs do. A value that is written with an escape (such as <code>\x40</code> for <code>@</code>
+or <code>\x2d</code> for <code>-</code>, also an escaped line break) or as <code>!!binary</code> is masked when
+its loaded text, read on its own, holds what the line masking above masks: a
+<code>${...}</code> reference, a URL with a user name or password, or a line such as
+<code>--api-key=abc</code>. Such a value can therefore be masked where the same text,
+written without the escape, shows in clear, such as <code>[--token=abc]</code> above.
+A <code>url</code> value written as <code>!!binary</code> shows
+as <code>********</code>. In <code>mcpServers</code> and <code>hooks</code>, a
+value under a key that looks secret shows as <code>********</code>, also when the key looks
+secret only after its escapes are read (such as <code>"client\x53ecret"</code>). Elsewhere
+such an escaped key masks its value too. A <code>${...}</code> reference that is split
+across lines without an escape is not detected and shows in clear. Outside
+<code>mcpServers</code> and <code>hooks</code>, the same is true for the value of a key written as
+<code>? token</code>, or with an anchor, a tag or an alias in front of it.
 The key names stay visible, and so does an empty value. If such a value covers
 more than one line, holds an escape, or has an anchor or a tag in front of it,
 each line of the value shows as one <code>********</code>.</p>
