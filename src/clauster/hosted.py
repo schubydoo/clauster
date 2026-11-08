@@ -311,6 +311,8 @@ class HostedSession:
         self._rehydrated_through = 0
         self._ring: deque[Mapping[str, Any]] = deque(maxlen=ring_size)
         self._event_seq = 0
+        # Event numbers at or below this one belong to a retired session (continue_from).
+        self._seq_floor = 0
         # Subscriber list: the DEPTH-bound (per-subscriber queue) is bounded above by
         # _queue_maxsize; the BREADTH-bound (list length) is the count of live WS
         # connections to this one session — unsubscribe() drops each on disconnect, so
@@ -570,8 +572,11 @@ class HostedSession:
         A browser that watched the retired session reopens the view with ``?after=``
         that number, and :meth:`subscribe` sends only the events above it. Call this
         before :meth:`reattach`, so the restored history and the replay are above it.
+        The numbers up to ``event_seq`` were never in this ring, so :meth:`subscribe`
+        does not report them as a gap to a new viewer.
         """
         self._event_seq = max(self._event_seq, event_seq)
+        self._seq_floor = self._event_seq
 
     def repark(self, requests: Collection[_ControlRequest]) -> None:
         """Park again the prompts a lost connection resolved locally (TASK-526).
@@ -580,6 +585,11 @@ class HostedSession:
         still waits on these prompts, and the replay starts past them, so without
         this the row would read "running" with a prompt that nobody can see. A
         request that is parked already is left alone.
+
+        One edge is carried over, not added: an answer whose write failed with the
+        session still running is parked again by :meth:`respond_control`, although
+        the daemon may have taken the write. Such a prompt comes back here too, so a
+        second answer can reach the agent. The same is true inside one connection.
         """
         for parked in requests:
             if parked.request_id not in self._pending:
@@ -730,10 +740,12 @@ class HostedSession:
         """
         queue: asyncio.Queue[Mapping[str, Any]] = asyncio.Queue(maxsize=self._queue_maxsize)
         sub = _Subscriber(queue, overflow_type="gap")
-        if self._ring and self._ring[0]["event_seq"] > after_seq + 1:
+        # The numbers up to _seq_floor were never in this ring (continue_from): not a gap.
+        start = max(after_seq, self._seq_floor)
+        if self._ring and self._ring[0]["event_seq"] > start + 1:
             gap: GapRangeEvent = {
                 "type": "gap",
-                "from_seq": after_seq,
+                "from_seq": start,
                 "to_seq": self._ring[0]["event_seq"],
             }
             sub.offer(gap)
@@ -1556,6 +1568,7 @@ class HostedManager:
             )
         self._instances.pop(hosted_id, None)
         self._removed.add(hosted_id)  # or a persist before restore writes it back
+        self._reattach_retry.pop(hosted_id, None)  # nothing left to reattach
         # Prune this id's lock too: resume retires the old hosted_id permanently (the
         # resumed agent runs under a fresh id), so the old lock would otherwise strand
         # in _id_locks. Safe under the held lock, same as forget().
@@ -1623,6 +1636,7 @@ class HostedManager:
             inst.is_orphan = False
             inst.intentional_stop = True
             inst.status = InstanceStatus.STOPPED
+            self._reattach_retry.pop(key, None)  # killed: nothing left to reattach
             # Clear any orphan/loss recovery prompt — the row is now a clean stop, not a
             # "Resume or Kill" survivor, so a stale detail would mislead the UI.
             inst.error_detail = None
@@ -1676,6 +1690,7 @@ class HostedManager:
             self._sessions.pop(key, None)
             self._instances.pop(key, None)
             self._removed.add(key)  # or a persist before restore writes it back
+            self._reattach_retry.pop(key, None)  # nothing left to reattach
             # Prune the per-id lock so _id_locks doesn't grow unbounded — it's keyed by
             # the fresh per-session UUID, not by a finite stable set like the runner's
             # spawn locks. Safe under the held lock: a coroutine already waiting on this
@@ -1824,6 +1839,13 @@ class HostedManager:
                     # Not a daemon error (those are classified inside). The row keeps the
                     # state it had, and its retry entry, and the other rows go on.
                     logger.exception("hosted: retried reattach of %s failed", process_id)
+                    continue
+            entry = self._reattach_retry.get(process_id)
+            if entry is not None and entry.client is client:
+                # Lost again on this same connection (a timeout on a slow daemon): the
+                # other rows would each wait out the same timeout, under the restore lock
+                # and ahead of the rebind. They stay for the next connection.
+                return
 
     async def _reattach_all_locked(
         self,
@@ -1920,7 +1942,15 @@ class HostedManager:
         if instance.intentional_stop:
             instance.status = InstanceStatus.STOPPED
             return
-        await self._reattach_row(client, process_id, instance, history_for=history_for, lost=None)
+        # A row that a failed reconnect retired while the store was not yet restored has a
+        # retry entry: its prompts and event numbering carry over here too (review catch).
+        await self._reattach_row(
+            client,
+            process_id,
+            instance,
+            history_for=history_for,
+            lost=self._reattach_retry.get(process_id),
+        )
 
     async def _reattach_row(
         self,
@@ -2014,13 +2044,15 @@ class HostedManager:
         # salvage time stays the durable record). Only that note is cleared.
         if instance.error_detail == _UNREADABLE_RECORD_DETAIL:
             instance.error_detail = None
+        # Registered before the re-park below, so a fault in it cannot leave a pump
+        # running for a session that nothing would detach (review catch).
+        self._sessions[process_id] = session
         if lost is not None:
             # A retry that worked: the row is no longer an orphan or a loss.
             instance.is_orphan = False
             instance.error_detail = None
             if session.status == InstanceStatus.RUNNING:
                 session.repark(lost.requests)
-        self._sessions[process_id] = session
         if self._closing:
             # aclose() ran while this reattach was in flight (a hook-run pass): the
             # pump it just started must not outlive the shutdown.
