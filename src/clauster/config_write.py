@@ -613,6 +613,20 @@ def warn_unknown_value(what: str, value: Any, known: Iterable[str]) -> None:
         sink.append(message)
 
 
+def record_value_warnings(messages: Iterable[str]) -> None:
+    """Add already-built known-value ``messages`` to the active save's warnings, if any.
+
+    For a check that ran in a throwaway :func:`collect_value_warnings` block and keeps only
+    some of its messages (a check over text with stored values put back behind masks).
+    """
+    sink = value_warning_sink.get()
+    if sink is None:
+        return
+    for message in messages:
+        if message not in sink:
+            sink.append(message)
+
+
 #: The deepest container nesting a value outside the known lists may hold (TASK-524). The
 #: read masks, the keep-stored merges and the JSON renderer all recurse, so an unbounded
 #: value would end in a ``RecursionError`` (a 500, and a file the dashboard cannot read).
@@ -623,8 +637,9 @@ def walkable_value(value: Any) -> bool:
     """Whether ``value`` is JSON that the read and merge paths can walk (TASK-524).
 
     A key outside a known list is stored as typed, so only the shape of its value is
-    checked: no dict or list sits :data:`MAX_UNKNOWN_VALUE_DEPTH` or more levels below it,
-    and every number is finite (``1e400`` parses to ``inf``, which JSON cannot store).
+    checked: no container (a dict, list, tuple or set) sits
+    :data:`MAX_UNKNOWN_VALUE_DEPTH` or more levels below it, and every number is finite
+    (``1e400`` parses to ``inf``, which JSON cannot store).
     Iterative, so the check itself cannot overflow the stack.
     """
     stack: list[tuple[Any, int]] = [(value, 0)]
@@ -632,7 +647,8 @@ def walkable_value(value: Any) -> bool:
         node, depth = stack.pop()
         if isinstance(node, float) and not math.isfinite(node):
             return False
-        if isinstance(node, dict | list):
+        if isinstance(node, dict | list | tuple | set | frozenset):
+            # A YAML frontmatter value can also be a tuple (`!!omap`) or a set (`!!set`).
             if depth >= MAX_UNKNOWN_VALUE_DEPTH:
                 return False
             children = node.values() if isinstance(node, dict) else node

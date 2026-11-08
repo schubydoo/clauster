@@ -82,6 +82,7 @@ a rule string is harmless inert data.
 
 from __future__ import annotations
 
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -122,14 +123,17 @@ BYPASS_MODE = "bypassPermissions"
 
 
 def is_bypass_mode(mode: str) -> bool:
-    """Whether ``mode`` spells :data:`BYPASS_MODE`, in any case, ignoring ``-``, ``_`` and spaces.
+    """Whether ``mode`` spells :data:`BYPASS_MODE` once normalized (NFKC, case, punctuation).
+
+    Only letters and digits count, after NFKC folds fullwidth and compatibility forms, so
+    ``-``, ``_``, spaces, a byte order mark and zero-width characters are all ignored.
 
     Claude Code 2.1.319 matches a mode exactly, so a variant such as ``BypassPermissions``
     is ignored today. Since TASK-524 a mode outside the known list saves with a warning, so
     the gate refuses every such variant too: a later Claude Code that matched modes loosely
     must never turn a warned value into bypass mode.
     """
-    kept = "".join(c for c in mode if c not in "-_" and not c.isspace())
+    kept = "".join(c for c in unicodedata.normalize("NFKC", mode) if c.isalnum())
     return kept.casefold() == BYPASS_MODE.casefold()
 
 
@@ -205,6 +209,14 @@ def validate_permissions(candidate: Any) -> None:
             "put it in the auto mode rules section at User scope instead"
         )
     cw.warn_unknown_keys(candidate, _PERMISSION_KEYS, "permissions key")
+    for key in sorted(set(candidate) - _PERMISSION_KEYS, key=str):
+        # A misspelled key such as `defaultmode` saves with a warning; it must never carry
+        # bypass mode past the gate, should a later Claude Code read it.
+        value = candidate[key]
+        if isinstance(value, str) and is_bypass_mode(value):
+            raise cw.InvalidCandidateError(
+                f"permissions {key!r} cannot be 'bypassPermissions' (footgun-gated)"
+            )
 
     for key in sorted(_STRING_LIST_KEYS & set(candidate)):
         _validate_string_list(candidate[key], f"permissions {key!r}")
@@ -354,15 +366,22 @@ def _merge_auto_mode(incoming: dict[str, Any], stored: Any) -> dict[str, Any]:
     sent. Must run under the file lock, on the stored value read there.
     """
     stored_obj = stored if isinstance(stored, dict) else {}
+    # The masked entries are the ones the READ VIEW masked: a key outside the known lists
+    # with a secret-shaped name masks every entry of its list (TASK-524), not only the
+    # entries _is_masked_entry flags.
+    view = _redact_auto_mode(stored_obj)
     out: dict[str, Any] = {}
     for key, member in incoming.items():
         if not isinstance(member, list) or cw.REDACTION_SENTINEL not in member:
             out[key] = member
             continue
         stored_list = stored_obj.get(key)
+        shown = view.get(key) if isinstance(view, dict) else None
         masked = (
-            [e for e in stored_list if _is_masked_entry(e)]
+            [e for e, v in zip(stored_list, shown, strict=True) if v == cw.REDACTION_SENTINEL]
             if isinstance(stored_list, list)
+            and isinstance(shown, list)
+            and len(shown) == len(stored_list)
             else []
         )
         if member.count(cw.REDACTION_SENTINEL) != len(masked):

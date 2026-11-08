@@ -2112,6 +2112,28 @@ def test_config_mgmt_hooks_unknown_event_saves_with_a_visible_warning(
         "FutureEvent": [{"hooks": [{"type": "command", "command": "echo future"}]}]
     }
 
+    # A later save with only known events clears the warning, on screen and in the live
+    # region.
+    browser.expect_visible('[data-test="cm-hook-event"]')
+    browser.fill('[data-test="cm-hook-event"]', "Stop")
+    browser.fill('[data-test="cm-confirm"]', "alpha")
+    browser.click('[data-test="cm-save"]')
+    browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
+    browser.expect_hidden('[data-test="cm-save-warnings"]')
+    assert browser.get_text('[data-test="cm-save-warnings-live"]').strip() == ""
+
+    # An event named `__proto__` stays an own key of the saved block, never a prototype.
+    browser.fill('[data-test="cm-hook-event"]', "__proto__")
+    browser.fill('[data-test="cm-confirm"]', "alpha")
+    browser.click('[data-test="cm-save"]')
+    browser.expect_text('[data-test="cm-save-warnings"]', "'__proto__' is not one of")
+    on_disk = json.loads(
+        (projects_root / "alpha" / ".claude" / "settings.json").read_text(encoding="utf-8")
+    )
+    assert on_disk["hooks"] == {
+        "__proto__": [{"hooks": [{"type": "command", "command": "echo future"}]}]
+    }
+
 
 def test_config_mgmt_hooks_rows_http_and_mcp_tool_round_trip(
     browser: AgentBrowser, config_mgmt_server: Server
@@ -2332,7 +2354,7 @@ def test_config_mgmt_hooks_failed_load_clears_previous_rows(
 def test_config_mgmt_hooks_loaded_row_shows_its_type_and_event(
     browser: AgentBrowser, config_mgmt_server: Server
 ) -> None:
-    """A loaded row's Type and Event selects show the stored values, not the first option."""
+    """A loaded row's Type select and Event box show the stored values, not the first option."""
     _seed_alpha_settings(
         config_mgmt_server,
         {"hooks": {"Stop": [{"hooks": [{"type": "http", "url": "https://h.example/x"}]}]}},

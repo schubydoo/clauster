@@ -772,12 +772,21 @@ def _destination(view: dict[str, Any]) -> tuple[Any, ...] | None:
     and it never becomes a dict key, so it cannot block a save that removes or replaces
     it. Incoming hooks are validated first, so theirs are always strings.
     """
+    # TASK-524: a field outside the type's row saves with a warning, and nothing says it
+    # does not name where the data goes, so its shown value is part of the destination.
     if view.get("type") == HTTP_TYPE and isinstance(view.get("url"), str):
-        return (HTTP_TYPE, view["url"].split("#", 1)[0].split("?", 1)[0])
+        return (HTTP_TYPE, view["url"].split("#", 1)[0].split("?", 1)[0], _unknown_fields(view))
     server, tool = view.get("server"), view.get("tool")
     if view.get("type") == MCP_TOOL_TYPE and isinstance(server, str) and isinstance(tool, str):
-        return (MCP_TOOL_TYPE, server, tool)
+        return (MCP_TOOL_TYPE, server, tool, _unknown_fields(view))
     return None
+
+
+def _unknown_fields(view: dict[str, Any]) -> str:
+    """Return the fields of a hook view outside its type's row, as a stable key."""
+    required, optional = _TYPE_FIELDS.get(str(view.get("type")), (frozenset(), frozenset()))
+    known = _COMMON_FIELDS | required | optional
+    return _key({str(k): v for k, v in view.items() if k not in known})
 
 
 def _restorable(entry: dict[str, Any]) -> dict[str, Any]:
@@ -957,7 +966,11 @@ def _merge_hooks(incoming: dict[str, Any], stored: Any) -> dict[str, Any]:
             stored_by_destination.setdefault(destination, []).append(placed)
     for destination, hooks_there in by_destination.items():
         _restore_destination(hooks_there, stored_by_destination.get(destination, []))
-    validate_hooks(merged)
+    # The incoming block was validated (and warned about) before the merge. This second
+    # check runs over values restored from the file, so its warnings are dropped: a warning
+    # must never quote a stored value the read view masked (TASK-524).
+    with cw.collect_value_warnings():
+        validate_hooks(merged)
     return merged
 
 

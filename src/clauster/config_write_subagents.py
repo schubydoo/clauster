@@ -1862,7 +1862,13 @@ def _keep_masked_values(
             "in its place (an anchor, an alias or a merge key on it). Type the real value"
         )
     try:
-        cw.validate_candidate(rewritten, lambda c: validate_agent_content(c, expected_name=name))
+        # The sent text was validated (and warned about) already; this check runs over the
+        # stored values put back behind the masks, so its warnings are dropped: a warning
+        # must never quote a stored value the read view masked (TASK-524).
+        with cw.collect_value_warnings():
+            cw.validate_candidate(
+                rewritten, lambda c: validate_agent_content(c, expected_name=name)
+            )
     except cw.InvalidCandidateError as exc:
         # The sent text passed these same checks, so the kept stored values are the cause.
         # Their message can name a size or a column of that stored text, which tells the

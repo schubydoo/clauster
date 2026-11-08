@@ -2654,7 +2654,8 @@ def _validate_member(relative: str, content: str, *, sent: str, stored: str | No
             validate_script_body(text, relative)
 
     try:
-        _run(content)
+        with cw.collect_value_warnings() as kept:
+            _run(content)
     except cw.InvalidCandidateError as restored_exc:
         if stored is not None:
             try:
@@ -2674,6 +2675,17 @@ def _validate_member(relative: str, content: str, *, sent: str, stored: str | No
             "stored text behind a mask is not valid here. Type the real values, or fix the "
             "stored file on the host"
         ) from restored_exc
+    if content != sent:
+        # TASK-524: the check above ran over stored text put back behind masks. Keep only
+        # the warnings the operator's own (neutralized) text gives too, so a warning never
+        # quotes a stored value the read view masked.
+        with cw.collect_value_warnings() as own:
+            try:
+                _run(_neutralized(sent))
+            except cw.InvalidCandidateError:
+                own.clear()
+        kept = [message for message in kept if message in own]
+    cw.record_value_warnings(kept)
 
 
 def write_skill(

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import inspect
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ParamSpec
@@ -56,7 +57,9 @@ def reports_value_warnings(
     which reaches the writer's worker thread) and adds them to the response as
     ``"warnings": [...]``, an empty list when there are none. A refused save raises before
     a response exists, so its warnings are dropped with it. ``functools.wraps`` keeps the
-    handler's signature, which FastAPI reads for its parameters.
+    handler's name and docstring. The wrapper also carries the handler's signature with
+    its annotations resolved in the handler's own module: FastAPI before 0.124 reads the
+    wrapper's globals, not the handler's, so string annotations would not resolve there.
     """
 
     @functools.wraps(handler)
@@ -66,6 +69,7 @@ def reports_value_warnings(
             result = await handler(*args, **kwargs)
         return {**result, "warnings": warnings}
 
+    _with_warnings.__signature__ = inspect.signature(handler, eval_str=True)  # type: ignore[attr-defined]
     return _with_warnings
 
 

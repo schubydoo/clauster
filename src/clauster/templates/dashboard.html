@@ -2087,7 +2087,8 @@
             {# TASK-524: a value outside a list of known values saves as typed, and the save
                response names each one. text-warning-emphasis: plain .alert-warning text
                misses AA contrast in the light theme. #}
-            <div class="alert alert-warning text-warning-emphasis py-2 small" data-test="cm-save-warnings"
+            {# text-break: a quoted value can be 80 characters with no space (phone width). #}
+            <div class="alert alert-warning text-warning-emphasis text-break py-2 small" data-test="cm-save-warnings"
                  aria-hidden="true" x-show="configMgmtSaveWarnings().length" x-cloak>
               <ul class="mb-0 ps-3">
                 <template x-for="(w, i) in configMgmtSaveWarnings()" :key="i">

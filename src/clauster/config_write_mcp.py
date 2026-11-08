@@ -70,6 +70,7 @@ the stored value.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from pathlib import Path
@@ -857,13 +858,25 @@ def _destination(entry: dict[str, Any], stored: dict[str, Any]) -> tuple[Any, ..
     A stdio entry hands its ``env`` to the program it runs, so its destination is the exact
     ``command`` and the exact ``args`` list, element by element, in order. A masked element
     takes the stored value at the same place, as ``merge_redacted`` will write it. An absent
-    ``args`` reads as ``[]``, the CLI's own default. ``None`` means the destination cannot
-    be decided.
+    ``args`` reads as ``[]``, the CLI's own default. The exact value of every key outside
+    the transport's known keys is part of the destination too (TASK-524). ``None`` means
+    the destination cannot be decided.
     """
     try:
         transport = entry_transport(entry)
     except cw.InvalidCandidateError:
         return None
+    # TASK-524: a key outside the known lists saves with a warning, and nothing says it
+    # does not name where a value goes, so its exact value binds the masks too.
+    unknown = json.dumps(
+        {
+            str(k): stored.get(k) if v == cw.REDACTION_SENTINEL else v
+            for k, v in entry.items()
+            if k not in _KEYS_BY_TRANSPORT[transport]
+        },
+        sort_keys=True,
+        default=repr,
+    )
     if transport == "stdio":
         command = entry.get("command")
         if command == cw.REDACTION_SENTINEL:
@@ -876,8 +889,8 @@ def _destination(entry: dict[str, Any], stored: dict[str, Any]) -> tuple[Any, ..
                 (held[i] if i < len(held) else None) if a == cw.REDACTION_SENTINEL else a
                 for i, a in enumerate(args)
             ]
-        return "stdio", command, args
-    return transport, _url_texts(entry, stored)
+        return "stdio", command, args, unknown
+    return transport, _url_texts(entry, stored), unknown
 
 
 def _check_destination(name: str, entry: Any, stored: Any, *, masked: bool) -> None:

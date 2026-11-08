@@ -197,9 +197,15 @@ def test_save_warnings_are_shown_and_announced(write_config):
     # persistent live region announces them.
     html = _html(write_config, _ON)
     assert 'data-test="cm-save-warnings"' in html
-    assert 'data-test="cm-save-warnings-live"' in html
     assert "configMgmtSaveWarnings()" in html
-    assert "_configMgmtTakeWarnings(res" in html
+    # One persistent live region, always mounted, as cm-saved-live is.
+    live = re.findall(r'<div [^>]*data-test="cm-save-warnings-live"[^>]*>', html)
+    assert len(live) == 1 and 'role="status"' in live[0] and "visually-hidden" in live[0]
+    # Every configMgmt save success either takes the response's warnings or clears them:
+    # the five routes that answer `warnings` take them, the seven other writes clear them
+    # (plus the clear inside the helper itself).
+    assert html.count("await this._configMgmtTakeWarnings(res, ") == 5
+    assert html.count("c.warnings = [];") == 8
 
 
 def test_hook_events_match_backend_recognized_events(write_config):

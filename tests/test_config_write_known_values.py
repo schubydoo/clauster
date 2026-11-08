@@ -385,3 +385,129 @@ def test_a_known_entry_still_takes_the_cli_path() -> None:
     entry = {"type": "http", "url": "https://x.example/", "tools": [{"name": "t"}]}
     assert not mcp.has_unknown_fields(entry)
     assert not mcp_cli.entry_needs_direct_write(entry)
+
+
+# --- review round 1: a warning never quotes a restored value, masks stay bound -----------
+
+_SECRET = "sk-live-REALSECRET123"
+
+
+def test_a_subagent_save_never_warns_with_a_restored_stored_value(tmp_path: Path) -> None:
+    # `read_token` is a secret-shaped key, so the read view masks its value; the save
+    # puts the stored value back, and the check after that must not quote it.
+    agents = tmp_path / ".claude" / "agents"
+    agents.mkdir(parents=True)
+    (agents / "probe.md").write_bytes(
+        (
+            "---\nname: probe\ndescription: d\nmcpServers:\n  - srv:\n      type: http\n"
+            f"      url: https://example.com/mcp\n      toolPermissions:\n"
+            f"        read_token: {_SECRET}\n---\nbody\n"
+        ).encode()
+    )
+    doc = sub.read_project_agent(tmp_path, "probe")
+    assert _SECRET not in doc["content"]
+    with cw.collect_value_warnings() as warnings:
+        sub.write_project_agent(tmp_path, "probe", doc["content"], doc["hash"])
+    assert not any(_SECRET in w for w in warnings), warnings
+    assert _SECRET in (agents / "probe.md").read_text()  # the stored value was kept
+
+
+def test_a_skill_save_never_warns_with_a_restored_stored_value(tmp_path: Path) -> None:
+    # An event named like a secret masks its whole value in the view; the save puts the
+    # stored lines back, and the check after that would quote the masked hook type.
+    stored = (
+        "---\ndescription: d\nshell: zsh\nhooks:\n  password_hook:\n"
+        "    - hooks: [{type: hidden_type_value, command: x}]\n---\nBody.\n"
+    )
+    sk.write_skill(tmp_path, "s", {sk.SKILL_FILENAME: stored}, expected_hash=None)
+    content, file_hash, _exists, _note = sk.read_skill_file_for_edit(tmp_path, "s")
+    assert "hidden_type_value" not in content
+    with cw.collect_value_warnings() as warnings:
+        sk.write_skill(tmp_path, "s", {sk.SKILL_FILENAME: content}, expected_hash=file_hash)
+    assert not any("hidden_type_value" in w for w in warnings), warnings
+    assert (tmp_path / "skills" / "s" / sk.SKILL_FILENAME).read_text() == stored
+
+
+def test_a_hooks_merge_never_warns_from_its_second_check() -> None:
+    stored = {
+        "FutureEvent": [{"hooks": [{"type": "http", "url": "https://h.example/?t=" + _SECRET}]}]
+    }
+    view = {"FutureEvent": [{"hooks": [{"type": "http", "url": "https://h.example/?t=********"}]}]}
+    with cw.collect_value_warnings() as warnings:
+        hooks._merge_hooks(view, stored)
+    assert warnings == []
+
+
+def test_an_unknown_auto_mode_key_restores_masks_by_the_view_positions(tmp_path: Path) -> None:
+    # A secret-shaped key masks EVERY entry of its list in the view, not only the entries
+    # that look secret: deleting the first mask must drop that entry, not "plain-rule".
+    settings = tmp_path / "settings.json"
+    stored = ["${A_SECRET}", "plain-rule", "${B_SECRET}"]
+    settings.write_text(json.dumps({"autoMode": {"secret_rules": stored}}))
+    _p, view, file_hash = perms.read_user_permissions(settings)
+    assert view == {"secret_rules": [cw.REDACTION_SENTINEL] * 3}
+    # Two masks for three masked entries: which one went is unknown, so the save refuses.
+    # (Before the fix, it counted only two "secret-looking" entries and wrote them back.)
+    with pytest.raises(cw.InvalidCandidateError, match="2 masked entries but 3 are stored"):
+        perms.write_user_permissions(
+            settings, {}, file_hash, auto_mode={"secret_rules": view["secret_rules"][1:]}
+        )
+    perms.write_user_permissions(settings, {}, file_hash, auto_mode=view)
+    assert json.loads(settings.read_text())["autoMode"]["secret_rules"] == stored
+
+
+def test_a_changed_unknown_mcp_key_refuses_a_kept_masked_header(tmp_path: Path) -> None:
+    stored = {
+        "srv": {
+            "type": "http",
+            "url": "https://good.example.com/mcp",
+            "headers": {"Authorization": "Bearer REAL-SECRET"},
+            "endpoint": "https://good.example.com/mcp",
+        }
+    }
+    (tmp_path / ".mcp.json").write_text(json.dumps({"mcpServers": stored}))
+    view, file_hash = mcp.read_project_servers(tmp_path)
+    edited = json.loads(json.dumps(view))
+    edited["srv"]["endpoint"] = "https://evil.example.net/mcp"
+    with pytest.raises(cw.InvalidCandidateError, match="type or a url changed"):
+        mcp.write_project_servers(tmp_path, edited, file_hash)
+    # Unchanged, the same masked header is kept.
+    mcp.write_project_servers(tmp_path, view, file_hash)
+    assert json.loads((tmp_path / ".mcp.json").read_text())["mcpServers"] == stored
+
+
+def test_a_changed_unknown_hook_field_refuses_a_kept_masked_header() -> None:
+    hook = {"type": "http", "url": "https://h.example/x", "headers": {"A": "s3cret"}, "to": "a"}
+    stored = {"Stop": [{"hooks": [hook]}]}
+    view = hooks._redact_hooks(stored)
+    view["Stop"][0]["hooks"][0]["to"] = "b"
+    with pytest.raises(cw.InvalidCandidateError, match="cannot tell which"):
+        hooks._merge_hooks(view, stored)
+    assert hooks._merge_hooks(hooks._redact_hooks(stored), stored) == stored
+
+
+@pytest.mark.parametrize("mode", ["bypassPermissions﻿", "bypass​Permissions", "ｂypassPermissions"])
+def test_invisible_and_fullwidth_bypass_spellings_stay_refused(mode: str) -> None:
+    with pytest.raises(cw.InvalidCandidateError, match="bypass"):
+        perms.validate_permissions({"defaultMode": mode})
+    with pytest.raises(cw.InvalidCandidateError, match="bypass"):
+        sub.validate_frontmatter({"name": "x", "description": "d", "permissionMode": mode})
+
+
+def test_an_unknown_permissions_key_never_carries_bypass_mode() -> None:
+    with pytest.raises(cw.InvalidCandidateError, match="'defaultmode' cannot be"):
+        perms.validate_permissions({"defaultmode": "bypassPermissions"})
+
+
+def test_record_value_warnings_adds_to_the_active_save_only() -> None:
+    cw.record_value_warnings(["dropped: no save is collecting"])
+    with cw.collect_value_warnings() as warnings:
+        cw.record_value_warnings(["a", "b", "a"])
+    assert warnings == ["a", "b"]
+
+
+def test_a_skill_member_with_no_restored_text_keeps_all_its_warnings() -> None:
+    text = "---\ndescription: d\nshell: zsh\n---\nBody.\n"
+    with cw.collect_value_warnings() as warnings:
+        sk._validate_member(sk.SKILL_FILENAME, text, sent=text)
+    assert len(warnings) == 1 and "'shell' 'zsh'" in warnings[0]
