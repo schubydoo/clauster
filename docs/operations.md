@@ -101,6 +101,8 @@ of these cases:
   another status. A server with `ui.enabled: false` answers `HTTP 404`.
 - The server did not answer, sent results that the CLI cannot read, or (with
   `tls` set) presented a different certificate than the configured one.
+- Without `tls`, the CLI could not prove that the listener is this deployment's
+  server (see the limits below). The CLI then does not send the token.
 
 The CLI never mixes the two sets of rows.
 
@@ -109,14 +111,24 @@ The CLI never mixes the two sets of rows.
 - `--token <token>` also works, but other users on the host can read a
   command-line argument in the process list. Use the `CLAUSTER_API_TOKEN`
   variable instead.
-- The CLI sends the token only to `127.0.0.1:<port>`. With `tls` set, it sends
-  the token only after the server proves that it holds the configured
-  certificate. Without `tls`, the request is plain HTTP on loopback, so any local
-  process that holds the port receives the token.
+- The CLI sends the token only to `127.0.0.1:<port>`, and never in a URL, a log
+  line or an error message.
+- With `tls` set, the CLI sends the token only after the server proves that it
+  holds the configured certificate. This is the strongest proof.
+- Without `tls`, the request is plain HTTP, and nothing in it proves who holds
+  the port. The CLI therefore sends the token only when both of these are true:
+  `host` is a loopback address (`127.0.0.0/8`, `::1` or `localhost`), and every
+  listening socket on the port belongs to a process of the user who runs the
+  CLI. If the CLI cannot make sure of the owner, it does not send the token. On
+  Linux an unprivileged user can see the owner of their own sockets only. On
+  macOS only root can list sockets, and on Windows reading another user's
+  process is denied, so on those systems an unproven listener also gets no
+  token. A short time passes between the check and the request, so a process
+  that takes the port in that time is not detected. Set `tls` to close this gap.
 - With `auth.enabled: false`, the server does not check the token. The CLI still
   asks for one, so that it never reads a server's results without being told to.
-- The CLI never reads the server's token store or any other secret. The only
-  credential it sends is the one you give it.
+- The CLI never reads the server's token store, and never sends or prints any
+  other secret. The only credential it sends is the one you give it.
 
 The dashboard shows the same result as the **System readiness** pill in the header.
 The pill is always present. It counts the warnings or blocking checks when there are
@@ -140,7 +152,7 @@ Checks:
 | `bundle-env` | (Linux) whether a running bridge, background agent or the claustrum daemon still has an older standalone binary's runtime environment (`_PYI_*` variables, or a `_MEI…` directory in `LD_LIBRARY_PATH`). It reads `/proc` for processes of the same user only, and it names only the process and its pid, never a value. | **WARN** naming each such process: restart it (see [troubleshooting](troubleshooting.md#in-a-session-node-fails-with-glibc_238-not-found-or-clauster-cannot-load-libpython)). **WARN** naming each process whose environment could not be read (another user's process, a read error, or an empty environment), because an unread process is not a clean one: `N clean, M could not be read: …`, or `check not completed: …` when none could be read. A process that exited during the check is left out. **WARN** `could not check: <error type>` if the probe itself failed. Never FAIL. On macOS and Windows the row says that it was not checked. |
 | `version` | For a from-source checkout, whether `HEAD` is behind its last-fetched upstream. | **WARN** if behind; absent for PyPI/Docker installs. |
 | `node-toolchain` | On an nvm host, whether nvm's default `node` is reachable on a spawned bridge's `PATH`. | **WARN** if missing or not on the bridge `PATH` — advisory; only present on POSIX nvm hosts. |
-| `port` | (CLI local checks only) whether the listen port is free to bind. | **OK** if free, or if the `server` row is OK, because the holder is then this deployment's running server. **WARN** if any other process holds it. |
+| `port` | (CLI local checks only) whether the listen port is free to bind. | **OK** if free. **OK** if the `server` row is OK and the holder is provably this deployment's server: with `tls` through the pinned certificate, without `tls` because every listener on the port belongs to the user who runs the CLI. **WARN** if any other process holds it, or if the owner cannot be checked. |
 | `server` | (CLI local checks only) when the listen port is in use, the `/healthz` verdict of the server that holds it. | **FAIL** if it answers anything but `200` — for example the `503` above. **WARN** if, with `tls` set, the listener presents a different certificate than the configured one (the probe trusts only that certificate) or the certificate file is unreadable. Absent when the port is free or the listener does not answer HTTP. |
 | `systemd` | The loaded `clauster.service` uses a non-reaping `KillMode` (see below). | **WARN** if it would reap live pty bridges. |
 | `bundle` | (Server results only, standalone binary only) the running server's unpacked program files are all present. The dashboard panel shows it, and so does the CLI when it [shows the running server's results](#show-the-running-servers-results). The local checks of the CLI report this through the `server` check instead, because a CLI run unpacks its own fresh copy. | **FAIL** if any file is missing — restart Clauster. |

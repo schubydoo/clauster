@@ -12,10 +12,13 @@ import http.server
 import json
 import socket
 import ssl
+import sys
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
+import psutil
 import pytest
 import uvicorn
 
@@ -27,6 +30,18 @@ from clauster.ops import FAIL, OK, WARN, run_cli_doctor, run_doctor
 from clauster.tls_provision import generate_self_signed
 
 TOKEN = "good-token-abc123"
+_REAL_OWNER_CHECK = ops_mod._listener_owner_refusal
+
+
+@pytest.fixture(autouse=True)
+def _owner_check_passes(monkeypatch):
+    """Let the plain-HTTP owner check pass, so these tests run the same on every OS.
+
+    The real check reads every socket on the host; macOS allows that only for root. The
+    tests of the check itself call ``_REAL_OWNER_CHECK`` with a faked psutil instead.
+    """
+    monkeypatch.setattr(ops_mod, "_listener_owner_refusal", lambda port: None)
+
 
 SERVER_BODY = {
     "ok": True,
@@ -235,8 +250,10 @@ def test_unreadable_results_show_local_checks(write_config, tmp_path, body):
 
 
 def test_an_oversized_body_shows_local_checks(write_config, tmp_path, monkeypatch):
-    monkeypatch.setattr(ops_mod, "_SERVER_DOCTOR_MAX_BYTES", 16)
-    with _Doctor() as srv:
+    body = json.dumps(SERVER_BODY).encode()
+    # Valid JSON up to the cap, so only the size check can reject it.
+    monkeypatch.setattr(ops_mod, "_SERVER_DOCTOR_MAX_BYTES", len(body))
+    with _Doctor(doctor_body=body + b" " * 64) as srv:
         report = run_cli_doctor(_cfg(write_config, tmp_path, srv.port), token=TOKEN)
     assert report.source.endswith("sent doctor results that this CLI cannot read")
 
@@ -333,7 +350,9 @@ def real_server(write_config, tmp_path):
         write_config, tmp_path, port, f"auth:\n  enabled: true\n  api_token_hash: {token_hash}\n"
     )
     server = uvicorn.Server(
-        uvicorn.Config(create_app(load_config(cfg)), log_level="warning", lifespan="on")
+        uvicorn.Config(
+            create_app(load_config(cfg)), log_level="warning", log_config=None, lifespan="on"
+        )
     )
     t = threading.Thread(target=server.run, kwargs={"sockets": [sock]}, daemon=True)
     t.start()
@@ -365,3 +384,141 @@ def test_the_real_server_refuses_a_wrong_token(real_server):
     report = run_cli_doctor(cfg, token="not-the-token")
     assert report.source.endswith("refused the API token (HTTP 401)")
     assert {c.name: c.status for c in report.checks}["server"] == OK
+
+
+# ----- plain HTTP: the token goes only to this user's loopback listener --------------
+
+
+def _listener(port: int, pid: int | None):
+    return SimpleNamespace(status=psutil.CONN_LISTEN, laddr=SimpleNamespace(port=port), pid=pid)
+
+
+class _FakeProcess:
+    """A ``psutil.Process`` stand-in: pid 1 is "me", every other pid another user."""
+
+    def __init__(self, pid: int | None = None) -> None:
+        self.pid = 1 if pid is None else pid
+
+    def uids(self):
+        return SimpleNamespace(effective=1000 if self.pid == 1 else 0)
+
+    def username(self) -> str:
+        return "me" if self.pid in (1, 2) else "someone-else"
+
+
+def _fake_sockets(monkeypatch, conns) -> None:
+    def _net_connections(kind):
+        if isinstance(conns, BaseException):
+            raise conns
+        return conns
+
+    monkeypatch.setattr(ops_mod.psutil, "net_connections", _net_connections)
+    monkeypatch.setattr(ops_mod.psutil, "Process", _FakeProcess)
+
+
+@pytest.mark.parametrize(
+    ("conns", "fragment"),
+    [
+        ([_listener(5000, 7)], "belongs to another user"),
+        ([_listener(5000, 1), _listener(5000, 7)], "belongs to another user"),
+        ([_listener(5000, None)], "belongs to a process that this user cannot see"),
+        ([], "cannot be checked (no listening socket)"),
+        ([_listener(5001, 1)], "cannot be checked (no listening socket)"),
+        (psutil.AccessDenied(), "cannot be checked (AccessDenied)"),
+    ],
+)
+def test_owner_check_refuses_what_it_cannot_prove(monkeypatch, conns, fragment):
+    _fake_sockets(monkeypatch, conns)
+    refusal = _REAL_OWNER_CHECK(5000)
+    assert refusal is not None
+    assert fragment in refusal
+
+
+def test_owner_check_passes_for_this_users_listener(monkeypatch):
+    _fake_sockets(monkeypatch, [_listener(5000, 1), _listener(5001, 7)])
+    assert _REAL_OWNER_CHECK(5000) is None
+
+
+def test_owner_check_refuses_when_a_process_cannot_be_read(monkeypatch):
+    _fake_sockets(monkeypatch, [_listener(5000, 1)])
+
+    class _Denied(_FakeProcess):
+        def uids(self):
+            raise psutil.AccessDenied(self.pid)
+
+    monkeypatch.setattr(ops_mod.psutil, "Process", _Denied)
+    assert "cannot be checked (AccessDenied)" in (_REAL_OWNER_CHECK(5000) or "")
+
+
+@pytest.mark.parametrize(("pid", "refused"), [(2, False), (7, True)])
+def test_owner_check_compares_user_names_on_windows(monkeypatch, pid, refused):
+    _fake_sockets(monkeypatch, [_listener(5000, pid)])
+    monkeypatch.setattr(ops_mod.sys, "platform", "win32")
+    assert (_REAL_OWNER_CHECK(5000) is not None) is refused
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="unprivileged socket listing is Linux-only")
+def test_owner_check_reads_the_real_sockets_on_linux():
+    with _Doctor() as srv:
+        assert _REAL_OWNER_CHECK(srv.port) is None
+    assert "no listening socket" in (_REAL_OWNER_CHECK(_free_port()) or "")
+
+
+def test_another_users_listener_never_receives_the_token(write_config, tmp_path, monkeypatch):
+    with _Doctor() as srv:
+        monkeypatch.setattr(
+            ops_mod,
+            "_listener_owner_refusal",
+            lambda port: f"the listener on port {port} belongs to another user",
+        )
+        cfg = _cfg(write_config, tmp_path, srv.port)
+        report = run_cli_doctor(cfg, token=TOKEN)
+        checks, _ok = run_doctor(cfg)
+    assert report.source == (
+        "showing the local checks of this CLI: the listener on port "
+        f"{srv.port} belongs to another user, so the token was not sent"
+    )
+    assert srv.doctor_requests() == []
+    # Nor does the port row call that listener this deployment's server.
+    assert {c.name: c.status for c in checks}["port"] == WARN
+
+
+def test_a_non_loopback_plain_http_bind_never_receives_the_token(write_config, tmp_path):
+    _raw, token_hash = auth.mint_token()
+    extra = f"host: 0.0.0.0\nauth:\n  enabled: true\n  api_token_hash: {token_hash}\n"
+    with _Doctor() as srv:
+        report = run_cli_doctor(_cfg(write_config, tmp_path, srv.port, extra), token=TOKEN)
+    assert "the server binds 0.0.0.0, which is not a loopback address" in report.source
+    assert report.source.endswith("so it was not sent")
+    assert srv.doctor_requests() == []
+
+
+def test_tls_skips_the_owner_check(write_config, tmp_path, monkeypatch):
+    # The certificate pin is the proof with TLS, even for a non-loopback bind.
+    monkeypatch.setattr(ops_mod, "_listener_owner_refusal", lambda port: "must not be asked")
+    cert, key = generate_self_signed(tmp_path / "a", ["example.test"])
+    _raw, token_hash = auth.mint_token()
+    extra = (
+        f"host: 0.0.0.0\ntls:\n  cert_file: {cert.as_posix()}\n  key_file: {key.as_posix()}\n"
+        f"auth:\n  enabled: true\n  api_token_hash: {token_hash}\n"
+    )
+    with _Doctor().tls(cert, key) as srv:
+        report = run_cli_doctor(_cfg(write_config, tmp_path, srv.port, extra), token=TOKEN)
+    assert report.source.startswith("showing the results of the running server")
+
+
+@pytest.mark.parametrize(
+    ("host", "loopback"),
+    [
+        ("127.0.0.1", True),
+        ("127.0.0.2", True),
+        ("::1", True),
+        ("localhost", True),
+        ("0.0.0.0", False),
+        ("::", False),
+        ("192.168.1.10", False),
+        ("example.test", False),
+    ],
+)
+def test_is_loopback_host(host, loopback):
+    assert ops_mod._is_loopback_host(host) is loopback

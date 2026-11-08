@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import http.client
+import ipaddress
 import json
 import logging
 import ntpath
@@ -333,14 +334,18 @@ def run_doctor(
         # #1663: something holds the port, so ask it for its own health verdict. A CLI
         # run cannot see inside the running server (a frozen binary's unpacked files,
         # for one), but the server reports that through /healthz.
-        server = (
-            _check_running_server(config.port, cert_file=_server_cert_file(config))
-            if port.status == WARN
-            else None
-        )
-        if server is not None and server.status == OK:
+        cert_file = _server_cert_file(config)
+        server = None
+        if port.status == WARN:
+            server = _check_running_server(config.port, cert_file=cert_file)
+        if (
+            server is not None
+            and server.status == OK
+            and (cert_file is not None or _listener_owner_refusal(config.port) is None)
+        ):
             # TASK-507: a port held by this deployment's own healthy server is the
-            # expected state, not a warning. Any other holder keeps the WARN.
+            # expected state, not a warning. The proof is the pinned certificate, or
+            # without TLS a listener this same user owns. Any other holder keeps the WARN.
             port = Check("port", OK, f"{config.port} in use by the running Clauster server")
         checks.append(port)
         if server is not None:
@@ -1306,6 +1311,71 @@ _SERVER_DOCTOR_MAX_BYTES = 1 << 20
 _HEADER_TOKEN_RE = re.compile(r"[\x21-\x7e]+")
 
 
+def _is_loopback_host(host: str) -> bool:
+    """Return whether the configured bind ``host`` is a loopback name or address."""
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _same_owner(proc: psutil.Process, me: psutil.Process) -> bool:
+    """Return whether ``proc`` runs as the same user as ``me``.
+
+    POSIX compares effective uids. Windows has no uids, so it compares the owner names;
+    reading another user's process there raises ``AccessDenied``, which the caller
+    treats as "cannot check".
+    """
+    if sys.platform == "win32":
+        return proc.username() == me.username()
+    return proc.uids().effective == me.uids().effective
+
+
+def _listener_owner_refusal(port: int) -> str | None:
+    """Return why the listener on ``port`` is not provably this user's, or ``None`` if it is.
+
+    Without TLS nothing proves who holds the port, so a credential goes only to a
+    listener that a process of this same user owns. Every listening socket on the port
+    must pass. A socket that cannot be checked is a refusal: another user's socket has
+    no visible pid for an unprivileged caller, and macOS lists sockets only for root.
+    """
+    try:
+        conns = psutil.net_connections(kind="inet")
+    except (psutil.Error, OSError) as exc:
+        return f"the owner of the listener on port {port} cannot be checked ({type(exc).__name__})"
+    pids = {
+        c.pid for c in conns if c.status == psutil.CONN_LISTEN and c.laddr and c.laddr.port == port
+    }
+    if not pids:
+        return f"the owner of the listener on port {port} cannot be checked (no listening socket)"
+    if None in pids:
+        return f"the listener on port {port} belongs to a process that this user cannot see"
+    try:
+        me = psutil.Process()
+        if not all(_same_owner(psutil.Process(pid), me) for pid in pids if pid is not None):
+            return f"the listener on port {port} belongs to another user"
+    except psutil.Error as exc:
+        return f"the owner of the listener on port {port} cannot be checked ({type(exc).__name__})"
+    return None
+
+
+def _plain_http_refusal(host: str, port: int) -> str | None:
+    """Return why the token must not go over plain HTTP to ``port``, or ``None`` if it may.
+
+    Plain HTTP carries the token only to a loopback bind whose listener this user owns.
+    Any other case fails closed, and the reason says the token was not sent.
+    """
+    if not _is_loopback_host(host):
+        return (
+            f"the server binds {host}, which is not a loopback address, and serves plain "
+            "HTTP; the token is sent only over TLS or to a loopback bind, so it was not sent"
+        )
+    refusal = _listener_owner_refusal(port)
+    return None if refusal is None else f"{refusal}, so the token was not sent"
+
+
 class ServerDoctorUnavailable(Exception):
     """The running server's doctor results could not be read; the message says why.
 
@@ -1435,16 +1505,20 @@ def run_cli_doctor(config_path: str | None, *, token: str | None) -> DoctorRepor
                 f"(pass --token or set {API_TOKEN_ENV})"
             )
         else:
-            try:
-                checks, ok = fetch_server_doctor(
-                    port, cert_file=_server_cert_file(config), token=token
-                )
-            except ServerDoctorUnavailable as exc:
-                reason = str(exc)
+            cert_file = _server_cert_file(config)
+            # With TLS the certificate pin proves the listener; without it, prove the owner.
+            refusal = None if cert_file is not None else _plain_http_refusal(config.host, port)
+            if refusal is not None:
+                reason = refusal
             else:
-                return DoctorReport(
-                    checks, ok, f"showing the results of the running server on port {port}"
-                )
+                try:
+                    checks, ok = fetch_server_doctor(port, cert_file=cert_file, token=token)
+                except ServerDoctorUnavailable as exc:
+                    reason = str(exc)
+                else:
+                    return DoctorReport(
+                        checks, ok, f"showing the results of the running server on port {port}"
+                    )
     checks, ok = run_doctor(config_path)
     return DoctorReport(checks, ok, f"showing the local checks of this CLI: {reason}")
 

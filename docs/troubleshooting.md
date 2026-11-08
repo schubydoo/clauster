@@ -204,7 +204,9 @@ ss -tlnp | grep 7621     # who owns it?
 
 Stop the other process, or change `port` in `clauster.yml`. When this
 deployment's own healthy server holds the port, the `port` row is OK instead and
-says so, and the `server` row reports that server's `/healthz` verdict.
+says so, and the `server` row reports that server's `/healthz` verdict. Without
+`tls`, "own" means that the listener belongs to the user who runs `doctor`; see
+[Operations](operations.md#show-the-running-servers-results).
 
 ### "not writable" / permission denied writing state
 

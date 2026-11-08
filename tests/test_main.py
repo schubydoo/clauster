@@ -569,11 +569,18 @@ def test_api_token_revoke_oserror_exits_1(write_config, tmp_path, capsys, monkey
 # ----- doctor -----------------------------------------------------------
 
 
-def test_doctor_ok_exit_0(write_config, tmp_path):
+@pytest.fixture
+def _port_free(monkeypatch):
+    # `_cfg` keeps the default port, which a real server on this host may hold. Report it
+    # free, so these tests never send a request to that server.
+    monkeypatch.setattr(ops, "_check_port", lambda host, port: ops.Check("port", ops.OK, "free"))
+
+
+def test_doctor_ok_exit_0(write_config, tmp_path, _port_free):
     assert cli.main(["doctor", "-c", _cfg(write_config, tmp_path)]) == 0
 
 
-def test_doctor_failure_exit_1(write_config, tmp_path):
+def test_doctor_failure_exit_1(write_config, tmp_path, _port_free):
     assert (
         cli.main(["doctor", "-c", _cfg(write_config, tmp_path, '  min_version: "9.9.9"\n')]) == 1
     )
