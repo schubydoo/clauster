@@ -2867,12 +2867,16 @@ def test_mcp_gate_stays_closed_when_the_reload_after_a_save_fails(
     _stub_alpha_preflight(browser, "Promise.resolve(new Response('{}',{status:500}))")
     browser.click('[data-test="cm-mcp-approvals-save"]')
     browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
-    deadline = time.monotonic() + 10
-    while not browser.eval_json("(()=>window.__pf)()"):
-        assert time.monotonic() < deadline, "the save never reloaded alpha's readiness"
-        time.sleep(0.2)
-    time.sleep(0.3)
+    _wait_for_failed_reload(browser)
     assert browser.eval_json(_GATE) is True
+
+
+def _wait_for_failed_reload(browser: AgentBrowser) -> None:
+    """Wait until the save's own readiness reload has failed and been applied."""
+    deadline = time.monotonic() + 10
+    while not browser.eval_json("(()=>!!" + _ROOT + ".preflightError['alpha'])()"):
+        assert time.monotonic() < deadline, "the save's readiness reload never failed"
+        time.sleep(0.2)
 
 
 def test_mcp_gate_ignores_a_pre_write_answer_that_lands_during_the_save(
@@ -2880,8 +2884,10 @@ def test_mcp_gate_ignores_a_pre_write_answer_that_lands_during_the_save(
 ) -> None:
     """An older readiness answer that lands after the write cannot clear the save's block.
 
-    The older request answers "all passed" (pre-write) while the save is reloading its
-    MCP list; the save's own reload then fails. The gate must still block.
+    The order is fixed, not timed: the older request's "all passed" (pre-write) answer is
+    held until the save has set its block and entered its MCP list reload, then released.
+    The save's own readiness reload then fails. The older call must report that its answer
+    was dropped, and the gate must still block.
     """
     _arm_mcp_approval(browser, config_mgmt_server)
     ok = json.dumps(
@@ -2889,21 +2895,26 @@ def test_mcp_gate_ignores_a_pre_write_answer_that_lands_during_the_save(
     )
     _stub_alpha_preflight(
         browser,
-        "new Promise(r=>setTimeout(()=>r(new Response(" + ok + ",{status:200,"
-        "headers:{'Content-Type':'application/json'}})),400))",
+        "new Promise(r=>{window.__releaseStale=()=>r(new Response(" + ok + ",{status:200,"
+        "headers:{'Content-Type':'application/json'}}))})",
     )
     browser.eval_js(
         "(function(){const d=" + _ROOT + ";const orig=d._loadMcp.bind(d);"
-        "d._loadMcp=async(g)=>{await new Promise(r=>setTimeout(r,1000));return orig(g)};"
-        "d.loadPreflight('alpha');return 1})()"
+        "d._loadMcp=async(g)=>{window.__mcpEntered=true;window.__releaseStale();"
+        "while(window.__staleApplied===undefined)await new Promise(r=>setTimeout(r,20));"
+        "return orig(g)};"
+        "d.loadPreflight('alpha').then(v=>{window.__staleApplied=v});return 1})()"
     )
     browser.click('[data-test="cm-mcp-approvals-save"]')
     browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
-    deadline = time.monotonic() + 10
-    while browser.eval_json("(()=>window.__pf)()") < 2:
-        assert time.monotonic() < deadline, "the save never reloaded alpha's readiness"
-        time.sleep(0.2)
-    time.sleep(0.3)
+    _wait_for_failed_reload(browser)
+    state = browser.eval_json(
+        "(()=>({entered:window.__mcpEntered===true,stale:window.__staleApplied,"
+        "calls:window.__pf}))()"
+    )
+    # The wrapper ran, the held answer was dropped (true would mean it landed), and the
+    # save's own reload was a second call.
+    assert state["entered"] is True and state["stale"] is False and state["calls"] >= 2, state
     assert browser.eval_json(_GATE) is True
 
 

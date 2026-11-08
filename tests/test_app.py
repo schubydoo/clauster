@@ -1284,6 +1284,8 @@ def test_project_readiness_pill_shows_not_run_instead_of_hiding(write_config):
     assert "if (seq !== this._preflightSeq[name]) return false;  // a newer request owns" in page
     assert page.count("if (seq !== this._preflightSeq[name]) return false;") == 2
     assert "if (!applied) return;" in page
+    # An applied batch answer was sent after any write, so it clears the write's block.
+    assert "delete this.mcpBlockUntilReloaded[n];" in page
     # The old silent-on-failure paths are gone.
     assert "advisory — pill hides on failure" not in page
     assert "advisory — leave per-project pills hidden" not in page
