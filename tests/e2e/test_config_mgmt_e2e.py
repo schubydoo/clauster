@@ -2800,7 +2800,11 @@ def test_config_mgmt_marketplaces_remove_only_where_the_scope_declares(
     browser.expect_visible('[data-test="cm-market-remove-empty"]')
     _expect_focused(browser, "cm-plugin-confirm")
     assert browser.get_count('[data-test="cm-market-remove-market"]') == 0
-    browser.expect_text('[data-test="cm-market-readonly-market"]', "Not declared at User scope")
+    browser.expect_text(
+        '[data-test="cm-market-readonly-market"]',
+        "Not declared at User scope, so Remove is not offered here. A project can declare it "
+        "at Project or Local scope.",
+    )
     # User scope reads no project's files, so it has no link for a project's marketplace.
     assert not browser.is_visible('[data-test="cm-market-switch-scope-market"]')
     browser.fill('[data-test="cm-plugin-confirm"]', "USER SCOPE")

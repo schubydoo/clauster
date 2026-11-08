@@ -4801,7 +4801,16 @@
         }
         const none = "Not declared at " + here + " scope, so Remove is not offered here.";
         if (c.scope === "user") return none + " A project can declare it at Project or Local scope.";
-        return none + " No other scope of this project that Clauster reads declares it.";
+        // Name what this editor did not read, so the note never claims a scope it skipped.
+        const read = this._configMgmtDeclaredScopes();
+        const failed = read.filter((s) => s !== c.scope && !Array.isArray(c.plugins.declared[s]));
+        let tail = " No other scope of this project that Clauster reads declares it.";
+        if (failed.length) {
+          tail += " Clauster could not read " + failed.map((s) => this._configMgmtScopeWord(s)).join(" and ")
+            + (failed.length === 1 ? " scope." : " scopes.");
+        }
+        if (!read.includes("user")) tail += " User scope can declare it, and this editor does not open User scope.";
+        return none + tail;
       },
       configMgmtMarketScopeLink(m) {
         const [s] = this._configMgmtMarketScopesElsewhere(m);

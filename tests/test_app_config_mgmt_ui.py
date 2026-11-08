@@ -565,6 +565,9 @@ def test_marketplace_remove_renders_only_where_the_scope_declares_it(write_confi
     assert gated, "the marketplace Remove button must sit under configMgmtMarketAtScope(m)"
     assert html.count("data-test=\"'cm-market-remove-' + m.name\"") == 1
     assert '"/api/config-write/marketplaces/declared?"' in html
+    # ...and the read reaches the rows: started with the list, set together with it.
+    assert "const declaredRead = this._loadDeclared(myGen);" in html
+    assert "pl.declared = declared;" in html
     assert 'if (op === "remove" && !this.configMgmtMarketAtScope({ name: name })) return;' in html
     assert "data-test=\"'cm-market-readonly-' + m.name\"" in html
     assert "data-test=\"'cm-market-switch-scope-' + m.name\"" in html

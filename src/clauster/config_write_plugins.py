@@ -1022,7 +1022,8 @@ _NAME_SHOWN_MAX = 80
 def _read_marketplace_plugin_names(location: Any) -> list[str] | None:
     """Return the plugin names a marketplace checkout offers, or ``None`` if unreadable.
 
-    ``location`` is the CLI's own ``installLocation``: a directory holding
+    ``location`` is the CLI's own ``installLocation``, or a ``file`` source's ``path``
+    (:func:`_marketplace_list_location`): a directory holding
     ``.claude-plugin/marketplace.json`` (git and directory sources), or the file itself.
     Read-only and for display only. A path that is not a regular file (a FIFO would block
     the read), an oversized file, or invalid JSON yields ``None``. In a checkout directory,
@@ -1088,8 +1089,9 @@ def marketplace_plugin_names(
 ) -> tuple[dict[str, list[str] | None], frozenset[str]]:
     """Return ``{marketplace: plugin names or None}`` for ``name`` (or every marketplace).
 
-    Reads ``marketplace list --json`` for each ``installLocation``, then that checkout's
-    ``marketplace.json`` (:func:`_read_marketplace_plugin_names`). The second value names
+    Reads ``marketplace list --json`` for each listed location
+    (:func:`_marketplace_list_location`), then that location's ``marketplace.json``
+    (:func:`_read_marketplace_plugin_names`). The second value names
     the marketplaces whose source is not a known copy
     (:data:`CHECKOUT_MARKETPLACE_SOURCES`): a read of one before an update is no
     before-state. A failed list raises :class:`PluginCliError`, as

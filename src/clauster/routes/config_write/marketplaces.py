@@ -188,8 +188,9 @@ async def api_config_write_marketplaces_action(
     binary = config.claude.binary
     # TASK-517: an update reports whether each marketplace's plugin list changed, from a
     # read of its checkout before and after. A failed read BEFORE fails closed, nothing run.
-    # TASK-532: a directory or file source has no checkout, so the read before already sees
-    # what the update reads; `live` names those, and their message compares nothing.
+    # TASK-532: only a github, git or url source keeps a copy that the update rewrites (a
+    # directory or file source is read in place). `live` names every other source, and
+    # their message compares nothing.
     before: dict[str, list[str] | None] = {}
     live: frozenset[str] = frozenset()
     if op == "update":

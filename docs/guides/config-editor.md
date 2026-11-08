@@ -953,7 +953,7 @@ The scope rules and the update results below were checked against Claude Code
   the update. It then shows the version change ("Updated x from version 1.0.0
   to version 1.1.0."), or "already up to date" with the version. The marketplace
   Update reads the marketplace's own plugin list (the `marketplace.json` file in
-  its checkout) before and after. It then shows whether that list changed, how
+  its checkout, or the downloaded file of a `url` source) before and after. It then shows whether that list changed, how
   many plugins the marketplace now offers, and which names were added or
   removed. Clauster compares the two lists only for a `github`, `git` or `url`
   source, whose update rewrites a copy of the list. A `directory` or `file`
