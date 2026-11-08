@@ -506,7 +506,8 @@ def resume_background_job(
         cwd = job.cwd.resolve()
     except (OSError, RuntimeError, ValueError) as exc:
         # RuntimeError: a symlink loop on 3.11/3.12. ValueError: a path the OS rejects.
-        raise ResumeError(f"job {job_id!r} working directory cannot be resolved: {exc}") from exc
+        # The exception text (it names the path) stays on the chain, out of the 409 detail.
+        raise ResumeError(f"job {job_id!r} working directory cannot be resolved") from exc
     refusal = refuse_cwd(cwd)
     if refusal is not None:
         raise ResumeNotAllowed(refusal)

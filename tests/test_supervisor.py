@@ -1117,7 +1117,9 @@ def test_resume_dispatches_in_the_cwd_it_checked(tmp_path, monkeypatch):
     )
 
     def _check_then_swap(cwd):
-        assert Path(cwd).resolve() == checked.resolve()  # what the ceiling check saw
+        # The check is handed the already-resolved path, not the link: a check that resolved
+        # the link itself could see a different target than the dispatch.
+        assert cwd == checked.resolve()
         link.unlink()
         link.symlink_to(swapped, target_is_directory=True)  # swapped after the check
         return None
@@ -1540,6 +1542,7 @@ def test_api_resume_agent_unresolvable_cwd_is_409(
         extra=_INHERIT_DEFAULT + _ALPHA_CEILING,
     )
     assert r.status_code == 409
+    assert r.json()["detail"] == "job '29e8026f' working directory cannot be resolved"
     assert captured == []
 
 
