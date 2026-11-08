@@ -9,7 +9,8 @@ any other change is refused (422) and nothing is written.
 
 TASK-535: an ``mcpServers`` ``args`` item shows as the MCP tab shows it, in clear unless the
 line masker masks it (a ``${...}`` reference, a URL with a user name or password, or a
-``--api-key=x`` list item).
+``--api-key=x`` list item). The value is read as YAML loads it, as the tab reads it, so an
+escape, a line break or ``!!binary`` does not hide a secret-shaped value.
 
 TASK-497: the shared line masker missed a ``- token: x`` list item, a secret-keyed pair in
 a flow mapping under a benign key (``env: {API_KEY: x}``), and the lines of a block value
@@ -33,6 +34,8 @@ from clauster.app import create_app
 from clauster.config import load_config
 
 MASK = cw.REDACTION_SENTINEL
+#: ``https://u:qv-bin@h.example.com`` as base64, for a ``!!binary`` value.
+_B64_URL = "aHR0cHM6Ly91OnF2LWJpbkBoLmV4YW1wbGUuY29t"
 FAKE_CLAUDE = Path(__file__).resolve().parent / "fixtures" / "fake_claude" / "claude"
 
 _STDIO = (
@@ -411,6 +414,130 @@ def test_a_secret_shaped_args_item_is_masked_and_round_trips(tmp_path: Path) -> 
     assert path.read_bytes() == stored.replace("description: d", "description: e").encode()
 
 
+@pytest.mark.parametrize(
+    ("stored", "hidden"),
+    [
+        # An escaped `@`: the line masker sees no `user@host`, the MCP tab does.
+        ('---\nmcpServers: {a: {args: ["https://u:qv-pw\\u0040h.example.com"]}}\n---\n', "qv-pw"),
+        ('---\nmcpServers: {a: {args: ["https://u:qv-px\\x40h.example.com"]}}\n---\n', "qv-px"),
+        # An escaped `$`: a `${...}` reference.
+        ('---\nmcpServers: {a: {args: ["--k=\\x24{qv_ref}"]}}\n---\n', "qv_ref"),
+        # A double-quoted value whose escaped line break joins the URL across two lines.
+        (
+            "---\nmcpServers:\n  a:\n    args:\n"
+            '      - "https://u:qv-py\\\n        @h.example.com"\n---\n',
+            "qv-py",
+        ),
+        # Another server field, and a hook field, spelled with an escape.
+        ('---\nmcpServers: {a: {command: "https://u:qv-pz\\u0040h"}}\n---\n', "qv-pz"),
+        (
+            '---\nhooks: {Stop: [{hooks: [{type: command, command: "echo \\x24{qv_hook}"}]}]}'
+            "\n---\n",
+            "qv_hook",
+        ),
+        # Any other frontmatter field: the decoded value is read there too.
+        ('---\ndescription: "see https://u:qv-top\\u0040h.example.com"\n---\nb\n', "qv-top"),
+        ("---\nmetadata: {k: !!binary aHR0cHM6Ly91OnF2LWJpbkBoLmV4YW1wbGUuY29t}\n---\n", "aHR0"),
+        # A key that looks secret only once its escape is read masks its value, as on the tab.
+        ('---\nmcpServers: {a: {"client\\x53ecret": qv-hint}}\n---\n', "qv-hint"),
+        # A base64 `!!binary` value holds the URL in its decoded bytes.
+        (
+            "---\nmcpServers: {a: {args: [!!binary aHR0cHM6Ly91OnF2LWJpbkBoLmV4YW1wbGUuY29t]}}"
+            "\n---\n",
+            "aHR0cHM6",
+        ),
+    ],
+)
+def test_a_secret_shaped_value_is_masked_however_it_is_spelled(
+    tmp_path: Path, stored: str, hidden: str
+) -> None:
+    # TASK-535: the MCP and Hooks tabs read the decoded value, so the editor reads it too.
+    path = _place(tmp_path, stored)
+    content, file_hash = _view(tmp_path)
+    assert hidden not in content
+    assert MASK in content
+    assert len(content.splitlines()) == len(stored.splitlines())
+    _save(tmp_path, content, file_hash)
+    assert path.read_bytes() == stored.encode("utf-8")
+
+
+@pytest.mark.parametrize(
+    "stored",
+    [
+        # A `!!binary` value that does not decode is masked (fail closed).
+        '---\nmcpServers:\n  a:\n    args:\n      - !!binary "qv-bad"\n---\n',
+        '---\nmcpServers:\n  a:\n    args:\n      - !!binary "qv-\u00e9"\n---\n',
+        # A `url` value that is not a string: the url view cannot read its base64 text.
+        f"---\nmcpServers:\n  s:\n    url: !!binary {_B64_URL}\n---\nb\n",
+        f"---\nurl: !!binary {_B64_URL}\n---\nb\n",
+        # A binary tag spelled with a `%` escape, with no other text the pre-check reads.
+        f"---\nmetadata: {{k: !!%62inary {_B64_URL}}}\n---\n",
+        f"---\nmetadata: {{k: !<tag:yaml.org,2002:%62inary> {_B64_URL}}}\n---\n",
+        # A key that looks secret only once its escape is read, outside the two fields.
+        '---\nmetadata:\n  "api\\x5fkey": qv-k\n---\n',
+    ],
+)
+def test_a_value_that_does_not_load_or_hides_its_text_is_masked(
+    tmp_path: Path, stored: str
+) -> None:
+    path = _place(tmp_path, stored)
+    content, file_hash = _view(tmp_path)
+    assert "qv-" not in content and "aHR0cHM6" not in content
+    assert len(content.splitlines()) == len(stored.splitlines())
+    if "qv-bad" not in stored and "qv-\u00e9" not in stored:  # a save loads the value
+        _save(tmp_path, content, file_hash)
+        assert path.read_bytes() == stored.encode("utf-8")
+
+
+def test_a_value_reached_under_a_secret_key_and_as_an_item_shows_as_the_mask(
+    tmp_path: Path,
+) -> None:
+    # The key path wins whichever path the walk takes first; an `args` item alone would
+    # show the host (`********@h.example.com`).
+    stored = (
+        "---\nx: &u https://u:qv-al@h.example.com\nmcpServers: {a: {args: [*u], token: *u}}\n---\n"
+    )
+    _place(tmp_path, stored)
+    content = sk.read_skill_file(tmp_path, "s")[0]
+    assert content.splitlines()[1] == MASK
+
+
+@pytest.mark.parametrize(
+    "stored",
+    [
+        # A block value under a secret key outside the two fields: the line masker keeps
+        # the key visible, and the header view does not mask the key line.
+        "---\nurl: https://h.example.com\ntoken: >\n  qv-a\n  qv-b\n---\n",
+        # An empty value under a secret key, and a `url` that is no string, stay as written.
+        "---\nmcpServers:\n  s:\n    apiKey:\n    url: https://h.example.com\n---\n",
+        "---\nmcpServers: {s: {apiKey: '', url: null}}\n---\n",
+        "---\nurl: 8080\nhooks: {}\n---\n",
+    ],
+)
+def test_the_header_view_leaves_what_the_line_masker_shows(tmp_path: Path, stored: str) -> None:
+    _place(tmp_path, stored)
+    assert sk.read_skill_file(tmp_path, "s")[0] == cw.redact_secret_lines(stored)
+
+
+def test_a_folded_value_with_a_reference_is_masked_in_place(tmp_path: Path) -> None:
+    # The value reads in its source as it loads, so only the reference is masked, as by
+    # the line masker, and the key and the other lines stay.
+    stored = (
+        "---\ndescription: >\n  Use ${CLAUDE_SKILL_DIR}/x\n  more\n"
+        "url: https://h.example.com\n---\nb\n"
+    )
+    _place(tmp_path, stored)
+    content = sk.read_skill_file(tmp_path, "s")[0]
+    assert content == stored.replace("${CLAUDE_SKILL_DIR}", MASK)
+
+
+def test_a_plain_args_item_spelled_with_an_escape_still_shows(tmp_path: Path) -> None:
+    # Only a secret-shaped value is masked: an escape alone does not hide an item.
+    stored = '---\nmcpServers: {a: {args: ["pkg\\u002done", -y]}}\n---\n'
+    _place(tmp_path, stored)
+    assert sk.read_skill_file(tmp_path, "s")[0] == stored
+
+
 # --- TASK-536: a secret value that goes on past its line ------------------------------------
 
 
@@ -506,6 +633,32 @@ def test_a_secret_shaped_args_item_is_masked_and_round_trips(tmp_path: Path) -> 
             f"token: {MASK}\n  {MASK}\n  {MASK}\nnext: ok\n",
         ),
         ("api_key = qv-as\n    qv-at)\n", f"api_key = {MASK}\n    {MASK}\n"),
+        # A secret `key: value` that ends on its line, with another secret flow value after
+        # it on the same line that goes on: the deeper lines hold that value.
+        (
+            'metadata: {\n  token: "qv-da", password: "qv-db\n    qv-dc"}\n',
+            f"metadata: {{\n  token: {MASK}\n    {MASK}\n",
+        ),
+        (
+            "metadata: {\n  token: 'qv-dd', password: 'qv-de\n    qv-df: x'}\n",
+            f"metadata: {{\n  token: {MASK}\n    {MASK}\n",
+        ),
+        (
+            'metadata: {\n  token: qv-dg, password: "qv-dh\n    qv-di: x"}\n',
+            f"metadata: {{\n  token: {MASK}\n    {MASK}\n",
+        ),
+        (
+            "metadata: {\n  token: &a 'qv-dj', password:\n    qv-dk}\n",
+            f"metadata: {{\n  token: {MASK}\n    {MASK}\n",
+        ),
+        (
+            '- token: "qv-dl", api_key: {a: qv-dm,\n    b: qv-dn}\n',
+            f"- token: {MASK}\n    {MASK}\n",
+        ),
+        (
+            'metadata: {\n  token: &a, password: "qv-do\n    qv-dp: x"}\n',
+            f"metadata: {{\n  token: {MASK}\n    {MASK}\n",
+        ),
     ],
 )
 def test_a_secret_value_that_goes_on_is_masked_on_each_line(text: str, view: str) -> None:
@@ -526,6 +679,9 @@ def test_a_secret_value_that_goes_on_is_masked_on_each_line(text: str, view: str
         "- token: qv-g\n  name: x\n",
         "- token: qv-h\n  more text\n",
         "env: {mode:\n  fast}\n",
+        # A closed quote with a closed or benign pair after it on the same line.
+        '  token: "qv-f", password: "qv-i"\n    , level: 2}\n',
+        '  token: "qv-j", mode: "fast\n    , level: 2"}\n',
     ],
 )
 def test_a_secret_value_that_ends_on_its_line_leaves_the_next_line(text: str) -> None:

@@ -1790,6 +1790,9 @@ def test_redact_secret_lines_is_linear_on_every_hostile_shape():
         "quoted value run-on lines": 'token: "x\n' + "  x\n" * 200_000,
         "run-on openers": "env: {token:\n" * 50_000,
         "node property run": "token: " + "& " * 128_000 + '"x',
+        # A secret flow pair after a closed or plain secret value on the same line.
+        "closed quote then pairs": 'token: "x"' + ", password: 'y'" * 40_000,
+        "plain value then pairs": "token: x" + ", password: y" * 40_000,
     }
     for label, payload in shapes.items():
         start = time.perf_counter()

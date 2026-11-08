@@ -331,7 +331,12 @@ def _value_run(value: str) -> str | None:
     :data:`_RUNS_ON` for a quoted value with no closing quote on the line
     (``token: "abc``) and for a flow value (``token: {a: b,``), and :data:`_PLAIN` for a
     plain value (``token: abc``), each also behind node properties (``token: &a "abc``).
-    ``None`` for a quoted value that closes on the line. One pass.
+    ``None`` for a quoted value that closes on the line.
+
+    The rest of the line after a closed quote, or a plain value, can hold another secret
+    flow pair (``token: "a", password: "b``): when :func:`_mask_flow_pairs` reports that
+    the last such value goes on, this is :data:`_RUNS_ON` too, as for a line with a benign
+    key. Linear: one scan to the closing quote, then one flow scan of the rest.
     """
     i = 0
     while value[i : i + 1] in ("&", "!"):
@@ -340,9 +345,14 @@ def _value_run(value: str) -> str | None:
         while i < len(value) and value[i] in " \t":
             i += 1
     lead = value[i : i + 1]
+    if lead in ("{", "["):
+        return _RUNS_ON
     if lead in ("'", '"'):
-        return _RUNS_ON if _quoted_end(value, i) is None else None
-    return _RUNS_ON if lead in ("{", "[") else _PLAIN
+        end = _quoted_end(value, i)
+        if end is None:
+            return _RUNS_ON
+        return _RUNS_ON if _mask_flow_pairs(value[end:])[1] else None
+    return _RUNS_ON if _mask_flow_pairs(value)[1] else _PLAIN
 
 
 # Character classification for the URL scheme, delegated to the regex ENGINE rather than
@@ -744,8 +754,9 @@ def redact_secret_lines(text: str) -> str:
     * A secret value that goes on past its line (TASK-536) is masked the same way in the
       lines indented deeper than that line: a flow value that :func:`_mask_flow_pairs`
       reports as going on (``env: {token:``, an unclosed quote, ``&a``), and the value of
-      a secret ``key: value`` that is an unclosed quote or a flow value
-      (:func:`_value_run`). Such a value ends at the first line that is not indented
+      a secret ``key: value`` that is an unclosed quote or a flow value, or that has a
+      secret flow pair after it on the line that goes on (:func:`_value_run`). Such a
+      value ends at the first line that is not indented
       deeper, not at the line that closes a quote: the rest of that line can open another
       secret value. A plain value goes on only in the lines indented deeper than its key
       that are not a mapping key (:data:`_MAPPING_KEY_RE`) or a comment, because YAML

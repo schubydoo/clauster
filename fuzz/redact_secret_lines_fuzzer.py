@@ -131,8 +131,9 @@ _PLAIN_FLOW_RE = re.compile(r"[^,}\]]*")
 #: Node properties (``&anchor``, ``!tag``) in front of a value.
 _PROPERTIES_RE = re.compile(r"(?:[&!][^ \t]*[ \t]*)*")
 #: A line that a plain value does not go on into: a comment, or a mapping key (``key:`` and
-#: then a space, a tab or the end) after any ``- `` markers.
-_NOT_PLAIN_TEXT_RE = re.compile(r"#|(?:-[ \t]+)*([\"']?)[\w.\-]+\1[ \t]*:(?:[ \t]|\Z)")
+#: then a space, a tab or the end) after all of its ``- `` markers. The markers are an
+#: atomic group: a ``-`` that a marker took is never read back as a key (``- : x``).
+_NOT_PLAIN_TEXT_RE = re.compile(r"#|(?>(?:-[ \t]+)*)([\"']?)[\w.\-]+\1[ \t]*:(?:[ \t]|\Z)")
 #: How a value goes on: a block, flow or open quoted value, or a plain value.
 _FLOW, _PLAIN = "", "plain"
 
@@ -176,9 +177,15 @@ def _ref_value_run(value: str) -> str | None:
     assert props is not None  # `*` always matches
     rest = value[props.end() :]
     lead = rest[:1]
+    if lead in ("{", "["):
+        return _FLOW
+    # A secret flow pair later on the line that goes on (`token: "a", password: "b`).
     if lead in _CLOSED_QUOTE_RE:
-        return None if _CLOSED_QUOTE_RE[lead].match(rest) else _FLOW
-    return _FLOW if lead in ("{", "[") else _PLAIN
+        closed = _CLOSED_QUOTE_RE[lead].match(rest)
+        if closed is None:
+            return _FLOW
+        return _FLOW if _ref_flow_pairs(rest[closed.end() :])[1] else None
+    return _FLOW if _ref_flow_pairs(value)[1] else _PLAIN
 
 
 def _ref_shared_masks(body: str) -> str:

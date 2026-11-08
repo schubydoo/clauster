@@ -186,6 +186,14 @@ _REDACT_LINE_INPUTS = [
     'token: "x\n  y"\n  z\n',
     "- token: 'x\n  it''s\n  y'\n  name: z\n",
     "token: x\n  y\n  # c\n  - d\n",
+    # A secret flow pair after a closed or plain secret value on the same line goes on.
+    'm: {\n  token: "a", password: "b\n    LEAK"}\n',
+    "m: {\n  token: 'a', password: 'b\n    k: LEAK'}\n",
+    'm: {\n  token: a, password: "b\n    k: LEAK"}\n',
+    'm: {\n  token: &a, password: "b\n    k: LEAK"}\n',
+    '  token: "a", mode: "b\n    , c: d"}\n',
+    # A `- ` marker and then a `:` with no key: not a mapping key, so the plain value goes on.
+    'token: a\n  - : "\n',
 ]
 
 

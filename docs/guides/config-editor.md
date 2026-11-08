@@ -617,7 +617,9 @@ visible and does not end the value. These values go on past their line:
 - After a secret-shaped key: a quoted value with no closing quote on the line,
   or a `{...}` or `[...]` value, also behind an anchor or a tag. The value goes
   on in the lines that are indented deeper than its line. In a list item such as
-  `- token: "abc`, its line starts at the `-`.
+  `- token: "abc`, its line starts at the `-`. The same applies to any value
+  after a secret-shaped key when a flow value of the first kind comes after it on
+  the line, as in `token: "a", password: "b`.
 - After a secret-shaped key: a plain value, as in `token: abc`. The value goes
   on in the lines that are indented deeper than the key. A line that starts with
   a key, a `:` and then a space or the end of the line (also in a list item, as
@@ -639,6 +641,17 @@ the line masking above masks it, for example a `${...}` reference, a URL with a
 user name or password, or a list item such as `- --token=abc`. In a flow list,
 `[--token=abc]` shows in clear, as it does on the MCP tab. In `hooks`, every
 `headers` value shows as `********`.
+The editor also reads each frontmatter value as YAML loads it, as the MCP and
+Hooks tabs do. A `${...}` reference or a URL with a user name or password is
+therefore masked also when it is written with an escape (such as `\x40` for
+`@`, also an escaped line break) or as `!!binary`. A `url` value written as
+`!!binary` shows as `********`. In `mcpServers` and `hooks`, a
+value under a key that looks secret shows as `********`, also when the key looks
+secret only after its escapes are read (such as `"client\x53ecret"`). Elsewhere
+such an escaped key masks its value too. A `${...}` reference that is split
+across lines without an escape is not detected and shows in clear. Outside
+`mcpServers` and `hooks`, the same is true for the value of a key written as
+`? token`, or with an anchor, a tag or an alias in front of it.
 The key names stay visible, and so does an empty value. If such a value covers
 more than one line, holds an escape, or has an anchor or a tag in front of it,
 each line of the value shows as one `********`.
