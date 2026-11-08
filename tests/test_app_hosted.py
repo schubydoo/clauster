@@ -24,7 +24,7 @@ from clauster import claude_cli
 from clauster.app import create_app
 from clauster.claustrum_client import ClaustrumClient, ClaustrumError
 from clauster.config import CEILING_GATED_MODES, PERMISSION_MODES, ClausterConfig, load_config
-from clauster.hosted import HostedSessionError
+from clauster.hosted import HostedAgentMayBeRunning, HostedSessionError
 from clauster.models import InstanceStatus, RemoteControlInstance
 
 _HID = "hid-1"
@@ -36,6 +36,7 @@ class _StubSession:
     def __init__(self) -> None:
         self.events = [{"event_seq": 1, "type": "frame", "frame": {"type": "system"}}]
         self.unsubscribed = False
+        self.status = InstanceStatus.RUNNING
 
     def subscribe(self, after_seq: int = 0) -> asyncio.Queue:
         queue: asyncio.Queue = asyncio.Queue()
@@ -67,6 +68,8 @@ class _StubManager:
         self.kill_orphan_error: Exception | None = None
         self.forgotten: list[str] = []
         self.forget_error: Exception | None = None
+        # The `connect` each stop, kill_orphan and forget got (TASK-539).
+        self.connects: list = []
         self.history_for = None
 
     def seed(self) -> RemoteControlInstance:
@@ -129,13 +132,15 @@ class _StubManager:
             raise HostedSessionError(f"no such hosted session: {hosted_id}")
         self.responded.append((hosted_id, request_id, response))
 
-    async def stop(self, hosted_id: str) -> RemoteControlInstance:
+    async def stop(self, hosted_id: str, *, connect) -> RemoteControlInstance:
+        self.connects.append(connect)
         self.stopped.append(hosted_id)
         inst = self.instances[hosted_id]
         inst.status = InstanceStatus.STOPPED
         return inst
 
-    async def kill_orphan(self, hosted_id: str) -> RemoteControlInstance:
+    async def kill_orphan(self, hosted_id: str, *, connect) -> RemoteControlInstance:
+        self.connects.append(connect)
         if self.kill_orphan_error is not None:
             raise self.kill_orphan_error
         self.killed_orphans.append(hosted_id)
@@ -144,7 +149,8 @@ class _StubManager:
         inst.is_orphan = False
         return inst
 
-    async def forget(self, hosted_id: str) -> None:
+    async def forget(self, hosted_id: str, *, connect) -> None:
+        self.connects.append(connect)
         if self.forget_error is not None:
             raise self.forget_error
         # Mirror the production contract: an unknown id raises (the endpoint maps it
@@ -838,6 +844,33 @@ def test_resume_hosted_daemon_error_is_502(write_config, projects_root, monkeypa
     assert r.status_code == 502
 
 
+@pytest.mark.parametrize("op", ["spawn", "resume"])
+def test_hosted_502_detail_is_redacted(write_config, projects_root, monkeypatch, op):
+    # TASK-538: the daemon's error text can echo the spawn's argv, paths or env. The 502
+    # detail carried it verbatim; it now goes through redact like the WebSocket path.
+    secret = "sk-ant-api03-" + "A" * 40
+    monkeypatch.setattr(instances_module, "is_trusted", lambda *a, **k: True)
+    monkeypatch.setattr(claude_cli, "resolve_binary", lambda b: "/usr/bin/claude")
+    manager = _StubManager()
+    error = ClaustrumError(f"spawn refused: env ANTHROPIC_API_KEY={secret}")
+    if op == "spawn":
+        manager.spawn_error = error
+    else:
+        manager.seed()
+        manager.resume_error = error
+    app = _app(write_config, manager=manager, daemon=_StubDaemon())
+    with TestClient(app) as client:
+        if op == "spawn":
+            r = client.post("/api/instances", json={"project": "alpha", "channel": "hosted"})
+        else:
+            r = client.post(f"/api/instances/{_HID}/resume")
+    assert r.status_code == 502
+    detail = r.json()["detail"]
+    assert detail.startswith(f"hosted {op} failed: spawn refused")  # the diagnostic stays
+    assert secret not in detail
+    assert "sk-ant-api03-AAAA" not in detail  # not even a prefix of it
+
+
 # #1524. Resume respawns with the mode stored on the old row, so the project's bypass
 # ceiling must be re-applied against the CURRENT config. The config is loaded once at app
 # build, so "tightened after the spawn" is a row persisted in bypass mode, restored into an
@@ -959,6 +992,52 @@ def test_delete_hosted_race_returns_404(write_config, projects_root):
     with TestClient(app) as client:
         r = client.delete(f"/api/instances/{_HID}")
     assert r.status_code == 404
+
+
+@pytest.mark.parametrize("op", ["delete", "forget"])
+def test_hosted_stop_and_forget_pass_the_daemon_ensure_as_connect(write_config, op):
+    # TASK-539: an ERROR row's agent is ended over a fresh connection, not the cached one.
+    manager = _StubManager()
+    manager.seed()
+    daemon = _ReconnectingDaemon()
+    app = _app(write_config, manager=manager, daemon=daemon)
+    with TestClient(app) as client:
+        if op == "delete":
+            r = client.delete(f"/api/instances/{_HID}")
+        else:
+            r = client.post(f"/api/instances/{_HID}/forget")
+    assert r.status_code == 200, r.text
+    assert manager.connects == [daemon.ensure]
+    without = _StubManager()
+    without.seed()
+    with TestClient(_app(write_config, manager=without, daemon=None)) as client:
+        if op == "delete":
+            client.delete(f"/api/instances/{_HID}")
+        else:
+            client.post(f"/api/instances/{_HID}/forget")
+    assert without.connects == [None]  # no daemon: the manager refuses an ERROR row itself
+
+
+@pytest.mark.parametrize("live", [True, False])
+def test_hosted_stop_refused_because_the_agent_may_run_is_409(write_config, live):
+    # A refusal is not "the row vanished" (404): the row stays, and the detail says why.
+    manager = _StubManager()
+    manager.seed()
+    refusal = HostedAgentMayBeRunning("cannot stop: the agent may still be running")
+    if live:
+
+        async def _refuse(hosted_id, *, connect):
+            raise refusal
+
+        manager.stop = _refuse
+    else:
+        del manager.sessions[_HID]  # the kill_orphan path
+        manager.kill_orphan_error = refusal
+    app = _app(write_config, manager=manager)
+    with TestClient(app) as client:
+        r = client.delete(f"/api/instances/{_HID}")
+    assert r.status_code == 409
+    assert "may still be running" in r.json()["detail"]
 
 
 # -- websocket -------------------------------------------------------------
@@ -1247,3 +1326,55 @@ def test_spawn_hosted_drives_real_manager_end_to_end(
         assert "--output-format" in spawned["args"] and "stream-json" in spawned["args"]
         # A message routes through the real manager to the real session's stdin.
         assert client.post(f"/api/instances/{pid}/message", json={"text": "hi"}).status_code == 202
+
+
+def _live_error_row(client, app) -> str:
+    """Spawn a Direct Session through the route, then latch it ERROR as a lost pump does."""
+    r = client.post("/api/instances", json={"project": "alpha", "channel": "hosted"})
+    assert r.status_code == 201, r.text
+    pid = r.json()["claustrum_process_id"]
+    session = app.state.hosted.session(pid)
+    session.claude_session_uuid = "0b7a3c1e-2f4d-4e6a-9b8c-1d2e3f4a5b6c"  # restartable
+    session.status = InstanceStatus.ERROR  # the agent may still run behind this row
+    return pid
+
+
+@_POSIX_ONLY
+@pytest.mark.parametrize("op", ["stop", "forget"])
+def test_stop_and_forget_of_a_live_error_row_end_the_agent_first(
+    write_config, projects_root, monkeypatch, tmp_path, op
+):
+    # TASK-539 against the REAL HostedManager and routes: the daemon gets the KILL for the
+    # row's process id before the row is stopped or dropped.
+    _LiveFakeDaemon.instances.clear()
+    app = _live_app(write_config, monkeypatch, tmp_path)
+    with TestClient(app) as client:
+        pid = _live_error_row(client, app)
+        fake = _LiveFakeDaemon.instances[-1].fake
+        if op == "stop":
+            r = client.delete(f"/api/instances/{pid}")
+        else:
+            r = client.post(f"/api/instances/{pid}/forget")
+        assert r.status_code == 200, r.text
+        assert {"id": pid, "signal": "KILL"} in fake.killed
+        if op == "forget":
+            assert client.get("/api/hosted").json() == []
+
+
+@_POSIX_ONLY
+def test_restart_of_a_live_error_row_is_409_and_kills_nothing(
+    write_config, projects_root, monkeypatch, tmp_path
+):
+    # Review of PR 1848: Restart needs a running session. An ERROR row goes to Resume,
+    # whose kill-first path ends the old agent; Restart must not stop it by pid instead.
+    _LiveFakeDaemon.instances.clear()
+    app = _live_app(write_config, monkeypatch, tmp_path)
+    with TestClient(app) as client:
+        pid = _live_error_row(client, app)
+        fake = _LiveFakeDaemon.instances[-1].fake
+        r = client.post(f"/api/instances/{pid}/restart")
+        assert r.status_code == 409, r.text
+        assert "use Resume" in r.json()["detail"]
+        assert fake.killed == []
+        row = app.state.hosted.get_instance(pid)
+        assert row.status is InstanceStatus.ERROR and not row.intentional_stop

@@ -155,6 +155,22 @@ browser. The conversation is still restored from the transcript — what a gap
 over that range covers is the non-conversation output, stderr lines and control
 frames, which the transcript does not hold.
 
+A permission prompt that was open when Clauster stopped is saved in
+`clauster.db`, and the reattach opens it again, so you can still allow or deny
+it. The saved prompt holds the tool input unredacted, because an allow sends that
+input back to the agent. The database is in the private `state_dir`, and the
+transcript of `claude` holds the same input. If the reattach cannot reach a
+running agent, the card names each lost prompt in its error text, for example
+`... could not restore, so it cannot be answered here: Bash (request ...)`. The
+request id is redacted when it has the shape of a UUID. While the agent can
+still wait on the prompt (an `Error` card or an `orphan` card), the prompt stays
+saved and the text comes back after each restart until you Resume, Kill or
+Forget the card. If the daemon no longer has the agent, the card names the
+prompt once and Clauster deletes the saved copy. If the agent ended while
+Clauster was down, it waits on nothing, and Clauster deletes the saved copy
+without a note. A prompt is saved with each dashboard poll, when you answer it,
+and when Clauster shuts down.
+
 ### When the daemon connection drops
 
 The claustrum daemon closes a connection that carries no traffic for 5 minutes.
@@ -203,7 +219,12 @@ comes depends on the case:
 **Resume** does not wait for that retry. On an `Error` card, Resume first ends
 the old agent through the daemon and waits for the answer. If the daemon refuses
 or does not answer the kill, Resume refuses, so that two agents never run on one
-conversation.
+conversation. **Forget** on an `Error` card does the same: it ends the old agent
+through the daemon first, or it refuses with `cannot forget: the agent may still
+be running, and the claustrum daemon cannot be reached to end it` and leaves the
+card as it was. A Stop or Kill of an `Error` row through the API does the same,
+with `cannot stop` or `cannot kill`. **Restart** works only on a running session.
+On any other card it refuses and points you to Resume.
 
 A new Direct Session also reconnects first, so it does not fail because of an
 old, closed connection. The reattach of the running sessions happens in the

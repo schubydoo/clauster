@@ -750,7 +750,26 @@ conversation in a new agent. If it offers **Kill**, the old `claude` process is
 still running: kill it first. Resume on an `Error` card first ends the old agent
 through the daemon. If the daemon refuses or does not answer that kill, Resume
 refuses with `cannot resume: the old agent may still be running`. Read
-`daemon.log` for the reason, and try again.
+`daemon.log` for the reason, and try again. Forget on an `Error` card does the
+same, and refuses with `cannot forget: the agent may still be running, and the
+claustrum daemon cannot be reached to end it` (or `the daemon refused or did not
+answer the kill`). A Stop or Kill of an `Error` row through the API refuses the
+same way, with `cannot stop` or `cannot kill`. With `claustrum.enabled: false`
+the text ends `no claustrum daemon is connected to end it`.
+
+### A Direct Session names a lost permission prompt
+
+**What you see:** after a Clauster restart, a Direct Session card shows an error
+that ends with `the agent was waiting on a permission prompt that Clauster could
+not restore, so it cannot be answered here: Bash (request ...)`.
+
+**Most likely cause:** the agent was waiting on that prompt when Clauster
+stopped, and the reattach did not find the agent running. The daemon no longer
+had the process, or it refused the reattach. If the card offers **Kill**, the
+`claude` process still runs and still waits on the prompt: kill it, then Resume
+the conversation. On an `Error` or `orphan` card the text comes back after each
+restart until you Resume, Kill or Forget the card. On a `Crashed` card with no
+`orphan` badge the agent is gone, so the text shows once.
 
 ## Getting more detail
 
