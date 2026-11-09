@@ -19,7 +19,7 @@
 # repology repo — this is one reason a minor base bump stays a manual, reviewed PR.
 
 # ----- builder: resolve the locked deps into a self-contained venv -----------
-FROM alpine:3.24.4@sha256:93b41ef40b1677fce8fcc64ff4af09daddfacf5040afde618bc46c1e2d1cc7d4 AS builder
+FROM alpine:3.24.4@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf AS builder
 
 # renovate: datasource=repology depName=alpine_3_24/uv versioning=loose
 ARG UV_VERSION=0.11.19
@@ -45,7 +45,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --no-editable --python python3
 
 # ----- runtime ---------------------------------------------------------------
-FROM alpine:3.24.4@sha256:93b41ef40b1677fce8fcc64ff4af09daddfacf5040afde618bc46c1e2d1cc7d4 AS runtime
+FROM alpine:3.24.4@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf AS runtime
 
 # openssl - for CVE mitigation
 # zlib - for CVE mitigation (CVE-2026-85091). The base image ships 1.3.2-r0, and apk
