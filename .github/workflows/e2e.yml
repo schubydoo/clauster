@@ -90,7 +90,7 @@ jobs:
         working-directory: tests/e2e
         env:
           # renovate: datasource=custom.chrome-for-testing depName=chrome-for-testing
-          CHROME_VERSION: "157.0.8103.38"
+          CHROME_VERSION: "157.0.8103.50"
         run: |
           exe=$(node_modules/.bin/browsers install "chrome@${CHROME_VERSION}" --path "$RUNNER_TEMP/cft" \
             | awk 'END{print $NF}')
