@@ -139,7 +139,7 @@ def test_external_session_rich_display_in_active_zone_and_project_detail(
 
 
 def test_connection_lost_banner_appears_when_server_dies(
-    browser: AgentBrowser, bridge_server: Server
+    browser: AgentBrowser, killable_server: Server
 ) -> None:
     """Killing the server mid-session surfaces the retry banner after the polls fail.
 
@@ -147,7 +147,7 @@ def test_connection_lost_banner_appears_when_server_dies(
     server process is killed so the fetch is refused) ``connLost`` flips and the banner
     renders. Asserts the banner appears (per #312, recovery + the 401 bounce stay manual).
     """
-    browser.goto(bridge_server.url)
+    browser.goto(killable_server.url)
     browser.expect_visible('[data-project="alpha"]')
 
     # The banner is gated on connLost (top-level, distinct from the per-hosted-session
@@ -156,8 +156,8 @@ def test_connection_lost_banner_appears_when_server_dies(
     browser.expect_hidden(banner)
 
     # Kill the server; the browser keeps polling and the fetches now fail.
-    assert bridge_server.proc is not None
-    bridge_server.proc.kill()
+    assert killable_server.proc is not None
+    killable_server.proc.kill()
 
     browser.expect_visible(banner, timeout_ms=_BANNER_TIMEOUT)
     assert "Lost connection" in browser.get_text(banner)
