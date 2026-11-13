@@ -7,6 +7,7 @@ import contextlib
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import psutil
@@ -18,6 +19,7 @@ from clauster.config import ClausterConfig
 from clauster.db.persistence import Persistence
 from clauster.models import InstanceStatus
 from clauster.runner import SessionRunner
+from clauster.spawn_coordinator import SpawnCoordinator
 
 _POSIX_ONLY = pytest.mark.skipif(sys.platform == "win32", reason="pty mode is POSIX-only")
 
@@ -1432,6 +1434,39 @@ async def test_late_login_screen_is_an_error_not_a_crash(runner_config, monkeypa
         assert inst.status is InstanceStatus.ERROR
         assert "not logged in" in (inst.error_detail or "")
         assert runner._registry._crash_counts.get("alpha", 0) == 0
+    finally:
+        await runner.stop(inst.instance_id)
+
+
+@_POSIX_ONLY
+async def test_startup_watch_never_shows_error_without_its_detail(runner_config, monkeypatch):
+    """TASK-542: no reader sees the ERROR row before its reason is on it.
+
+    The watch used to set ERROR, then wait on a thread for the detail, so a reader in that
+    wait saw ERROR with no reason (a macOS CI flake in the test above). A slow detail read
+    makes the old window wide on any host.
+    """
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "pty_not_logged_in")
+    monkeypatch.setenv("FAKE_CLAUDE_SLOW", "1.0")
+    monkeypatch.setattr("clauster.spawn_coordinator._READY_TIMEOUT", 0.3)
+    monkeypatch.setattr("clauster.spawn_coordinator._READY_POLL_INTERVAL", 0.05)
+    real_detail = SpawnCoordinator._keeper_failure_detail
+
+    def slow_detail(cls, sidecar, info):
+        time.sleep(0.5)
+        return real_detail(sidecar, info)
+
+    monkeypatch.setattr(SpawnCoordinator, "_keeper_failure_detail", classmethod(slow_detail))
+    runner, _ = _pty_runner(runner_config)
+    inst = await runner.spawn("alpha")
+    try:
+        assert inst.status is InstanceStatus.STARTING
+        for _ in range(500):
+            if inst.status is not InstanceStatus.STARTING:
+                break
+            await asyncio.sleep(0.02)
+        assert inst.status is InstanceStatus.ERROR
+        assert "not logged in" in (inst.error_detail or "")
     finally:
         await runner.stop(inst.instance_id)
 
