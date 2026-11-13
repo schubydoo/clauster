@@ -351,7 +351,9 @@ except the keys that another tab writes. These are `permissions` and `autoMode`
 (the Permissions tab), `hooks` (the Hooks tab) and `enabledPlugins` (the Plugins
 tab). A save that names one of them is refused (`422`), and the error names the
 tab to use. Clauster checks the shape of `env` only. It does not run or interpret
-any other value. Claude Code reads the values when a session starts.
+any other value. Claude Code reads the values when a session starts. A save
+whose objects and lists nest more than 64 levels deep is refused (`422`,
+"settings is nested too deeply"). The settings object itself is level 1.
 
 The tab has two modes, Rows and Raw JSON. In Rows mode, each top-level key of the
 file is one row, and the editor follows the JSON type of the value:
@@ -1060,6 +1062,13 @@ files. The frontmatter is the YAML block between the two `---` lines, which
 are called fences. If the frontmatter has one of these, Clauster refuses the
 whole save:
 
+- `[...]` or `{...}` values nested more than 64 levels deep. Clauster checks
+  the depth before it parses the frontmatter, because the time a parse takes
+  grows with the depth. A bracket in quotes, in a comment or in a block value
+  (`|` or `>`) does not count. A file on disk that nests deeper has no
+  readable frontmatter. The Skills list shows the error. The subagent editor
+  masks each line that looks like a secret. The skill editor masks every line
+  of the frontmatter if the frontmatter can hold a URL, a server or a hook.
 - A NEL (U+0085), LINE SEPARATOR (U+2028) or PARAGRAPH SEPARATOR (U+2029)
   character. YAML 1.1 reads it as a line break, and YAML 1.2 does not, so the
   two see different fields.
@@ -1325,6 +1334,7 @@ space at the start or the end is part of the name.
 | Enable or Disable fails with "is already enabled" or "is installed at project scope, not user" | The badge is the merged state, and the chosen scope already has that value or cannot override it | Pick the scope that the message names, or use the Local scope to override a project setting for yourself |
 | Removing a marketplace returns `404` with "is not declared in user settings" | A different scope declares it | Switch to the scope that declares it and remove it there |
 | A Settings save returns `422` with "Claude Code reads … only from" | The file holds a key (or a `true` value) that Claude Code ignores at this scope | Remove the key (in Rows mode or Raw JSON), or save it at the scope that the message names. For a `true` value, set it to `false` |
+| The Plugins tab shows `Failed to load (400).`, and the response names "returned output nested too deeply (more than 64 levels)" | The `claude plugin list --json` or `claude plugin marketplace list --json` output nests objects and lists more than 64 levels deep. Clauster reads no output nested deeper than 64 levels | Find the plugin or marketplace entry with the deep value in the output of that command on the host, and fix or remove it |
 
 Need to recover an earlier config? The five most recent pre-save snapshots
 sit next to the file as `clauster.yml.bak-*` — copy one back over

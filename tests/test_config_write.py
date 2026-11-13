@@ -2092,7 +2092,8 @@ def test_the_yaml12_view_reads_the_retry_text_too() -> None:
 
 
 def test_a_too_deep_header_is_not_retried() -> None:
-    header = "a: " + "[" * 5000 + "]" * 5000
+    # Block nesting: flow nesting this deep stops at the depth cap before any recursion.
+    header = "a:\n" + "- " * 5000 + "x\n"
     assert cw.cli_frontmatter_text(header) == header
 
 
@@ -2155,8 +2156,13 @@ def test_the_retry_replaces_tabs_after_a_lone_cr() -> None:
     assert cw._cli_retry_text("m:\r\tk: v") == 'm: "k: v"'
 
 
-def test_the_flow_list_check_treats_a_too_deep_value_as_not_a_list() -> None:
-    assert cw._is_yaml_list("[" * 5000 + "]" * 5000) is False
+def test_the_flow_list_check_refuses_to_answer_for_a_too_deep_value() -> None:
+    # TASK-502: neither answer is safe (False would quote a list the CLI reads as a list),
+    # so the depth error goes up to `cli_frontmatter_text`, which keeps the header.
+    with pytest.raises(cw.FlowNestingTooDeepError):
+        cw._is_yaml_list("[" * 5000 + "]" * 5000)
+    depth = cw.MAX_NESTING_DEPTH
+    assert cw._is_yaml_list("[" * depth + "]" * depth) is True
     assert cw._is_yaml_list("[a, b]") is True
     assert cw._is_yaml_list("[&x a, &x b]") is True  # a duplicate anchor: a list to YAML 1.2
     assert cw._is_yaml_list("[a] [b]") is False

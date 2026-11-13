@@ -1625,8 +1625,11 @@ def _changed_scalars(
             isinstance(node, yaml.SequenceNode)
             and type(have) is list
             and type(want) is list
-            and len(node.value) == len(have) == len(want)
+            and len(have) == len(want)
         ):
+            # `have` was loaded from `node`, one item per child (an `!!omap` or `!!pairs`
+            # entry is one tuple), so only `want` can differ in length. If `have` ever did,
+            # the strict zip raises, and the caller's `refuse_check_failures` refuses.
             stack.extend(zip(node.value, have, want, strict=True))
         elif not cw.same_yaml_value(have, want):
             return None  # a change the walk cannot pair with one scalar's text
