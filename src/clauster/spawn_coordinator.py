@@ -1163,10 +1163,22 @@ class SpawnCoordinator:
         keeper_dead = proc.poll() is not None
         detail = None
         if instance.error_detail is None and (keeper_dead or info.get("state") == "error"):
-            detail = await asyncio.to_thread(self._keeper_failure_detail, sidecar, info)
+            detail = await self._failure_detail_soon(sidecar, info)
         self._apply_pty_info(instance, info, proc, keeper_dead=keeper_dead)
         if instance.status is InstanceStatus.ERROR and instance.error_detail is None:
             instance.error_detail = detail
+
+    async def _failure_detail_soon(self, sidecar: Path, info: dict) -> str | None:
+        """Return ``_keeper_failure_detail``, with no suspension when a sidecar was read.
+
+        A sidecar ``error`` is a short string already in memory, so it is redacted inline: the
+        row stays STARTING across no ``await`` while the reason is fetched, so the poll loop
+        cannot read a dead bridge on it as a crash in that step. Only the keeper's own log
+        (no sidecar at all) is a disk read, and that goes to a thread.
+        """
+        if info:
+            return self._keeper_failure_detail(sidecar, info)
+        return await asyncio.to_thread(self._keeper_failure_detail, sidecar, info)
 
     async def _spawn_pty(  # pragma: skip-on-win — pty mode is pywinpty-gated, off on Windows CI
         self,
@@ -1372,8 +1384,8 @@ class SpawnCoordinator:
                     # (TASK-503), the keeper's own log. A STARTING row carries no detail yet:
                     # `_spawn_pty` sets one only on an ERROR row, which starts no watch. Read
                     # before the status changes, so no reader sees the end state without its
-                    # reason (TASK-542).
-                    detail = await asyncio.to_thread(self._keeper_failure_detail, sidecar, info)
+                    # reason (TASK-542), and with no await when the sidecar holds it.
+                    detail = await self._failure_detail_soon(sidecar, info)
                     if isinstance(info.get("error"), str):
                         # The keeper recorded why it failed before it exited, for example the
                         # login screen (TASK-533). That is a failed start, ERROR, as the

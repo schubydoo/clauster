@@ -1469,11 +1469,14 @@ async def test_startup_watch_sets_a_dead_keepers_reason_with_its_status(
     """TASK-542: the same order on the watch's dead-keeper branch.
 
     The keeper writes its sidecar error and exits after the readiness wait, so the watch
-    finds it dead with a reason, and the row must never read ERROR without that reason.
+    finds it dead with a reason, and the row must never read ERROR without that reason. The
+    sidecar has an ``error`` but no ``state``: the live branch reads that as STARTING while the
+    keeper lives, so normally the dead-keeper branch ends the row. A keeper that exits during
+    a live-branch tick ends it through the live branch instead, still with its reason.
     """
     keeper = (
         "import json, sys, time; time.sleep(0.6); "
-        "open(sys.argv[1], 'w').write(json.dumps({'state': 'error', 'error': 'keeper said no'}))"
+        "open(sys.argv[1], 'w').write(json.dumps({'error': 'keeper said no'}))"
     )
     monkeypatch.setattr(
         BridgeLaunch,
@@ -1485,10 +1488,32 @@ async def test_startup_watch_sets_a_dead_keepers_reason_with_its_status(
     _slow_keeper_failure_detail(monkeypatch)
     runner, _ = _pty_runner(runner_config)
     inst = await runner.spawn("alpha")
-    assert inst.status is InstanceStatus.STARTING
-    await _watch_until_resolved(inst)
-    assert inst.status is InstanceStatus.ERROR
-    assert inst.error_detail == "keeper said no"
+    try:
+        assert inst.status is InstanceStatus.STARTING
+        await _watch_until_resolved(inst)
+        assert inst.status is InstanceStatus.ERROR
+        assert inst.error_detail == "keeper said no"
+    finally:
+        await runner.stop(inst.instance_id)
+
+
+@pytest.mark.parametrize(
+    ("info", "expected"), [({"error": "boom"}, "boom"), ({"state": "exited"}, None)]
+)
+async def test_failure_detail_soon_does_not_suspend_on_a_sidecar(
+    runner_config, tmp_path, info, expected
+):
+    """TASK-542: a reason from a read sidecar is fetched with no await.
+
+    While the reason is fetched the row is still STARTING. Any suspension there would let the
+    poll loop read a dead bridge on that row as a crash (counted and announced) before the
+    watch sets ERROR. The coroutine must finish on its first step.
+    """
+    runner, _ = _pty_runner(runner_config)
+    coro = runner._spawner._failure_detail_soon(tmp_path / "k.keeper.json", info)
+    with pytest.raises(StopIteration) as done:
+        coro.send(None)
+    assert done.value.value == expected
 
 
 def _slow_keeper_failure_detail(monkeypatch) -> None:
@@ -1510,6 +1535,7 @@ async def _watch_until_resolved(inst) -> None:
         if inst.status is not InstanceStatus.STARTING:
             return
         await asyncio.sleep(0.02)
+    pytest.fail("the row never left STARTING")
 
 
 @_POSIX_ONLY
