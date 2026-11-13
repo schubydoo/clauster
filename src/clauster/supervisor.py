@@ -22,15 +22,17 @@ running ones (:func:`stop_background_job`). Conventions applied on the way in:
   are this job's own resume/cloud handles, not foreign secrets.
 * **PID-reuse defense** — a roster worker counts as alive only when the pid's
   start time matches the roster's ``procStart`` (boot-relative jiffies, compared
-  exactly where ``/proc`` is readable), the same posture as
-  :class:`~clauster.models.BridgePointer` liveness. Fail-closed: an unparsable
-  ``procStart`` reads as not-alive rather than trusting a bare pid.
+  exactly where ``/proc`` is readable; ``ps -o lstart=`` text to the second on
+  macOS), the same posture as :class:`~clauster.models.BridgePointer` liveness.
+  Fail-closed: an unparsable ``procStart`` reads as not-alive rather than
+  trusting a bare pid.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -47,7 +49,15 @@ from .claude_cli import resolve_binary
 from .claude_json import ClaudeJsonUnparseable
 from .config import INHERIT_PERMISSION_MODE
 from .models import BackgroundJob
-from .procutil import child_env, is_live_process, jiffies_to_epoch, proc_start_ticks
+from .procutil import (
+    child_env,
+    is_live_process,
+    jiffies_to_epoch,
+    lstart_to_epoch,
+    proc_create_time,
+    proc_start_ticks,
+    start_time_is_drift_prone,
+)
 from .redact import redact_for_disk
 from .trust import trust_directory
 
@@ -135,9 +145,19 @@ def worker_alive(
     coarse "same boot?" bound. Comparing epochs instead let an NTP correction read a live
     worker as gone, which also made the stop path refuse to signal it (TASK-504, the
     ``#1399`` shape). Elsewhere the epoch keeps the ``tolerance`` bound.
+
+    On macOS the CLI writes ``procStart`` as ``ps -o lstart=`` text in UTC instead
+    (:func:`~clauster.procutil.lstart_to_epoch`), which never parsed as ticks, so every
+    macOS worker read as not alive and Stop never signalled one (TASK-534). That text is
+    compared with the live create time, truncated to the same whole second (see
+    :func:`_lstart_matches`), and ``tolerance`` does not apply to it. Where the create time
+    drifts with the wall clock (Linux, which the CLI never writes this text on), the text
+    is not compared at all and reads as not alive, as it did before.
     """
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
         return False
+    if isinstance(proc_start, str) and not proc_start.strip().isdigit():
+        return not start_time_is_drift_prone() and _lstart_matches(pid, proc_start)
     try:
         jiffies = int(str(proc_start))
     except (TypeError, ValueError):
@@ -147,6 +167,30 @@ def worker_alive(
         return False
     # str(): an int proc_start would read as an epoch in is_live_process, not as ticks.
     return is_live_process(pid, str(jiffies), tolerance=tolerance, start_ticks=jiffies)
+
+
+def _lstart_matches(pid: int, proc_start: str) -> bool:
+    """Whether live ``pid`` started in the UTC second that ``ps -o lstart=`` text names.
+
+    Both halves are fixed for the life of the process: the kernel sets its start timestamp
+    at fork and keeps it across exec, the CLI read the text once from it, and macOS's psutil
+    ``create_time`` returns that same timestamp (``tv_sec + tv_usec / 1e6``) on every call. So
+    an NTP correction moves neither (unlike Linux, where ``create_time`` is re-derived from a
+    moving boot time). ``ps`` prints only ``tv_sec``, so the match is exact on the whole
+    second, with no slack: that is the CLI's own precision, as it compares the same text
+    with plain string equality. A pid recycled in another second reads as not alive. A pid
+    recycled inside the same second cannot be told apart at this precision, by us or by
+    the CLI.
+
+    Unparsable text, a dead or zombie pid, and an unreadable create time all fail closed.
+    """
+    started = lstart_to_epoch(proc_start)
+    if started is None:
+        return False
+    created = proc_create_time(pid)
+    if created is None:
+        return False
+    return math.floor(created) == started
 
 
 def _job_from_state(job_id: str, data: dict, workers: dict[str, dict]) -> BackgroundJob:

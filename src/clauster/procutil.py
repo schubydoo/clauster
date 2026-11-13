@@ -24,6 +24,7 @@ import shutil
 import subprocess
 import sys
 from collections.abc import Callable, Iterable
+from datetime import UTC, datetime
 from pathlib import Path
 
 import psutil
@@ -175,6 +176,56 @@ def jiffies_to_epoch(jiffies: int) -> float | None:
         # function is ever consulted. One rule for the family, not three.
         _log.debug("host cannot express boot time; start-time checks degrade to cmdline+alive")
         return None
+
+
+# ``ps -o lstart=`` under ``LC_ALL=C``: ``%a %b %e %H:%M:%S %Y``, e.g. ``Sat Nov  8 19:08:12
+# 2026`` (``%e`` pads a one-digit day with a space). Names are matched literally rather than
+# through ``time.strptime``, whose ``%a``/``%b`` follow clauster's own locale, not the C locale
+# the text was written in.
+_LSTART_RE = re.compile(
+    r"(Mon|Tue|Wed|Thu|Fri|Sat|Sun) +"
+    r"(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) +"
+    r"(\d{1,2}) (\d{2}):(\d{2}):(\d{2}) (\d{4})"
+)
+_LSTART_DAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+_LSTART_MONTHS = (
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+)  # fmt: skip
+
+
+def lstart_to_epoch(text: str) -> int | None:
+    """Parse a ``ps -o lstart=`` start time, written in UTC, to whole epoch seconds.
+
+    Off Linux and Windows the Claude Code CLI records a process's ``procStart`` as the trimmed
+    output of ``LC_ALL=C TZ=UTC ps -o lstart= -p <pid>``, not as boot-relative ticks. (Read
+    from the non-Linux branch of the CLI 2.1.319 bundle's start-token function. Only a Linux
+    bundle was available, where that branch is dead code, so the macOS format is inferred.)
+    ``TZ=UTC`` makes the text UTC, so a host time-zone or DST change moves neither the stored
+    value nor this parse. The text has one-second precision: the result is the start time
+    truncated to the second.
+
+    ``None`` for anything else, including a weekday that does not match the date: a value this
+    cannot read exactly is not evidence of identity.
+    """
+    match = _LSTART_RE.fullmatch(text.strip())
+    if match is None:
+        return None
+    weekday, month, day, hour, minute, second, year = match.groups()
+    try:
+        started = datetime(
+            int(year),
+            _LSTART_MONTHS.index(month) + 1,
+            int(day),
+            int(hour),
+            int(minute),
+            int(second),
+            tzinfo=UTC,
+        )
+    except ValueError:
+        return None  # Feb 30, hour 24, a leap second: not a time ps prints
+    if _LSTART_DAYS[started.weekday()] != weekday:
+        return None
+    return int(started.timestamp())
 
 
 def is_bridge_cmdline(cmdline: list[str]) -> bool:
