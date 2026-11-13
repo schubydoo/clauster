@@ -7,6 +7,7 @@ import contextlib
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import psutil
@@ -18,6 +19,7 @@ from clauster.config import ClausterConfig
 from clauster.db.persistence import Persistence
 from clauster.models import InstanceStatus
 from clauster.runner import SessionRunner
+from clauster.spawn_coordinator import SpawnCoordinator
 
 _POSIX_ONLY = pytest.mark.skipif(sys.platform == "win32", reason="pty mode is POSIX-only")
 
@@ -1434,6 +1436,106 @@ async def test_late_login_screen_is_an_error_not_a_crash(runner_config, monkeypa
         assert runner._registry._crash_counts.get("alpha", 0) == 0
     finally:
         await runner.stop(inst.instance_id)
+
+
+@_POSIX_ONLY
+async def test_startup_watch_never_shows_error_without_its_detail(runner_config, monkeypatch):
+    """TASK-542: no reader sees the ERROR row before its reason is on it.
+
+    The watch used to set ERROR, then wait on a thread for the detail, so a reader in that
+    wait saw ERROR with no reason (a macOS CI flake in the test above). A slow detail read
+    makes the old window wide on any host.
+    """
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "pty_not_logged_in")
+    monkeypatch.setenv("FAKE_CLAUDE_SLOW", "1.0")
+    monkeypatch.setattr("clauster.spawn_coordinator._READY_TIMEOUT", 0.3)
+    monkeypatch.setattr("clauster.spawn_coordinator._READY_POLL_INTERVAL", 0.05)
+    _slow_keeper_failure_detail(monkeypatch)
+    runner, _ = _pty_runner(runner_config)
+    inst = await runner.spawn("alpha")
+    try:
+        assert inst.status is InstanceStatus.STARTING
+        await _watch_until_resolved(inst)
+        assert inst.status is InstanceStatus.ERROR
+        assert "not logged in" in (inst.error_detail or "")
+    finally:
+        await runner.stop(inst.instance_id)
+
+
+@_POSIX_ONLY
+async def test_startup_watch_sets_a_dead_keepers_reason_with_its_status(
+    runner_config, monkeypatch
+) -> None:
+    """TASK-542: the same order on the watch's dead-keeper branch.
+
+    The keeper writes its sidecar error and exits after the readiness wait, so the watch
+    finds it dead with a reason, and the row must never read ERROR without that reason. The
+    sidecar has an ``error`` but no ``state``: the live branch reads that as STARTING while the
+    keeper lives, so normally the dead-keeper branch ends the row. A keeper that exits during
+    a live-branch tick ends it through the live branch instead, still with its reason.
+    """
+    keeper = (
+        "import json, sys, time; time.sleep(0.6); "
+        "open(sys.argv[1], 'w').write(json.dumps({'error': 'keeper said no'}))"
+    )
+    monkeypatch.setattr(
+        BridgeLaunch,
+        "_keeper_launch_cmd",
+        staticmethod(lambda sidecar, *a, **k: [sys.executable, "-c", keeper, str(sidecar)]),
+    )
+    monkeypatch.setattr("clauster.spawn_coordinator._READY_TIMEOUT", 0.2)
+    monkeypatch.setattr("clauster.spawn_coordinator._STARTUP_WATCH_INTERVAL", 0.1)
+    _slow_keeper_failure_detail(monkeypatch)
+    runner, _ = _pty_runner(runner_config)
+    inst = await runner.spawn("alpha")
+    try:
+        assert inst.status is InstanceStatus.STARTING
+        await _watch_until_resolved(inst)
+        assert inst.status is InstanceStatus.ERROR
+        assert inst.error_detail == "keeper said no"
+    finally:
+        await runner.stop(inst.instance_id)
+
+
+@pytest.mark.parametrize(
+    ("info", "expected"), [({"error": "boom"}, "boom"), ({"state": "exited"}, None)]
+)
+async def test_failure_detail_soon_does_not_suspend_on_a_sidecar(
+    runner_config, tmp_path, info, expected
+):
+    """TASK-542: a reason from a read sidecar is fetched with no await.
+
+    While the reason is fetched the row is still STARTING. Any suspension there would let the
+    poll loop read a dead bridge on that row as a crash (counted and announced) before the
+    watch sets ERROR. The coroutine must finish on its first step.
+    """
+    runner, _ = _pty_runner(runner_config)
+    coro = runner._spawner._failure_detail_soon(tmp_path / "k.keeper.json", info)
+    with pytest.raises(StopIteration) as done:
+        coro.send(None)
+    assert done.value.value == expected
+
+
+def _slow_keeper_failure_detail(monkeypatch) -> None:
+    """Make the detail read slow, so a reader in an await after the status change sees it."""
+    real_detail = SpawnCoordinator._keeper_failure_detail
+
+    def slow_detail(cls, sidecar, info):
+        time.sleep(0.5)
+        return real_detail(sidecar, info)
+
+    monkeypatch.setattr(SpawnCoordinator, "_keeper_failure_detail", classmethod(slow_detail))
+
+
+async def _watch_until_resolved(inst) -> None:
+    """Sample the row until it leaves STARTING; fail if it ever reads ERROR with no reason."""
+    for _ in range(500):
+        if inst.status is InstanceStatus.ERROR:
+            assert inst.error_detail is not None, "ERROR row seen without its reason"
+        if inst.status is not InstanceStatus.STARTING:
+            return
+        await asyncio.sleep(0.02)
+    pytest.fail("the row never left STARTING")
 
 
 @_POSIX_ONLY

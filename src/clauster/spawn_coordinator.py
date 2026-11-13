@@ -1090,9 +1090,18 @@ class SpawnCoordinator:
         instance.keeper_pid, instance.keeper_proc_start, instance.keeper_start_ticks = found
 
     def _apply_pty_info(
-        self, instance: RemoteControlInstance, info: dict, proc: subprocess.Popen
+        self,
+        instance: RemoteControlInstance,
+        info: dict,
+        proc: subprocess.Popen,
+        *,
+        keeper_dead: bool | None = None,
     ) -> None:
-        """Fold the keeper sidecar into the instance (the pty analogue of `_apply_markers`)."""
+        """Fold the keeper sidecar into the instance (the pty analogue of `_apply_markers`).
+
+        ``keeper_dead`` is the caller's own reading of ``proc.poll()``, when it already decided
+        from it (``_apply_pty_info_with_detail``); otherwise it is read here.
+        """
         prev_status = instance.status
         bp = _row_int(info.get("bridge_pid"))
         if bp is not None:
@@ -1125,7 +1134,8 @@ class SpawnCoordinator:
         # carries one is what lets an advisory go away instead of sticking to the card.
         instance.notice = _sidecar_notice(info)
 
-        keeper_dead = proc.poll() is not None
+        if keeper_dead is None:
+            keeper_dead = proc.poll() is not None
         # A pty bridge is RUNNING once the keeper reports readiness: either a captured
         # connect URL, or state == "ready" (a --continue resume that reconnected without
         # re-printing the URL). A live keeper+bridge must never read as ERROR.
@@ -1138,6 +1148,37 @@ class SpawnCoordinator:
             instance.status = InstanceStatus.STARTING  # let the startup-watch promote it
         if prev_status is not InstanceStatus.RUNNING and instance.status is InstanceStatus.RUNNING:
             self._record._emit_lifecycle("ready", instance)  # only on the transition
+
+    async def _apply_pty_info_with_detail(
+        self, instance: RemoteControlInstance, info: dict, proc: subprocess.Popen, sidecar: Path
+    ) -> None:
+        """Fold the sidecar in, and give an ERROR row its ``error_detail`` in the same step.
+
+        The detail is read BEFORE the row changes (TASK-542). Reading it after
+        ``_apply_pty_info`` awaited a thread hop while the row already read ERROR, so the poll
+        loop, an API read, or another task's persist saw ERROR with no reason. The keeper's
+        liveness is read once and handed down, so the row cannot end ERROR on a death this
+        step did not fetch a detail for; a death after the read is the next tick's to see.
+        """
+        keeper_dead = proc.poll() is not None
+        detail = None
+        if instance.error_detail is None and (keeper_dead or info.get("state") == "error"):
+            detail = await self._failure_detail_soon(sidecar, info)
+        self._apply_pty_info(instance, info, proc, keeper_dead=keeper_dead)
+        if instance.status is InstanceStatus.ERROR and instance.error_detail is None:
+            instance.error_detail = detail
+
+    async def _failure_detail_soon(self, sidecar: Path, info: dict) -> str | None:
+        """Return ``_keeper_failure_detail``, with no suspension when a sidecar was read.
+
+        A sidecar ``error`` is a short string already in memory, so it is redacted inline: the
+        row stays STARTING across no ``await`` while the reason is fetched, so the poll loop
+        cannot read a dead bridge on it as a crash in that step. Only the keeper's own log
+        (no sidecar at all) is a disk read, and that goes to a thread.
+        """
+        if info:
+            return self._keeper_failure_detail(sidecar, info)
+        return await asyncio.to_thread(self._keeper_failure_detail, sidecar, info)
 
     async def _spawn_pty(  # pragma: skip-on-win — pty mode is pywinpty-gated, off on Windows CI
         self,
@@ -1202,15 +1243,11 @@ class SpawnCoordinator:
         )
         info = await asyncio.to_thread(self._await_ready_pty, sidecar, proc)
         await self._adopt_keeper_identity(instance, info, proc)
-        self._apply_pty_info(instance, info, proc)
+        # An ERROR row carries whatever the keeper recorded (openpty/spawn failure, or its own
+        # log when it died before any sidecar), redacted and bounded; the bridge's own failure
+        # reason, if any, is in its --debug-file on disk.
+        await self._apply_pty_info_with_detail(instance, info, proc, sidecar)
         await asyncio.to_thread(self._flush_redacted_mirror, instance)
-        if instance.status is InstanceStatus.ERROR:
-            # Surface whatever the keeper recorded (openpty/spawn failure, or its own log
-            # when it died before any sidecar), redacted and bounded; the bridge's own
-            # failure reason, if any, is in its --debug-file on disk.
-            instance.error_detail = await asyncio.to_thread(
-                self._keeper_failure_detail, sidecar, info
-            )
         await self._registry._persist()
         if instance.status is InstanceStatus.STARTING:
             self._start_startup_watch(instance.instance_id)
@@ -1342,20 +1379,21 @@ class SpawnCoordinator:
                 ):
                     sidecar = self._sidecar_path_for(log_path)
                     info = await asyncio.to_thread(self._read_sidecar, sidecar) or {}
+                    # The sidecar's reason, or, for a bootloader unpack that outlasts the
+                    # readiness wait and fails before the keeper's first sidecar write
+                    # (TASK-503), the keeper's own log. A STARTING row carries no detail yet:
+                    # `_spawn_pty` sets one only on an ERROR row, which starts no watch. Read
+                    # before the status changes, so no reader sees the end state without its
+                    # reason (TASK-542), and with no await when the sidecar holds it.
+                    detail = await self._failure_detail_soon(sidecar, info)
                     if isinstance(info.get("error"), str):
                         # The keeper recorded why it failed before it exited, for example the
                         # login screen (TASK-533). That is a failed start, ERROR, as the
                         # readiness wait reads it, and not a crash or a clean stop.
-                        self._apply_pty_info(instance, info, proc)
+                        self._apply_pty_info(instance, info, proc, keeper_dead=True)
                     else:
                         self._reconcile_status(instance, False)
-                    # The sidecar's reason, or, for a bootloader unpack that outlasts the
-                    # readiness wait and fails before the keeper's first sidecar write
-                    # (TASK-503), the keeper's own log. A STARTING row carries no detail yet:
-                    # `_spawn_pty` sets one only on an ERROR row, which starts no watch.
-                    instance.error_detail = await asyncio.to_thread(
-                        self._keeper_failure_detail, sidecar, info
-                    )
+                    instance.error_detail = detail
                 else:
                     self._reconcile_status(instance, False)
                 await self._registry._persist()
@@ -1369,19 +1407,16 @@ class SpawnCoordinator:
                 sidecar = self._sidecar_path_for(log_path)
                 info = await asyncio.to_thread(self._read_sidecar, sidecar)
                 await self._adopt_keeper_identity(instance, info or {}, proc)
-                self._apply_pty_info(instance, info or {}, proc)
+                # A late keeper error (its sidecar says so while a frozen launch's bootloader
+                # still runs, deleting its unpack dir, or claude's login screen, TASK-533):
+                # keep the reason, as `_spawn_pty` does, because this watch never looks at
+                # the row again.
+                await self._apply_pty_info_with_detail(instance, info or {}, proc, sidecar)
                 # Keep the at-rest mirror current during pty startup too: poll_once
                 # can't yet (bridge_pid is still unknown until the sidecar reveals it),
                 # so without this the public log would stale out after _spawn_pty's
                 # one-time flush if the bridge logs more before registering.
                 await asyncio.to_thread(self._flush_redacted_mirror, instance)
-                if instance.status is InstanceStatus.ERROR and instance.error_detail is None:
-                    # A late keeper error (its sidecar says so while a frozen launch's
-                    # bootloader still runs, deleting its unpack dir): keep the reason, as
-                    # `_spawn_pty` does, because this watch never looks at the row again.
-                    instance.error_detail = await asyncio.to_thread(
-                        self._keeper_failure_detail, sidecar, info or {}
-                    )
                 if instance.status is not InstanceStatus.STARTING:
                     await self._registry._persist()
                     return
