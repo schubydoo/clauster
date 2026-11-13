@@ -377,8 +377,9 @@ def test_lstart_to_epoch_reads_the_cli_format():
 @pytest.mark.skipif(not hasattr(time, "tzset"), reason="time.tzset is POSIX-only")
 def test_lstart_to_epoch_ignores_the_host_time_zone(monkeypatch):
     # The text is UTC (the CLI sets TZ=UTC), so the host zone must not shift the parse. CI
-    # hosts run in UTC, where a naive local-time parse would also pass.
-    monkeypatch.setenv("TZ", "America/New_York")
+    # hosts run in UTC, where a naive local-time parse would also pass. A POSIX zone string, not
+    # a tzdata name: the Alpine smoke-test image has no tzdata, so a name falls back to UTC.
+    monkeypatch.setenv("TZ", "EST5")
     time.tzset()
     try:
         assert time.localtime(_LSTART_EPOCH).tm_hour != 19  # the zone really is not UTC
