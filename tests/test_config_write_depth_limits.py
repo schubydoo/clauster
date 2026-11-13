@@ -22,6 +22,7 @@ from clauster import config_write_skills as sk
 from clauster import config_write_subagents as sub
 from clauster.app import create_app
 from clauster.config import load_config
+from conftest import FAKE_CLAUDE
 
 MAX = cw.MAX_NESTING_DEPTH
 MASK = cw.REDACTION_SENTINEL
@@ -355,7 +356,6 @@ def test_sentinel_holders_marks_every_container_on_the_path_to_a_mask() -> None:
 
 # --- settings: through the route --------------------------------------------------------------
 
-FAKE_CLAUDE = Path(__file__).resolve().parent / "fixtures" / "fake_claude" / "claude"
 _ON = "config_write:\n  enabled: true\n  allow_user_scope: true\n"
 
 
@@ -400,11 +400,13 @@ def test_list_readers_take_output_at_the_cap_and_refuse_one_more_level(
 ) -> None:
     # The list is level 1 and its entry level 2, so the value under `x` gets MAX - 2.
     ok = json.dumps(wrap(_nested(MAX - 2)))
-    out = getattr(plugins, reader)("claude", tmp_path, run=_fake_run(ok))
+    # The binary is resolved before the injected `run` is called, so pass the stub's path
+    # (the `.cmd` wrapper on Windows, which Python 3.11's `shutil.which` needs).
+    out = getattr(plugins, reader)(str(FAKE_CLAUDE), tmp_path, run=_fake_run(ok))
     assert out[0]["x"] == _nested(MAX - 2)
     deep = json.dumps(wrap(_nested(MAX - 1)))
     with pytest.raises(plugins.PluginCliError, match=rf"nested too deeply \(more than {MAX}"):
-        getattr(plugins, reader)("claude", tmp_path, run=_fake_run(deep))
+        getattr(plugins, reader)(str(FAKE_CLAUDE), tmp_path, run=_fake_run(deep))
 
 
 @pytest.mark.parametrize(
