@@ -112,6 +112,7 @@ from __future__ import annotations
 
 import base64
 import bisect
+import errno
 import itertools
 import math
 import os
@@ -153,6 +154,10 @@ SKILL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 MAX_SKILL_MD_BYTES = 64 * 1024
 MAX_FILE_BYTES = 256 * 1024
 MAX_TOTAL_BYTES = 2 * 1024 * 1024
+#: The most entries (files and directories, at any depth) a save keeps from a stored skill.
+#: The byte cap does not bound them: empty files and directories count no bytes, and the
+#: save lists and copies each one under its lock (TASK-500).
+MAX_STORED_ENTRIES = 4096
 
 # THE SAME OBJECT config_write_subagents uses — an alias, not a copy, so the two
 # parsers on this write tier cannot drift apart again (#1352). Change it in config_write.
@@ -1253,16 +1258,91 @@ def _is_contained_regular_file(path: Path, root_resolved: Path) -> bool:
     return real == root_resolved or root_resolved in real.parents
 
 
-def _skill_md_bytes(skills_root: Path, name: str) -> bytes:
-    """Return the current on-disk ``SKILL.md`` bytes (``b""`` if absent)."""
+def _stored_skill_dir(skills_root: Path, name: str) -> Path:
+    """Return the resolved skill directory ``skills_root/name``; refuse one that is not (→ 422).
+
+    Containment first (:func:`~clauster.config_file_writer.resolve_contained_path`). A
+    missing directory is returned as it is: a create, or a read of nothing. A regular file
+    (or any other entry) at ``skills/<name>`` is the operator's own state, not a server
+    fault, so it is a refusal that names it, never a 500 (TASK-500).
+    """
     try:
-        target = fw.resolve_contained_path(skills_root, f"{name}/{SKILL_FILENAME}")
+        skill_dir = fw.resolve_contained_path(skills_root, name)
     except fw.PathEscapeError as exc:
         raise cw.PathEscapeError(str(exc)) from exc
     try:
-        return target.read_bytes()
+        info = os.lstat(skill_dir)
     except FileNotFoundError:
-        return b""
+        return skill_dir
+    except OSError as exc:
+        raise cw.InvalidCandidateError(
+            f"skill {name!r} could not be read: {exc.strerror or exc}"
+        ) from exc
+    if not stat.S_ISDIR(info.st_mode):
+        raise cw.InvalidCandidateError(
+            f"skill {name!r} is not a directory: skills/{name} is a file or another entry, so "
+            "it holds no skill. Move it aside on the host, then try again"
+        )
+    return skill_dir
+
+
+def _unreadable(relative: str, exc: OSError) -> cw.InvalidCandidateError:
+    """Return the refusal for a skill member that the file system would not let us read."""
+    return cw.InvalidCandidateError(f"{relative!r} could not be read: {exc.strerror or exc}")
+
+
+def _read_member_bytes(path: Path, relative: str) -> bytes | None:
+    """Return the bytes of the regular file at ``path``, or None when nothing is there.
+
+    Never blocks and never follows a final symlink. ``lstat`` comes first, so a directory,
+    a FIFO, a socket, a device or a symlink is refused (→ 422) before any open. The open
+    uses :data:`_OPEN_FLAGS` (``O_NOFOLLOW`` and ``O_NONBLOCK``), and the open descriptor
+    must be that same regular file (``fstat``). An entry that cannot be read is refused
+    too, naming the cause: never a 500, and never a worker thread blocked on a FIFO
+    (TASK-500, TASK-531). A path through a file (``NotADirectoryError``) holds nothing.
+    """
+    try:
+        seen = os.lstat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    except OSError as exc:
+        raise _unreadable(relative, exc) from exc
+    if stat.S_ISDIR(seen.st_mode):
+        raise cw.InvalidCandidateError(f"{relative!r} is a directory in the skill, not a file")
+    if not stat.S_ISREG(seen.st_mode):
+        raise cw.InvalidCandidateError(
+            f"{relative!r} is a symlink or not a regular file (a FIFO, a socket or a device), "
+            "so it is not read. Replace it with a regular file on the host"
+        )
+    try:
+        fd = os.open(path, _OPEN_FLAGS)
+    except OSError as exc:
+        raise _unreadable(relative, exc) from exc
+    try:
+        fh = os.fdopen(fd, "rb")
+    except BaseException:  # pragma: no cover - fdopen of a fresh descriptor does not fail
+        os.close(fd)  # os.fdopen did not take the descriptor, so close it here
+        raise
+    with fh:
+        info = os.fstat(fh.fileno())
+        if not stat.S_ISREG(info.st_mode) or not _same_object(info, seen):
+            raise cw.InvalidCandidateError(f"{relative!r} changed while it was read. Try again")
+        try:
+            return fh.read()
+        except OSError as exc:  # pragma: no cover - EIO from the disk itself
+            raise _unreadable(relative, exc) from exc
+
+
+def _skill_md_bytes(skills_root: Path, name: str) -> bytes:
+    """Return the current on-disk ``SKILL.md`` bytes (``b""`` if absent).
+
+    Read as :func:`_read_member_bytes` reads, so a FIFO at ``SKILL.md`` cannot block the
+    save's check outside the lock nor its re-check inside it, and a symlinked ``SKILL.md``
+    (which the save's walk refuses anyway) is refused here first (TASK-500).
+    """
+    skill_dir = _stored_skill_dir(skills_root, name)
+    data = _read_member_bytes(skill_dir / SKILL_FILENAME, SKILL_FILENAME)
+    return b"" if data is None else data
 
 
 def _skill_md_hash(skills_root: Path, name: str) -> str:
@@ -1378,13 +1458,15 @@ def _changed(member: Path) -> cw.InvalidCandidateError:
 
 
 def _list_stored_dir(
-    path: Path, expected: os.stat_result, member: Path
+    path: Path, expected: os.stat_result, member: Path, *, limit: int
 ) -> list[tuple[str, os.stat_result]]:
     """Return ``(name, lstat)`` for each entry of the stored directory ``path``.
 
     The listing is of the directory the walk saw (``expected``), never of a symlink
     swapped in since: on POSIX the directory is opened with ``O_NOFOLLOW``, its identity
-    is checked on the open descriptor, and the entries are read from that descriptor.
+    is checked on the open descriptor, and the entries are read from that descriptor. It
+    stops after ``limit + 1`` entries, so a huge directory costs no more than the walk's
+    entry cap: a result longer than ``limit`` means the directory holds too many.
     """
     if os.scandir in os.supports_fd:
         fd = os.open(path, _OPEN_FLAGS | getattr(os, "O_DIRECTORY", 0))
@@ -1392,13 +1474,16 @@ def _list_stored_dir(
             if not _same_object(os.fstat(fd), expected):
                 raise _changed(member)
             with os.scandir(fd) as entries:
-                return [(e.name, e.stat(follow_symlinks=False)) for e in entries]
+                return [
+                    (e.name, e.stat(follow_symlinks=False))
+                    for e in itertools.islice(entries, limit + 1)
+                ]
         finally:
             os.close(fd)
     # Windows has no descriptor listing: list by path, then make sure that the directory
     # is still the one the walk saw. A swap and a swap back inside that instant remain.
     with os.scandir(path) as entries:  # pragma: no cover - Windows only
-        listed = [(e.name, os.lstat(e.path)) for e in entries]
+        listed = [(e.name, os.lstat(e.path)) for e in itertools.islice(entries, limit + 1)]
     if not _same_object(os.lstat(path), expected):  # pragma: no cover - Windows only
         raise _changed(member)
     return listed  # pragma: no cover - Windows only
@@ -1452,9 +1537,57 @@ def _copy_stored_file(src: Path, dst: Path, expected: os.stat_result, member: Pa
     os.utime(dst, ns=(info.st_atime_ns, info.st_mtime_ns))
 
 
+def _keep_replaced_mode(
+    target: Path, stored_path: Path, replaced_files: dict[tuple[int, int], os.stat_result]
+) -> None:
+    """Give the new text of a replaced member the mode of the stored file it replaces (POSIX).
+
+    ``stored_path`` is the request key in the stored skill, looked up by the file system's
+    own name rules, as the walk matched it. Its mode is taken only from an entry that the
+    walk recorded as replaced (the same ``st_dev`` and ``st_ino``), so a new member keeps
+    the default mode, and an executable script keeps its x bit when its text is saved
+    (TASK-500), as :func:`~clauster.config_file_writer.write_file` keeps a mode on replace.
+    As for a kept file (:func:`_copy_stored_file`), setuid and setgid are cleared, and the
+    stored group is set back or the group bits are cleared. Unlike a kept file, the sticky
+    bit is cleared too.
+    """
+    try:
+        now = os.lstat(stored_path)
+    except OSError:
+        return  # nothing is stored under the key: a new member
+    stored = replaced_files.get((now.st_dev, now.st_ino))
+    if stored is not None:
+        # No sticky bit either: a file gains nothing from it, and macOS refuses (EFTYPE) a
+        # chmod that sets it on a file for any user but root.
+        mode = stat.S_IMODE(stored.st_mode) & ~(_SET_ID_BITS | stat.S_ISVTX)
+        os.chmod(target, _kept_mode(target, stored, mode))
+
+
 def _fold(parts: tuple[str, ...]) -> tuple[str, ...]:
     """Return path parts folded loosely for case and Unicode normalization."""
     return tuple(unicodedata.normalize("NFC", part).casefold() for part in parts)
+
+
+def _too_many_entries(name: str) -> cw.InvalidCandidateError:
+    """Return the refusal for a stored skill that holds more than :data:`MAX_STORED_ENTRIES`."""
+    return cw.InvalidCandidateError(
+        f"skill {name!r} holds more than {MAX_STORED_ENTRIES} stored files and "
+        "directories, so the save cannot keep them all. Nothing was written, and no "
+        "stored file was dropped. Remove stored files on the host, then save again"
+    )
+
+
+def _bounded_names(directory: Path) -> list[str] | None:
+    """Return the entry names of the stored ``directory``, or None when it holds too many.
+
+    Listed one past :data:`MAX_STORED_ENTRIES` at most, so matching a request key costs no
+    more than the walk's cap allows. None leaves the refusal to the walk, which names the
+    true cause: the cap for a huge directory in the skill, or the symlink that a listing
+    through a parent component followed out of it.
+    """
+    with os.scandir(directory) as entries:
+        names = [entry.name for entry in itertools.islice(entries, MAX_STORED_ENTRIES + 1)]
+    return None if len(names) > MAX_STORED_ENTRIES else names
 
 
 def _stored_spelling(skill_dir: Path, parts: tuple[str, ...]) -> tuple[str, ...] | None:
@@ -1469,14 +1602,18 @@ def _stored_spelling(skill_dir: Path, parts: tuple[str, ...]) -> tuple[str, ...]
     rule the fold does not model (an NTFS 8.3 short name) then never picks a name.
     Anything else is None: the save keeps and counts the stored file, and the named
     write refuses if the key then collides with that copy. A wrong None only refuses or
-    over-counts. A wrong match would delete a stored file. ``os.listdir`` follows a
-    stored symlink in a parent component, which does no harm: the walk refuses the link.
+    over-counts. A wrong match would delete a stored file. The listing follows a stored
+    symlink in a parent component, which does no harm: the walk refuses the link. Each
+    listing is bounded (:func:`_bounded_names`), so a huge directory is never read in
+    full here; it gives None, and the walk refuses the tree (TASK-500).
     """
     current = skill_dir
     out: list[str] = []
     for part in parts:
         try:
-            names = os.listdir(current)
+            names = _bounded_names(current)
+            if names is None:
+                return None  # too many to match: the walk refuses the tree
             if part in names:
                 out.append(part)
                 current = current / part
@@ -1530,7 +1667,7 @@ def _keep_stored_members(
     *,
     name: str,
     sent: int,
-) -> list[tuple[Path, os.stat_result]]:
+) -> tuple[list[tuple[Path, os.stat_result]], dict[tuple[int, int], os.stat_result]]:
     """Copy into ``staging`` every stored member of the skill that the request does not name.
 
     A save keeps every member it does not name (TASK-496). The walk follows no symlink
@@ -1539,18 +1676,31 @@ def _keep_stored_members(
     FIFO, a socket, a device) is refused (→ 422) and nothing is written: clauster
     cannot keep such a member byte for byte without following it, and dropping it would
     delete the operator's data. The byte cap covers the kept files plus the ``sent`` bytes,
-    and the copy stops as soon as they pass it.
+    and the copy stops as soon as they pass it. A tree of more than
+    :data:`MAX_STORED_ENTRIES` entries is refused the same way, as soon as the walk lists
+    one too many (TASK-500).
+
+    Return the kept directories, and the ``lstat`` of each stored file that the request
+    replaces, by ``(st_dev, st_ino)``, so its new text can keep the stored mode.
     """
     try:
         root = os.lstat(skill_dir)
     except FileNotFoundError:
-        return []  # a create: nothing is stored yet
+        return [], {}  # a create: nothing is stored yet
     dirs: list[tuple[Path, os.stat_result]] = [(Path(), root)]
     pending = [(Path(), root)]
+    replaced_files: dict[tuple[int, int], os.stat_result] = {}
     kept = 0
+    entries = 0
     while pending:
         rel, expected = pending.pop()
-        for entry_name, info in _list_stored_dir(skill_dir / rel, expected, rel):
+        listing = _list_stored_dir(
+            skill_dir / rel, expected, rel, limit=MAX_STORED_ENTRIES - entries
+        )
+        entries += len(listing)
+        if entries > MAX_STORED_ENTRIES:
+            raise _too_many_entries(name)
+        for entry_name, info in listing:
             member = rel / entry_name
             reparse = getattr(info, "st_reparse_tag", 0)
             link = stat.S_ISLNK(info.st_mode) or bool(reparse & _NAME_SURROGATE_BIT)
@@ -1560,6 +1710,7 @@ def _keep_stored_members(
                 pending.append((member, info))
             elif not link and stat.S_ISREG(info.st_mode):
                 if replaced(member):
+                    replaced_files[(info.st_dev, info.st_ino)] = info
                     continue  # the request replaces it
                 kept += info.st_size
                 if kept + sent > MAX_TOTAL_BYTES:
@@ -1582,7 +1733,7 @@ def _keep_stored_members(
                     "file, so the save cannot keep it without following it. Nothing was "
                     "written. Replace it with a regular file, then save again"
                 )
-    return dirs
+    return dirs, replaced_files
 
 
 def _set_final_dir_modes(
@@ -1666,7 +1817,12 @@ def list_skills(base: Path) -> list[dict[str, Any]]:
         item: dict[str, Any] = {"name": entry.name, "has_skill_md": has_skill_md}
         if has_skill_md:
             try:
-                text = skill_md.read_bytes().decode("utf-8")
+                # Never blocks: a SKILL.md swapped for a FIFO since the is_file() above is
+                # refused before any open (TASK-500).
+                data = _read_member_bytes(skill_md, SKILL_FILENAME)
+                if data is None:
+                    raise FileNotFoundError(errno.ENOENT, "No such file or directory")
+                text = data.decode("utf-8")
                 readings = _check_skill_md(text)
             except cw.InvalidCandidateError as exc:
                 # The error string can quote a fragment of the offending frontmatter
@@ -2012,7 +2168,10 @@ def _mask_header_values(header: str, *, readable: bool) -> str:
     that holds ``---`` (Claude Code ends the header there), one with a YAML 1.1-only line
     break, a fence only Claude Code reads (``readable`` false), and a header that may hold a
     masked value (:func:`_may_hold_masked`) and either composes only through Claude
-    Code's re-quoting retry (the CLI may not need the retry and read it as written) or holds
+    Code's re-quoting retry (the CLI may not need the retry and read it as written), holds
+    a ``?`` in a flow collection that the two YAML versions split (under a masked key,
+    ``[?sk-x]`` is a mapping key to PyYAML, which the masked-value walk does not mask, and
+    a value to the CLI, :func:`~clauster.config_write._flow_question_mark`), or holds
     syntax YAML 1.2 refuses (the CLI then reads the retry, :func:`_yaml12_may_refuse`). A
     save of ``SKILL.md`` refuses all but the retry case, so masking them whole costs a
     retype at most. The line count never changes.
@@ -2041,6 +2200,7 @@ def _mask_header_values(header: str, *, readable: bool) -> str:
         or "---" in header
         or any(char in header for char in "\x85\u2028\u2029")
         or source != header
+        or cw._flow_question_mark(source) is not None
         or _yaml12_may_refuse(source, root)
     ):
         return "".join(_masked_whole(line) for line in lines)
@@ -2177,8 +2337,10 @@ def _read_skill_file(
     neither a crafted name nor a crafted member path (``../secrets``) can escape the
     skills root.
 
-    The file is read **exactly once** — the returned (redacted) content and the hash
-    are both derived from that single ``read_bytes`` (the hash over the RAW,
+    The file is read **exactly once**, by :func:`_read_member_bytes`, which refuses (→ 422)
+    a member that is not a regular file or cannot be read, without blocking on a FIFO. The
+    returned (redacted) content and the hash
+    are both derived from that single read (the hash over the RAW,
     unredacted bytes; the content through
     :func:`~clauster.config_write.redact_secret_lines`). Reading twice — once for the
     hash, once via ``read_file`` for the content — would open a TOCTOU window where the
@@ -2193,12 +2355,12 @@ def _read_skill_file(
         target = fw.resolve_contained_path(skills_root, f"{name}/{relative}")
     except fw.PathEscapeError as exc:
         raise cw.PathEscapeError(str(exc)) from exc
-    try:
-        raw = target.read_bytes()
-        exists = True
-    except FileNotFoundError:
-        raw = b""
-        exists = False
+    _stored_skill_dir(skills_root, name)  # a file at skills/<name> is refused (→ 422)
+    # A directory, a FIFO, a device or an unreadable member is a named 422, and a FIFO is
+    # never opened in a blocking way (TASK-531).
+    data = _read_member_bytes(target, relative)
+    exists = data is not None
+    raw = b"" if data is None else data
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -2316,11 +2478,19 @@ def _refuse_masks_with_changed_destinations(restored: str, stored: str, lines: s
     an alias or a merge key) would otherwise send the stored credential somewhere new. So
     when any frontmatter line is restored, both fields must load exactly as stored. This is
     stricter than the Hooks tab, and it needs no knowledge of where a field's text sits.
+
+    A restored header that does not parse has no destination to compare, and nothing can
+    be written: :func:`_validate_member` runs this same parse on this same text next, so it
+    refuses the save and names the real cause (TASK-530). A wholly masked header, which the
+    editor shows for a stored header it cannot read as Claude Code does, comes back so.
     """
     if not lines.intersection(_header_lines(restored)):
         return
     try:
         now = parse_frontmatter(restored.removeprefix("\ufeff"))[0]
+    except cw.InvalidCandidateError:
+        return  # no destination at all: _validate_member refuses it with the real cause
+    try:
         then = parse_frontmatter(stored.removeprefix("\ufeff"))[0]
         unchanged = all(cw.same_yaml_value(now.get(f), then.get(f)) for f in _DESTINATION_FIELDS)
     except cw.InvalidCandidateError:
@@ -2420,7 +2590,7 @@ def _neutralized(sent: str) -> str:
     return re.sub(re.escape(cw.REDACTION_SENTINEL), lambda _m: f"x{next(counter)}", text)
 
 
-def _validate_member(relative: str, content: str, *, sent: str) -> None:
+def _validate_member(relative: str, content: str, *, sent: str, stored: str | None) -> None:
     """Validate one member as it will be written, without leaking a kept value (→ 422).
 
     ``content`` may hold stored text put back behind a mask, and a check's message can
@@ -2432,6 +2602,15 @@ def _validate_member(relative: str, content: str, *, sent: str) -> None:
     The sent text is checked with its masks neutralized (:func:`_neutralized`): a
     frontmatter mask (``key: ********``) is itself not valid YAML (it reads as an alias),
     so checking it as sent would always blame the operator's unchanged text.
+
+    One case comes first. When ``stored`` (the stored ``SKILL.md``; None for any other
+    member) fails the frontmatter check (:func:`_check_skill_md`) with the same message,
+    the stored file is the cause, and the refusal names it (TASK-530): a wholly masked
+    header comes back so, and its neutralized mask lines would blame the operator's text
+    for a header they never typed. That message comes from the stored text alone, and the
+    skill list already shows it as the skill's ``frontmatter_error``, redacted the same
+    way, so it tells nothing new. Any other check (the plugin marker, a cap) keeps the
+    refusal without the check's message.
     """
 
     def _run(text: str) -> None:
@@ -2444,6 +2623,17 @@ def _validate_member(relative: str, content: str, *, sent: str) -> None:
     try:
         _run(content)
     except cw.InvalidCandidateError as restored_exc:
+        if stored is not None:
+            try:
+                _check_skill_md(stored)  # exactly the check the skill list reports
+            except cw.InvalidCandidateError as stored_exc:
+                if str(stored_exc) == str(restored_exc):
+                    cause = cw.redact_secret_lines(str(stored_exc)).rstrip(".")
+                    raise cw.InvalidCandidateError(
+                        f"{relative!r} keeps its masked values, and the stored file itself "
+                        f"does not pass the checks: {cause}. Fix the stored file on the "
+                        "host, or type the whole frontmatter again"
+                    ) from restored_exc
         # Raises the operator's own error, if their text has one apart from the masks.
         _run(_neutralized(sent))
         raise cw.InvalidCandidateError(
@@ -2478,7 +2668,8 @@ def write_skill(
     per-member locking would be pure redundant overhead — see the inline comment in
     ``_build``.
 
-    A named member replaces its stored copy. Every stored member the request does NOT
+    A named member replaces its stored copy, and on POSIX it keeps that copy's mode bits
+    without setuid or setgid (TASK-500). Every stored member the request does NOT
     name is kept byte for byte, with its mode bits (TASK-496): a save never deletes a
     member as a side effect, and only :func:`delete_skill` removes files. A stored
     symlink or special file is refused, never followed (:func:`_keep_stored_members`), and
@@ -2553,7 +2744,12 @@ def write_skill(
     files = _keep_masked_lines(skills_root, name, files, skill_md=stored_md)
     for relative, content in files.items():
         if cw.REDACTION_SENTINEL in sent_files[relative]:  # the others were checked above
-            _validate_member(relative, content, sent=sent_files[relative])
+            _validate_member(
+                relative,
+                content,
+                sent=sent_files[relative],
+                stored=stored_md if relative == SKILL_FILENAME else None,
+            )
 
     def _build(staging: Path) -> None:
         """Copy the stored members the request does not name, then write the named ones."""
@@ -2571,7 +2767,7 @@ def write_skill(
         skill_dir = fw.resolve_contained_path(skills_root, name)
         sent = sum(len(content.encode("utf-8")) for content in files.values())
         try:
-            kept_dirs = _keep_stored_members(
+            kept_dirs, replaced_files = _keep_stored_members(
                 skill_dir,
                 staging,
                 _replaced_by(skill_dir, files),
@@ -2617,6 +2813,8 @@ def write_skill(
                 _create_exclusive(target, content.encode("utf-8"))
             except FileExistsError as exc:
                 raise _changed(Path(relative)) from exc
+            if fw._is_posix():  # pragma: skip-on-win  # pragma: no branch - Windows skips it
+                _keep_replaced_mode(target, skill_dir / relative, replaced_files)
         _set_final_dir_modes(staging_root, kept_dirs, created, default_mode)
 
     try:

@@ -1728,14 +1728,14 @@ def test_list_skills_survives_an_unreadable_skill_md(tmp_path, monkeypatch):
     bad_md = root / "bad" / "SKILL.md"
     bad_md.write_text("---\nname: bad\ndescription: x\n---\nbody\n")
 
-    real_read_bytes = Path.read_bytes
+    real_open = sk.os.open
 
-    def _boom(self):
-        if self == bad_md:
+    def _boom(path, *args, **kwargs):
+        if Path(path) == bad_md:
             raise PermissionError(13, "Permission denied")
-        return real_read_bytes(self)
+        return real_open(path, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "read_bytes", _boom)
+    monkeypatch.setattr(sk.os, "open", _boom)
 
     listed = {s["name"]: s for s in sk.list_skills(tmp_path)}
 
@@ -1774,10 +1774,10 @@ def test_list_skills_error_text_survives_an_errno_less_oserror(tmp_path, monkeyp
     (root / "s").mkdir(parents=True)
     (root / "s" / "SKILL.md").write_text("---\nname: s\ndescription: fine\n---\nbody\n")
 
-    def _boom(self):
+    def _boom(path, *args, **kwargs):
         raise OSError("device fell off the bus")
 
-    monkeypatch.setattr(Path, "read_bytes", _boom)
+    monkeypatch.setattr(sk.os, "open", _boom)
 
     listed = sk.list_skills(tmp_path)
 
@@ -2998,8 +2998,8 @@ def _swap_after_listing(monkeypatch, listed: Path, swap) -> None:
     """Run ``swap()`` right after the walk lists the stored directory ``listed``."""
     real = sk._list_stored_dir
 
-    def _listing_then_swap(path, expected, member):
-        out = real(path, expected, member)
+    def _listing_then_swap(path, expected, member, **kwargs):
+        out = real(path, expected, member, **kwargs)
         if member == listed:
             swap()
         return out
@@ -3303,6 +3303,9 @@ def test_write_skill_matches_a_member_by_the_file_systems_own_name_rules(
         {sk.SKILL_FILENAME: _VALID_MD, "scripts/RUN.sh": "ok"},
         confirm_scripts=sk.SCRIPT_CONFIRM_TOKEN,
     )
+    # The new text keeps the stored file's mode, 0o000 too (TASK-500).
+    assert (skill_dir / "scripts" / "RUN.sh").stat().st_mode & 0o7777 == 0o000
+    (skill_dir / "scripts" / "RUN.sh").chmod(0o644)
     assert (skill_dir / "scripts" / "RUN.sh").read_bytes() == b"ok"
     # The listing, not exists(): on APFS `run.sh` "exists" whenever `RUN.sh` does.
     assert os.listdir(skill_dir / "scripts") == ["RUN.sh"]  # replaced, as on APFS or NTFS

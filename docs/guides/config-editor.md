@@ -698,11 +698,15 @@ A block without any of them gets only the line masks. These are the cases:
 - It is valid only after Claude Code re-quotes it.
 - It holds syntax that YAML 1.2 refuses, for example a quoted value that
   continues on a line that starts at column 0.
+- It holds a `?` inside `{...}` or `[...]` that YAML 1.1 and YAML 1.2 read
+  differently (see [YAML spellings that Clauster refuses](#yaml-spellings-that-clauster-refuses)).
 - It is larger than the 256 KiB file cap.
 
 For `SKILL.md`, a save of such a file is refused, except when the frontmatter is
-valid only after Claude Code re-quotes it. To change the file, type the whole
-frontmatter again or edit the file on the host.
+valid only after Claude Code re-quotes it. When the stored frontmatter fails a
+check, the refusal names that problem, the same error that the skill list
+shows. To change the file, type the whole frontmatter again or edit the file on
+the host.
 
 A masked line keeps its stored text on save only when every other character of
 the line is unchanged. For a frontmatter `url`, the scheme, the host, the port,
@@ -1080,6 +1084,11 @@ whole save:
   and `~`, and two `<<` merge keys in one mapping.
 - A tab inside a plain value or after it, such as `a` then a tab then `b`.
   YAML 1.2 accepts it, but Clauster's parser does not. Use a space.
+- A `?` inside a `{...}` or `[...]` value that YAML 1.1 reads as the start of a
+  key and YAML 1.2 reads as text. One example is an unquoted url with a query,
+  such as `mcpServers: {srv: {url: https://example.com/p?k=v}}`. Another
+  example is `[a, ?b]`. Put the value in quotes. A `?` followed by a space at
+  the start of an entry, such as `[? a]`, is a key to both and is accepted.
 
 Some frontmatter is not valid YAML, but Claude Code still reads it, and so does
 Clauster. When the first parse fails, Claude Code parses a changed copy of the
@@ -1121,6 +1130,11 @@ their group, with these changes:
 - If you are not a member of the stored group, Clauster clears the group bits.
   It never gives them to another group.
 
+On Linux and macOS, a file that the save sends keeps the mode and group of the
+stored file that it replaces, with the same changes. Clauster also clears the
+sticky bit of that file. So a script that is executable stays executable when
+you save its text. A new file gets the default mode for a new file.
+
 While Clauster builds the new copy, every directory in it is private to the
 owner. Clauster sets the final modes only as the last step before the new copy
 replaces the old one. Clauster does not keep the file owner, access control
@@ -1147,6 +1161,17 @@ Clauster refuses the save and writes nothing in these cases:
 - The kept files and the sent files together are larger than 2 MiB, the size
   limit for one skill directory. Clauster never drops a file to make the skill
   fit.
+- The stored skill directory holds more than 4096 files and directories, at
+  any depth. Empty files and directories count too.
+- `skills/<name>` is a file, not a directory.
+- The stored `SKILL.md` is a symlink, a directory, a FIFO, a socket or a
+  device, or Clauster cannot read it.
+
+When you open a file of a skill in the editor, Clauster refuses (`422`) a file
+that is a directory, a FIFO, a socket or a device, and a file that it cannot
+read. It also refuses every file of a skill whose `skills/<name>` is a file.
+The error names the cause. Clauster checks the entry before it opens it, so it
+never waits on a FIFO.
 
 ### Skill frontmatter checks
 
