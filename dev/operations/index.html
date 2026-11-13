@@ -1106,6 +1106,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="clauster doctor — configuration and environment diagnostics">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#show-the-running-servers-results" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Show the running server's results
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
         
       </ul>
@@ -1564,6 +1581,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="clauster doctor — configuration and environment diagnostics">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#show-the-running-servers-results" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Show the running server's results
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
         
       </ul>
@@ -1829,7 +1863,68 @@ fresh copy, and the bridges survive it under <code>KillMode=process</code>.</p>
 panel uses, from the CLI:</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>clauster<span class="w"> </span>doctor<span class="w"> </span>-c<span class="w"> </span>/etc/clauster/clauster.yml
 </code></pre></div>
-<p>It prints one line per check and exits non-zero if any check <strong>fails</strong>.</p>
+<p>It prints one line per check and exits non-zero if any check <strong>fails</strong>. Its first
+line says whose results follow: the running server's, or the local checks of the
+CLI, with the reason.</p>
+<h4 id="show-the-running-servers-results">Show the running server's results<a class="headerlink" href="#show-the-running-servers-results" title="Permanent link">&para;</a></h4>
+<p>When a Clauster server already listens on the configured <code>port</code>, a CLI run on its
+own does not see what the server sees. It runs in a different environment (for
+example without a <code>CLAUSTER_PYTE_PATH</code> that you set in the service unit), and it cannot check the
+server's unpacked program files. Give the CLI an <a href="../public-api/#named-api-tokens-clauster-api-token">API token</a>
+to show the server's own results instead:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>clauster<span class="w"> </span>api-token<span class="w"> </span>issue<span class="w"> </span>doctor<span class="w"> </span>-c<span class="w"> </span>/etc/clauster/clauster.yml<span class="w">   </span><span class="c1"># prints the token once</span>
+<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="nb">export</span><span class="w"> </span><span class="nv">CLAUSTER_API_TOKEN</span><span class="o">=</span>&lt;token&gt;
+<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>clauster<span class="w"> </span>doctor<span class="w"> </span>-c<span class="w"> </span>/etc/clauster/clauster.yml
+</code></pre></div>
+<p>With the token, the CLI reads <code>/api/doctor</code> from the server on <code>127.0.0.1:&lt;port&gt;</code>
+and prints those rows: the same rows, statuses and details as the dashboard panel,
+<code>bundle</code> and the server's <code>extra:*</code> rows included. The first line is
+<code>clauster: showing the results of the running server on port &lt;port&gt;</code>. The exit
+code follows the server's result.</p>
+<p>The CLI shows its local checks, and names the reason on its first line, in each
+of these cases:</p>
+<ul>
+<li>
+<p>The config did not load. The <code>config</code> row then names the error.</p>
+</li>
+<li>
+<p>No server listens on <code>127.0.0.1:&lt;port&gt;</code>.</p>
+</li>
+<li>A server listens, but you gave no token.</li>
+<li>The server refused the token (<code>HTTP 401</code> or <code>HTTP 403</code>), or answered with
+  another status.</li>
+<li>The server did not answer, sent results that the CLI cannot read, or (with
+  <code>tls</code> set) presented a different certificate than the configured one.</li>
+<li>Without <code>tls</code>, the CLI could not prove that the listener is this deployment's
+  server (see the limits below). The CLI then does not send the token.</li>
+<li>The token holds characters that an HTTP header cannot carry, or (with <code>tls</code>
+  set) the certificate file is unreadable. The CLI then does not send the token.</li>
+</ul>
+<p>The CLI never mixes the two sets of rows.</p>
+<p>⚠️ The token is a credential. Keep these limits in mind:</p>
+<ul>
+<li><code>--token &lt;token&gt;</code> also works, but other users on the host can read a
+  command-line argument in the process list. Use the <code>CLAUSTER_API_TOKEN</code>
+  variable instead.</li>
+<li>The CLI sends the token only to <code>127.0.0.1:&lt;port&gt;</code>, and never in a URL, a log
+  line or an error message.</li>
+<li>With <code>tls</code> set, the CLI sends the token only after the server proves that it
+  holds the configured certificate. This is the strongest proof.</li>
+<li>Without <code>tls</code>, the request is plain HTTP, and nothing in it proves who holds
+  the port. The CLI therefore sends the token only when both of these are true:
+  <code>host</code> is a loopback address (<code>127.0.0.0/8</code>, <code>::1</code> or <code>localhost</code>), and every
+  listening socket on the port belongs to a process of the user who runs the
+  CLI. If the CLI cannot make sure of the owner, it does not send the token. On
+  Linux an unprivileged user can see the owner of their own sockets only. On
+  macOS only root can list sockets, and on Windows reading another user's
+  process is denied, so on those systems an unproven listener also gets no
+  token. A short time passes between the check and the request, so a process
+  that takes the port in that time is not detected. Set <code>tls</code> to close this gap.</li>
+<li>With <code>auth.enabled: false</code>, the server does not check the token. The CLI still
+  asks for one, so that it never reads a server's results without being told to.</li>
+<li>The CLI never reads the server's token store, and never sends or prints any
+  other secret. The only credential it sends is the one you give it.</li>
+</ul>
 <p>The dashboard shows the same result as the <strong>System readiness</strong> pill in the header.
 The pill is always present. It counts the warnings or blocking checks when there are
 any, and shows <code>N checks passed</code> when every check passes. If the checks did not load
@@ -1903,12 +1998,12 @@ again.</p>
 </tr>
 <tr>
 <td><code>port</code></td>
-<td>(CLI only) whether the listen port is free to bind.</td>
-<td><strong>WARN</strong> if already in use.</td>
+<td>(CLI local checks only) whether the listen port is free to bind.</td>
+<td><strong>OK</strong> if free. <strong>OK</strong> if the <code>server</code> row is OK and the holder is provably this deployment's server: with <code>tls</code> through the pinned certificate, without <code>tls</code> because every listener on the port belongs to the user who runs the CLI. <strong>WARN</strong> in every other case: another process holds the port, the <code>server</code> row is not OK, or the owner cannot be checked.</td>
 </tr>
 <tr>
 <td><code>server</code></td>
-<td>(CLI only) when the listen port is in use, the <code>/healthz</code> verdict of the server that holds it.</td>
+<td>(CLI local checks only) when the listen port is in use, the <code>/healthz</code> verdict of the server that holds it.</td>
 <td><strong>FAIL</strong> if it answers anything but <code>200</code> — for example the <code>503</code> above. <strong>WARN</strong> if, with <code>tls</code> set, the listener presents a different certificate than the configured one (the probe trusts only that certificate) or the certificate file is unreadable. Absent when the port is free or the listener does not answer HTTP.</td>
 </tr>
 <tr>
@@ -1918,7 +2013,7 @@ again.</p>
 </tr>
 <tr>
 <td><code>bundle</code></td>
-<td>(Dashboard panel only, standalone binary only) the running server's unpacked program files are all present. A CLI run unpacks its own fresh copy, so it reports this through the <code>server</code> check instead.</td>
+<td>(Server results only, standalone binary only) the running server's unpacked program files are all present. The dashboard panel shows it, and so does the CLI when it <a href="#show-the-running-servers-results">shows the running server's results</a>. The local checks of the CLI report this through the <code>server</code> check instead, because a CLI run unpacks its own fresh copy.</td>
 <td><strong>FAIL</strong> if any file is missing — restart Clauster.</td>
 </tr>
 <tr>
@@ -1936,8 +2031,8 @@ bridge never becomes ready, check this first.</p>
 <h3 id="metrics-prometheus-exposition"><code>/metrics</code> — Prometheus exposition<a class="headerlink" href="#metrics-prometheus-exposition" title="Permanent link">&para;</a></h3>
 <p>Clauster can expose a small text-format Prometheus endpoint at <code>/metrics</code>. It is
 <strong>off by default</strong>; enable it with:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="nt">observability</span><span class="p">:</span>
-<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="w">  </span><span class="nt">prometheus_enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="nt">observability</span><span class="p">:</span>
+<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="w">  </span><span class="nt">prometheus_enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
 </code></pre></div>
 <p>When disabled, <code>/metrics</code> returns <code>404</code>. When enabled, it stays <strong>behind the
 auth guard</strong> like every other route — so by default a scraper must satisfy the
@@ -2002,22 +2097,22 @@ deployment, set a <strong>scrape token</strong> so the scraper can reach <code>/
 Mint one with <code>clauster hash-metrics-token</code> — it prints the raw token once (give
 it to the scraper) and the hash to store at rest. (For the reverse-proxy-specific
 setup, see <a href="../networking/#scraping-metrics-from-behind-the-auth-gate">Networking → Scraping <code>/metrics</code></a>.)</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="nt">observability</span><span class="p">:</span>
-<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="w">  </span><span class="nt">prometheus_enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
-<a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="w">  </span><span class="nt">metrics_token_hash</span><span class="p">:</span><span class="w"> </span><span class="s">"&lt;sha-256</span><span class="nv"> </span><span class="s">hash</span><span class="nv"> </span><span class="s">from</span><span class="nv"> </span><span class="s">clauster</span><span class="nv"> </span><span class="s">hash-metrics-token&gt;"</span><span class="w">  </span><span class="c1"># or via *_FILE, below</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="nt">observability</span><span class="p">:</span>
+<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="w">  </span><span class="nt">prometheus_enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a><span class="w">  </span><span class="nt">metrics_token_hash</span><span class="p">:</span><span class="w"> </span><span class="s">"&lt;sha-256</span><span class="nv"> </span><span class="s">hash</span><span class="nv"> </span><span class="s">from</span><span class="nv"> </span><span class="s">clauster</span><span class="nv"> </span><span class="s">hash-metrics-token&gt;"</span><span class="w">  </span><span class="c1"># or via *_FILE, below</span>
 </code></pre></div>
 <p>The scraper then presents the raw token as a bearer token:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>curl<span class="w"> </span>-s<span class="w"> </span>-H<span class="w"> </span><span class="s2">"Authorization: Bearer &lt;token&gt;"</span><span class="w"> </span>https://clauster.example.com/metrics
+<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>curl<span class="w"> </span>-s<span class="w"> </span>-H<span class="w"> </span><span class="s2">"Authorization: Bearer &lt;token&gt;"</span><span class="w"> </span>https://clauster.example.com/metrics
 </code></pre></div>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="c1"># prometheus.yml</span>
-<a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a><span class="nt">scrape_configs</span><span class="p">:</span>
-<a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a><span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">job_name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">clauster</span>
-<a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a><span class="w">    </span><span class="nt">scheme</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">https</span>
-<a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a><span class="w">    </span><span class="nt">authorization</span><span class="p">:</span>
-<a id="__codelineno-5-6" name="__codelineno-5-6" href="#__codelineno-5-6"></a><span class="w">      </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Bearer</span>
-<a id="__codelineno-5-7" name="__codelineno-5-7" href="#__codelineno-5-7"></a><span class="w">      </span><span class="nt">credentials</span><span class="p">:</span><span class="w"> </span><span class="s">"&lt;token&gt;"</span>
-<a id="__codelineno-5-8" name="__codelineno-5-8" href="#__codelineno-5-8"></a><span class="w">    </span><span class="nt">static_configs</span><span class="p">:</span>
-<a id="__codelineno-5-9" name="__codelineno-5-9" href="#__codelineno-5-9"></a><span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">targets</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">"clauster.example.com"</span><span class="p p-Indicator">]</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="c1"># prometheus.yml</span>
+<a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a><span class="nt">scrape_configs</span><span class="p">:</span>
+<a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a><span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">job_name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">clauster</span>
+<a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a><span class="w">    </span><span class="nt">scheme</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">https</span>
+<a id="__codelineno-6-5" name="__codelineno-6-5" href="#__codelineno-6-5"></a><span class="w">    </span><span class="nt">authorization</span><span class="p">:</span>
+<a id="__codelineno-6-6" name="__codelineno-6-6" href="#__codelineno-6-6"></a><span class="w">      </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Bearer</span>
+<a id="__codelineno-6-7" name="__codelineno-6-7" href="#__codelineno-6-7"></a><span class="w">      </span><span class="nt">credentials</span><span class="p">:</span><span class="w"> </span><span class="s">"&lt;token&gt;"</span>
+<a id="__codelineno-6-8" name="__codelineno-6-8" href="#__codelineno-6-8"></a><span class="w">    </span><span class="nt">static_configs</span><span class="p">:</span>
+<a id="__codelineno-6-9" name="__codelineno-6-9" href="#__codelineno-6-9"></a><span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">targets</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">"clauster.example.com"</span><span class="p p-Indicator">]</span>
 </code></pre></div>
 <p>When <code>metrics_token_hash</code> is set, <strong>a valid token <em>or</em> a normal session</strong> grants
 access — and only to <code>/metrics</code>, nowhere else. Only the SHA-256 hash is stored at
@@ -2027,18 +2122,18 @@ compared in constant time. To keep the hash out of the config file, point
 <code>metrics_token_hash</code> is unset, <code>/metrics</code> stays fully behind the auth guard (so a
 scraper needs a session, or you scrape over loopback).</p>
 <p>Example scrape (authenticated, loopback):</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>curl<span class="w"> </span>-s<span class="w"> </span>http://127.0.0.1:7621/metrics
+<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>curl<span class="w"> </span>-s<span class="w"> </span>http://127.0.0.1:7621/metrics
 </code></pre></div>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a># HELP clauster_build_info Build information for the running Clauster.
-<a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a># TYPE clauster_build_info gauge
-<a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a>clauster_build_info{version="0.12.x"} 1
-<a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a># HELP clauster_bridges Number of managed bridges by lifecycle status.
-<a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a># TYPE clauster_bridges gauge
-<a id="__codelineno-7-6" name="__codelineno-7-6" href="#__codelineno-7-6"></a>clauster_bridges{status="running"} 2
-<a id="__codelineno-7-7" name="__codelineno-7-7" href="#__codelineno-7-7"></a>clauster_bridges{status="crashed"} 0
-<a id="__codelineno-7-8" name="__codelineno-7-8" href="#__codelineno-7-8"></a># HELP clauster_projects Number of discovered projects.
-<a id="__codelineno-7-9" name="__codelineno-7-9" href="#__codelineno-7-9"></a># TYPE clauster_projects gauge
-<a id="__codelineno-7-10" name="__codelineno-7-10" href="#__codelineno-7-10"></a>clauster_projects 7
+<div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a># HELP clauster_build_info Build information for the running Clauster.
+<a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a># TYPE clauster_build_info gauge
+<a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a>clauster_build_info{version="0.12.x"} 1
+<a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a># HELP clauster_bridges Number of managed bridges by lifecycle status.
+<a id="__codelineno-8-5" name="__codelineno-8-5" href="#__codelineno-8-5"></a># TYPE clauster_bridges gauge
+<a id="__codelineno-8-6" name="__codelineno-8-6" href="#__codelineno-8-6"></a>clauster_bridges{status="running"} 2
+<a id="__codelineno-8-7" name="__codelineno-8-7" href="#__codelineno-8-7"></a>clauster_bridges{status="crashed"} 0
+<a id="__codelineno-8-8" name="__codelineno-8-8" href="#__codelineno-8-8"></a># HELP clauster_projects Number of discovered projects.
+<a id="__codelineno-8-9" name="__codelineno-8-9" href="#__codelineno-8-9"></a># TYPE clauster_projects gauge
+<a id="__codelineno-8-10" name="__codelineno-8-10" href="#__codelineno-8-10"></a>clauster_projects 7
 </code></pre></div>
 <p>A useful alert is a non-zero <code>clauster_bridges{status="crashed"}</code> or <code>="error"</code>
 sustained over a scrape interval.</p>
@@ -2069,14 +2164,14 @@ unexpectedly rather than via the Stop button. Notifications go through
 <a href="https://github.com/caronc/apprise">Apprise</a>, so any Apprise URL works (Slack,
 Discord, Telegram, email, …).</p>
 <p>They are <strong>off by default</strong> and require the optional <code>notify</code> extra:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a>pip<span class="w"> </span>install<span class="w"> </span><span class="s1">'clauster[notify]'</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a>pip<span class="w"> </span>install<span class="w"> </span><span class="s1">'clauster[notify]'</span>
 </code></pre></div>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a><span class="nt">notifications</span><span class="p">:</span>
-<a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a><span class="w">  </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
-<a id="__codelineno-9-3" name="__codelineno-9-3" href="#__codelineno-9-3"></a><span class="w">  </span><span class="nt">urls</span><span class="p">:</span>
-<a id="__codelineno-9-4" name="__codelineno-9-4" href="#__codelineno-9-4"></a><span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">"slack://TOKEN_A/TOKEN_B/TOKEN_C"</span>
-<a id="__codelineno-9-5" name="__codelineno-9-5" href="#__codelineno-9-5"></a><span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">"tgram://bottoken/ChatID"</span>
-<a id="__codelineno-9-6" name="__codelineno-9-6" href="#__codelineno-9-6"></a><span class="w">  </span><span class="nt">notify_on_crash</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">   </span><span class="c1"># default; the alert that matters most for monitoring</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a><span class="nt">notifications</span><span class="p">:</span>
+<a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a><span class="w">  </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<a id="__codelineno-10-3" name="__codelineno-10-3" href="#__codelineno-10-3"></a><span class="w">  </span><span class="nt">urls</span><span class="p">:</span>
+<a id="__codelineno-10-4" name="__codelineno-10-4" href="#__codelineno-10-4"></a><span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">"slack://TOKEN_A/TOKEN_B/TOKEN_C"</span>
+<a id="__codelineno-10-5" name="__codelineno-10-5" href="#__codelineno-10-5"></a><span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">"tgram://bottoken/ChatID"</span>
+<a id="__codelineno-10-6" name="__codelineno-10-6" href="#__codelineno-10-6"></a><span class="w">  </span><span class="nt">notify_on_crash</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">   </span><span class="c1"># default; the alert that matters most for monitoring</span>
 </code></pre></div>
 <p>Behaviour and caveats:</p>
 <ul>
@@ -2097,21 +2192,21 @@ for the full field reference.</p>
 deliver a machine-readable JSON <code>POST</code> to your own HTTP endpoint on a Clauster
 lifecycle transition — for wiring Clauster into an automation, a queue, or your
 own dashboard. They are <strong>off by default</strong> and need no extra dependency.</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a><span class="nt">webhooks</span><span class="p">:</span>
-<a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a><span class="w">  </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
-<a id="__codelineno-10-3" name="__codelineno-10-3" href="#__codelineno-10-3"></a><span class="w">  </span><span class="nt">urls</span><span class="p">:</span>
-<a id="__codelineno-10-4" name="__codelineno-10-4" href="#__codelineno-10-4"></a><span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">"https://example.com/hooks/clauster"</span>
-<a id="__codelineno-10-5" name="__codelineno-10-5" href="#__codelineno-10-5"></a><span class="w">  </span><span class="nt">timeout_seconds</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">10.0</span><span class="w">   </span><span class="c1"># per-POST timeout (&gt;0)</span>
-<a id="__codelineno-10-6" name="__codelineno-10-6" href="#__codelineno-10-6"></a><span class="w">  </span><span class="nt">events</span><span class="p">:</span>
-<a id="__codelineno-10-7" name="__codelineno-10-7" href="#__codelineno-10-7"></a><span class="w">    </span><span class="c1"># Bridge events: an absent key defaults to ENABLED.</span>
-<a id="__codelineno-10-8" name="__codelineno-10-8" href="#__codelineno-10-8"></a><span class="w">    </span><span class="nt">spawn</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
-<a id="__codelineno-10-9" name="__codelineno-10-9" href="#__codelineno-10-9"></a><span class="w">    </span><span class="nt">ready</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
-<a id="__codelineno-10-10" name="__codelineno-10-10" href="#__codelineno-10-10"></a><span class="w">    </span><span class="nt">stop</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
-<a id="__codelineno-10-11" name="__codelineno-10-11" href="#__codelineno-10-11"></a><span class="w">    </span><span class="nt">crash</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
-<a id="__codelineno-10-12" name="__codelineno-10-12" href="#__codelineno-10-12"></a><span class="w">    </span><span class="c1"># Extended events: an absent key defaults to DISABLED — opt in explicitly.</span>
-<a id="__codelineno-10-13" name="__codelineno-10-13" href="#__codelineno-10-13"></a><span class="w">    </span><span class="nt">bg-settled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
-<a id="__codelineno-10-14" name="__codelineno-10-14" href="#__codelineno-10-14"></a><span class="w">    </span><span class="nt">permission-needed</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
-<a id="__codelineno-10-15" name="__codelineno-10-15" href="#__codelineno-10-15"></a><span class="w">    </span><span class="nt">clone-done</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a><span class="nt">webhooks</span><span class="p">:</span>
+<a id="__codelineno-11-2" name="__codelineno-11-2" href="#__codelineno-11-2"></a><span class="w">  </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<a id="__codelineno-11-3" name="__codelineno-11-3" href="#__codelineno-11-3"></a><span class="w">  </span><span class="nt">urls</span><span class="p">:</span>
+<a id="__codelineno-11-4" name="__codelineno-11-4" href="#__codelineno-11-4"></a><span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">"https://example.com/hooks/clauster"</span>
+<a id="__codelineno-11-5" name="__codelineno-11-5" href="#__codelineno-11-5"></a><span class="w">  </span><span class="nt">timeout_seconds</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">10.0</span><span class="w">   </span><span class="c1"># per-POST timeout (&gt;0)</span>
+<a id="__codelineno-11-6" name="__codelineno-11-6" href="#__codelineno-11-6"></a><span class="w">  </span><span class="nt">events</span><span class="p">:</span>
+<a id="__codelineno-11-7" name="__codelineno-11-7" href="#__codelineno-11-7"></a><span class="w">    </span><span class="c1"># Bridge events: an absent key defaults to ENABLED.</span>
+<a id="__codelineno-11-8" name="__codelineno-11-8" href="#__codelineno-11-8"></a><span class="w">    </span><span class="nt">spawn</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<a id="__codelineno-11-9" name="__codelineno-11-9" href="#__codelineno-11-9"></a><span class="w">    </span><span class="nt">ready</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<a id="__codelineno-11-10" name="__codelineno-11-10" href="#__codelineno-11-10"></a><span class="w">    </span><span class="nt">stop</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<a id="__codelineno-11-11" name="__codelineno-11-11" href="#__codelineno-11-11"></a><span class="w">    </span><span class="nt">crash</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<a id="__codelineno-11-12" name="__codelineno-11-12" href="#__codelineno-11-12"></a><span class="w">    </span><span class="c1"># Extended events: an absent key defaults to DISABLED — opt in explicitly.</span>
+<a id="__codelineno-11-13" name="__codelineno-11-13" href="#__codelineno-11-13"></a><span class="w">    </span><span class="nt">bg-settled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<a id="__codelineno-11-14" name="__codelineno-11-14" href="#__codelineno-11-14"></a><span class="w">    </span><span class="nt">permission-needed</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<a id="__codelineno-11-15" name="__codelineno-11-15" href="#__codelineno-11-15"></a><span class="w">    </span><span class="nt">clone-done</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
 </code></pre></div>
 <h3 id="events">Events<a class="headerlink" href="#events" title="Permanent link">&para;</a></h3>
 <ul>
@@ -2172,7 +2267,7 @@ over a WebSocket to the dashboard's live log view.</p>
   <code>&lt;label&gt;-&lt;timestamp&gt;-&lt;seq&gt;.log</code>, where <code>&lt;label&gt;</code> is the bridge label (the project
   name by default), so glob on the label:</li>
 </ul>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a>tail<span class="w"> </span>-f<span class="w"> </span>~/.clauster/logs/&lt;label&gt;-*.log
+<div class="highlight"><pre><span></span><code><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a>tail<span class="w"> </span>-f<span class="w"> </span>~/.clauster/logs/&lt;label&gt;-*.log
 </code></pre></div>
 <ul>
 <li><strong>For a Crashed bridge</strong> — the bridge logs its failure reason to its debug file
@@ -2238,9 +2333,9 @@ them) — intentional, so an upgrade restart doesn't drop live coding sessions.<
   still uses a reaping <code>KillMode</code>.</li>
 <li><strong>To fix an older unit</strong>: regenerate and reload —</li>
 </ul>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a>sudo<span class="w"> </span>clauster<span class="w"> </span>install-service<span class="w"> </span>systemd<span class="w"> </span>--write
-<a id="__codelineno-12-2" name="__codelineno-12-2" href="#__codelineno-12-2"></a>sudo<span class="w"> </span>systemctl<span class="w"> </span>daemon-reload
-<a id="__codelineno-12-3" name="__codelineno-12-3" href="#__codelineno-12-3"></a>sudo<span class="w"> </span>systemctl<span class="w"> </span>restart<span class="w"> </span>clauster.service
+<div class="highlight"><pre><span></span><code><a id="__codelineno-13-1" name="__codelineno-13-1" href="#__codelineno-13-1"></a>sudo<span class="w"> </span>clauster<span class="w"> </span>install-service<span class="w"> </span>systemd<span class="w"> </span>--write
+<a id="__codelineno-13-2" name="__codelineno-13-2" href="#__codelineno-13-2"></a>sudo<span class="w"> </span>systemctl<span class="w"> </span>daemon-reload
+<a id="__codelineno-13-3" name="__codelineno-13-3" href="#__codelineno-13-3"></a>sudo<span class="w"> </span>systemctl<span class="w"> </span>restart<span class="w"> </span>clauster.service
 </code></pre></div>
 <p>That one restart still reaps the current pty bridges, but later restarts
   won't.
@@ -2256,7 +2351,7 @@ them) — intentional, so an upgrade restart doesn't drop live coding sessions.<
 <p><code>clauster backup</code> tars the whole <code>state_dir</code> — the <code>clauster.db</code> persistence
 database (the live store for bridge and hosted-session records) plus everything
 else under it — together with the active config into a single archive:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-13-1" name="__codelineno-13-1" href="#__codelineno-13-1"></a>clauster<span class="w"> </span>backup<span class="w"> </span>-c<span class="w"> </span>/etc/clauster/clauster.yml<span class="w"> </span>-o<span class="w"> </span>/var/backups/
+<div class="highlight"><pre><span></span><code><a id="__codelineno-14-1" name="__codelineno-14-1" href="#__codelineno-14-1"></a>clauster<span class="w"> </span>backup<span class="w"> </span>-c<span class="w"> </span>/etc/clauster/clauster.yml<span class="w"> </span>-o<span class="w"> </span>/var/backups/
 </code></pre></div>
 <p>Restore it with <code>clauster restore &lt;archive&gt; --state-dir ~/.clauster</code> (the
 <code>--state-dir</code> target is required — point it at your configured <code>state_dir</code>,
@@ -2335,7 +2430,7 @@ to start):</p>
    overwrite a non-empty target). If you have no backup, <strong>move the bad database
    aside</strong> and let Clauster start with empty state:</li>
 </ol>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-14-1" name="__codelineno-14-1" href="#__codelineno-14-1"></a>mv<span class="w"> </span>~/.clauster/clauster.db<span class="w"> </span>~/.clauster/clauster.db.corrupt
+<div class="highlight"><pre><span></span><code><a id="__codelineno-15-1" name="__codelineno-15-1" href="#__codelineno-15-1"></a>mv<span class="w"> </span>~/.clauster/clauster.db<span class="w"> </span>~/.clauster/clauster.db.corrupt
 </code></pre></div>
 <p>Clauster starts fresh and <strong>rediscovers</strong> still-running bridges on startup
    (it matches live processes), so a lost database is not a lost session —
@@ -2354,8 +2449,8 @@ to start):</p>
    database is empty again.</p>
 <p>Repair the copy first — it holds bytes Clauster could not read. Then move the
    retired original out of the way and put the copy back under the original name:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-15-1" name="__codelineno-15-1" href="#__codelineno-15-1"></a>mv<span class="w"> </span>~/.clauster/state.json.imported<span class="w"> </span>~/.clauster/state.json.imported.keep
-<a id="__codelineno-15-2" name="__codelineno-15-2" href="#__codelineno-15-2"></a>mv<span class="w"> </span>~/.clauster/state.json.corrupt.bak<span class="w"> </span>~/.clauster/state.json
+<div class="highlight"><pre><span></span><code><a id="__codelineno-16-1" name="__codelineno-16-1" href="#__codelineno-16-1"></a>mv<span class="w"> </span>~/.clauster/state.json.imported<span class="w"> </span>~/.clauster/state.json.imported.keep
+<a id="__codelineno-16-2" name="__codelineno-16-2" href="#__codelineno-16-2"></a>mv<span class="w"> </span>~/.clauster/state.json.corrupt.bak<span class="w"> </span>~/.clauster/state.json
 </code></pre></div>
 <p>The first <code>mv</code> is not optional. A re-import renames the new file to
    <code>state.json.imported</code> as well. On Linux and macOS that replaces whatever was

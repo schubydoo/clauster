@@ -2667,7 +2667,11 @@ error; <code>clauster doctor</code> warns on the <code>port</code> row:
 or an unrelated process owns the port.</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a>ss<span class="w"> </span>-tlnp<span class="w"> </span><span class="p">|</span><span class="w"> </span>grep<span class="w"> </span><span class="m">7621</span><span class="w">     </span><span class="c1"># who owns it?</span>
 </code></pre></div>
-<p>Stop the other process, or change <code>port</code> in <code>clauster.yml</code>.</p>
+<p>Stop the other process, or change <code>port</code> in <code>clauster.yml</code>. When this
+deployment's own healthy server holds the port, the <code>port</code> row is OK instead and
+says so, and the <code>server</code> row reports that server's <code>/healthz</code> verdict. Without
+<code>tls</code>, "own" means that the listener belongs to the user who runs <code>doctor</code>. See
+<a href="../operations/#show-the-running-servers-results">Operations</a>.</p>
 <h3 id="not-writable-permission-denied-writing-state">"not writable" / permission denied writing state<a class="headerlink" href="#not-writable-permission-denied-writing-state" title="Permanent link">&para;</a></h3>
 <p><strong>What you see:</strong> <code>doctor</code> fails the <code>state_dir</code> row with
 <code>&lt;state_dir&gt; not writable: ...</code> or
@@ -3233,7 +3237,7 @@ present in every run:</p>
 </tr>
 <tr>
 <td><code>port</code></td>
-<td>port free</td>
+<td>port free, or held by this deployment's own healthy server (<a href="../operations/#show-the-running-servers-results">how doctor proves it</a>)</td>
 <td><code>already in use (Clauster already running?)</code></td>
 </tr>
 <tr>

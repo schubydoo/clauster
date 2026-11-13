@@ -1845,7 +1845,10 @@ for the versioned <code>/api/v1</code> surface — revocable per client, unlike 
 <p>Checks that <code>claude</code> is found and new enough, that <code>projects_root</code> and the
 state dir are usable, and reports per-extra (<code>extra:&lt;name&gt;</code>) and per-binary
 (<code>binary:&lt;name&gt;</code>) dependency rows. Run it before your first spawn and fix any
-✗. Full row-by-row guide:
+✗. When a server is already running, set an API token in the
+<code>CLAUSTER_API_TOKEN</code> variable to print that server's own results, the same rows
+the dashboard panel shows. <code>--token</code> also works, but other users on the host can
+read a command-line argument in the process list. Full row-by-row guide:
 <a href="../../operations/#clauster-doctor-configuration-and-environment-diagnostics">Operations → <code>clauster doctor</code></a>.</p>
 <h2 id="clauster-backup-restore-migrate"><code>clauster backup</code> / <code>restore</code> / <code>migrate</code><a class="headerlink" href="#clauster-backup-restore-migrate" title="Permanent link">&para;</a></h2>
 <p><code>backup</code> tars <code>state_dir</code> + the active config; <code>restore &lt;archive&gt; --state-dir …</code>
