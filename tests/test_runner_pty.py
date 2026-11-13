@@ -1450,6 +1450,49 @@ async def test_startup_watch_never_shows_error_without_its_detail(runner_config,
     monkeypatch.setenv("FAKE_CLAUDE_SLOW", "1.0")
     monkeypatch.setattr("clauster.spawn_coordinator._READY_TIMEOUT", 0.3)
     monkeypatch.setattr("clauster.spawn_coordinator._READY_POLL_INTERVAL", 0.05)
+    _slow_keeper_failure_detail(monkeypatch)
+    runner, _ = _pty_runner(runner_config)
+    inst = await runner.spawn("alpha")
+    try:
+        assert inst.status is InstanceStatus.STARTING
+        await _watch_until_resolved(inst)
+        assert inst.status is InstanceStatus.ERROR
+        assert "not logged in" in (inst.error_detail or "")
+    finally:
+        await runner.stop(inst.instance_id)
+
+
+@_POSIX_ONLY
+async def test_startup_watch_sets_a_dead_keepers_reason_with_its_status(
+    runner_config, monkeypatch
+) -> None:
+    """TASK-542: the same order on the watch's dead-keeper branch.
+
+    The keeper writes its sidecar error and exits after the readiness wait, so the watch
+    finds it dead with a reason, and the row must never read ERROR without that reason.
+    """
+    keeper = (
+        "import json, sys, time; time.sleep(0.6); "
+        "open(sys.argv[1], 'w').write(json.dumps({'state': 'error', 'error': 'keeper said no'}))"
+    )
+    monkeypatch.setattr(
+        BridgeLaunch,
+        "_keeper_launch_cmd",
+        staticmethod(lambda sidecar, *a, **k: [sys.executable, "-c", keeper, str(sidecar)]),
+    )
+    monkeypatch.setattr("clauster.spawn_coordinator._READY_TIMEOUT", 0.2)
+    monkeypatch.setattr("clauster.spawn_coordinator._STARTUP_WATCH_INTERVAL", 0.1)
+    _slow_keeper_failure_detail(monkeypatch)
+    runner, _ = _pty_runner(runner_config)
+    inst = await runner.spawn("alpha")
+    assert inst.status is InstanceStatus.STARTING
+    await _watch_until_resolved(inst)
+    assert inst.status is InstanceStatus.ERROR
+    assert inst.error_detail == "keeper said no"
+
+
+def _slow_keeper_failure_detail(monkeypatch) -> None:
+    """Make the detail read slow, so a reader in an await after the status change sees it."""
     real_detail = SpawnCoordinator._keeper_failure_detail
 
     def slow_detail(cls, sidecar, info):
@@ -1457,18 +1500,16 @@ async def test_startup_watch_never_shows_error_without_its_detail(runner_config,
         return real_detail(sidecar, info)
 
     monkeypatch.setattr(SpawnCoordinator, "_keeper_failure_detail", classmethod(slow_detail))
-    runner, _ = _pty_runner(runner_config)
-    inst = await runner.spawn("alpha")
-    try:
-        assert inst.status is InstanceStatus.STARTING
-        for _ in range(500):
-            if inst.status is not InstanceStatus.STARTING:
-                break
-            await asyncio.sleep(0.02)
-        assert inst.status is InstanceStatus.ERROR
-        assert "not logged in" in (inst.error_detail or "")
-    finally:
-        await runner.stop(inst.instance_id)
+
+
+async def _watch_until_resolved(inst) -> None:
+    """Sample the row until it leaves STARTING; fail if it ever reads ERROR with no reason."""
+    for _ in range(500):
+        if inst.status is InstanceStatus.ERROR:
+            assert inst.error_detail is not None, "ERROR row seen without its reason"
+        if inst.status is not InstanceStatus.STARTING:
+            return
+        await asyncio.sleep(0.02)
 
 
 @_POSIX_ONLY
