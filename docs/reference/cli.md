@@ -57,7 +57,10 @@ for the versioned `/api/v1` surface — revocable per client, unlike the single
 Checks that `claude` is found and new enough, that `projects_root` and the
 state dir are usable, and reports per-extra (`extra:<name>`) and per-binary
 (`binary:<name>`) dependency rows. Run it before your first spawn and fix any
-✗. Full row-by-row guide:
+✗. When a server is already running, set an API token in the
+`CLAUSTER_API_TOKEN` variable to print that server's own results, the same rows
+the dashboard panel shows. `--token` also works, but other users on the host can
+read a command-line argument in the process list. Full row-by-row guide:
 [Operations → `clauster doctor`](../operations.md#clauster-doctor-configuration-and-environment-diagnostics).
 
 ## `clauster backup` / `restore` / `migrate` {#clauster-backup-restore-migrate}

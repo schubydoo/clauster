@@ -202,7 +202,11 @@ or an unrelated process owns the port.
 ss -tlnp | grep 7621     # who owns it?
 ```
 
-Stop the other process, or change `port` in `clauster.yml`.
+Stop the other process, or change `port` in `clauster.yml`. When this
+deployment's own healthy server holds the port, the `port` row is OK instead and
+says so, and the `server` row reports that server's `/healthz` verdict. Without
+`tls`, "own" means that the listener belongs to the user who runs `doctor`. See
+[Operations](operations.md#show-the-running-servers-results).
 
 ### "not writable" / permission denied writing state
 
@@ -843,7 +847,7 @@ present in every run:
 | `git` | `git` on PATH | create/clone features unavailable |
 | `state_dir` | writable | permissions — see above |
 | `auth` | configuration consistent | one of the two auth refusals above |
-| `port` | port free | `already in use (Clauster already running?)` |
+| `port` | port free, or held by this deployment's own healthy server ([how doctor proves it](operations.md#show-the-running-servers-results)) | `already in use (Clauster already running?)` |
 | `version` | build up to date | upstream has a newer release / stale checkout |
 | `systemd` | `KillMode=process` (bridges survive a restart) | a restart would kill live pty bridges |
 | `node-toolchain` | node resolvable for npx MCP servers | nvm-only node invisible to bridges |

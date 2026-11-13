@@ -153,6 +153,11 @@ def main(argv: list[str] | None = None) -> int:
 
     doctor_p = sub.add_parser("doctor", help="diagnose config / environment")
     doctor_p.add_argument("-c", "--config", help="path to clauster.yml")
+    doctor_p.add_argument(
+        "--token",
+        help="API token to read the running server's own results with (default: "
+        f"${ops.API_TOKEN_ENV}; prefer the variable, a flag shows in the process list)",
+    )
 
     backup_p = sub.add_parser("backup", help="back up state_dir + config to a tar.gz")
     backup_p.add_argument("-c", "--config", help="path to clauster.yml")
@@ -360,7 +365,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "hash-metrics-token":
         return _hash_metrics_token()
     if args.command == "doctor":
-        return _doctor(args.config)
+        return _doctor(args.config, token=args.token or os.environ.get(ops.API_TOKEN_ENV))
     if args.command == "backup":
         return _backup(args.config, args.output)
     if args.command == "restore":
@@ -689,9 +694,11 @@ def _api_token_revoke(config_path: str | None, label: str) -> int:
 _STATUS_MARK = {ops.OK: "✓", ops.WARN: "!", ops.FAIL: "✗"}
 
 
-def _doctor(config_path: str | None) -> int:
-    """Print every doctor check to stderr; exit 1 when any of them failed."""
-    checks, ok = ops.run_doctor(config_path)
+def _doctor(config_path: str | None, *, token: str | None) -> int:
+    """Print whose results these are, then every doctor check, to stderr; exit 1 on a FAIL."""
+    report = ops.run_cli_doctor(config_path, token=(token or "").strip() or None)
+    print(f"clauster: {report.source}", file=sys.stderr)
+    checks, ok = report.checks, report.ok
     for c in checks:
         print(
             f"  {_STATUS_MARK.get(c.status, '?')} {c.name:<16} {c.detail}",

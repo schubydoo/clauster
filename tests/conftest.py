@@ -106,6 +106,9 @@ os.environ["USERPROFILE"] = _SESSION_HOME  # Windows resolves ``~`` from USERPRO
 os.environ["CLAUSTER_HOME"] = str(Path(_SESSION_HOME) / ".clauster")
 os.environ.pop("CLAUSTER_CONFIG", None)
 os.environ.pop("CLAUSTER_STATE_DIR", None)
+# A developer's real token must never ride a `clauster doctor` test to whatever server
+# holds the default port (TASK-507).
+os.environ.pop("CLAUSTER_API_TOKEN", None)
 atexit.register(lambda: shutil.rmtree(_SESSION_HOME, ignore_errors=True))
 
 # Route registration is the suite's single largest CPU slice: ~1170 tests build an app and

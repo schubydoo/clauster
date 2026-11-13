@@ -279,7 +279,7 @@ clauster hash-token           # mint an API token + hash for auth.api_token_hash
 clauster hash-metrics-token   # mint a /metrics scrape token + hash for observability.metrics_token_hash
 clauster api-token issue|list|rotate|revoke   # manage named public-API bearer tokens
 clauster mcp                  # read-only MCP server over stdio (list + status)
-clauster doctor               # diagnose config / environment
+clauster doctor               # diagnose config / environment (CLAUSTER_API_TOKEN set: the server's view)
 clauster backup | restore | migrate
 clauster install-service {systemd|launchd|windows}
 clauster reap-environments    # reap ghost bridge environments (dry-run by default)

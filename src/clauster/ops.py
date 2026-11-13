@@ -1,13 +1,15 @@
 """Operational CLIs: doctor / backup / restore / migrate / install-service (spec §"v0.2").
 
 Kept separate from ``__main__`` so the logic is unit-testable without argparse. None
-of these touch the network or spawn bridges; they inspect config + manage state_dir.
+of these spawn bridges; they inspect config + manage state_dir. The only network use is
+doctor's loopback requests to the server that holds the configured port.
 """
 
 from __future__ import annotations
 
 import contextlib
 import http.client
+import ipaddress
 import json
 import logging
 import ntpath
@@ -329,14 +331,25 @@ def run_doctor(
     # port (warn-only; see the ``check_port`` paragraph in the docstring)
     if check_port:
         port = _check_port(config.host, config.port)
-        checks.append(port)
         # #1663: something holds the port, so ask it for its own health verdict. A CLI
         # run cannot see inside the running server (a frozen binary's unpacked files,
         # for one), but the server reports that through /healthz.
+        cert_file = _server_cert_file(config)
+        server = None
         if port.status == WARN:
-            server = _check_running_server(config.port, cert_file=_server_cert_file(config))
-            if server is not None:
-                checks.append(server)
+            server = _check_running_server(config.port, cert_file=cert_file)
+        if (
+            server is not None
+            and server.status == OK
+            and (cert_file is not None or _listener_owner_refusal(config.port) is None)
+        ):
+            # TASK-507: a port held by this deployment's own healthy server is the
+            # expected state, not a warning. The proof is the pinned certificate, or
+            # without TLS a listener this same user owns. Any other holder keeps the WARN.
+            port = Check("port", OK, f"{config.port} in use by the running Clauster server")
+        checks.append(port)
+        if server is not None:
+            checks.append(server)
 
     # source-checkout freshness (only for editable/from-source installs)
     fresh = _check_repo_freshness()
@@ -1210,6 +1223,27 @@ _PEM_CERT_END = "-----END CERTIFICATE-----"
 _SERVER_PROBE_TIMEOUT = 2.0
 
 
+def _loopback_connection(
+    port: int, *, cert_file: Path | None, timeout: float
+) -> http.client.HTTPConnection:
+    """Return an unopened connection to loopback ``port``, pinned to ``cert_file`` with TLS.
+
+    With TLS the context trusts exactly one certificate: the first one in ``cert_file``,
+    which is the one the server presents. Raises ``OSError`` or ``ValueError`` when that
+    file cannot be read or holds no usable certificate.
+    """
+    if cert_file is None:
+        return http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
+    pem = cert_file.read_text(encoding="ascii")
+    leaf = pem[: pem.index(_PEM_CERT_END) + len(_PEM_CERT_END)]
+    # cadata replaces the system trust store: this one certificate is the only anchor.
+    context = ssl.create_default_context(cadata=leaf)
+    context.check_hostname = False
+    # Accept the pinned certificate itself as the anchor even when a CA issued it.
+    context.verify_flags |= ssl.VERIFY_X509_PARTIAL_CHAIN
+    return http.client.HTTPSConnection("127.0.0.1", port, timeout=timeout, context=context)
+
+
 def _check_running_server(port: int, *, cert_file: Path | None) -> Check | None:
     """Report the ``/healthz`` verdict of the server already listening on loopback ``port``.
 
@@ -1224,28 +1258,15 @@ def _check_running_server(port: int, *, cert_file: Path | None) -> Check | None:
     succeeds against a listener that holds this certificate's private key. A listener that
     presents any other certificate is a WARN, never a silent pass.
     """
-    conn: http.client.HTTPConnection
-    if cert_file is not None:
-        try:
-            pem = cert_file.read_text(encoding="ascii")
-            leaf = pem[: pem.index(_PEM_CERT_END) + len(_PEM_CERT_END)]
-            # cadata replaces the system trust store: this one certificate is the only anchor.
-            context = ssl.create_default_context(cadata=leaf)
-        except (OSError, ValueError) as exc:
-            return Check(
-                "server",
-                WARN,
-                f"cannot check the server on port {port}: the certificate file {cert_file} "
-                f"is unreadable ({type(exc).__name__})",
-            )
-        context.check_hostname = False
-        # Accept the pinned certificate itself as the anchor even when a CA issued it.
-        context.verify_flags |= ssl.VERIFY_X509_PARTIAL_CHAIN
-        conn = http.client.HTTPSConnection(
-            "127.0.0.1", port, timeout=_SERVER_PROBE_TIMEOUT, context=context
+    try:
+        conn = _loopback_connection(port, cert_file=cert_file, timeout=_SERVER_PROBE_TIMEOUT)
+    except (OSError, ValueError) as exc:
+        return Check(
+            "server",
+            WARN,
+            f"cannot check the server on port {port}: the certificate file {cert_file} "
+            f"is unreadable ({type(exc).__name__})",
         )
-    else:
-        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=_SERVER_PROBE_TIMEOUT)
     try:
         conn.request("GET", "/healthz")
         resp = conn.getresponse()
@@ -1278,6 +1299,228 @@ def _check_running_server(port: int, *, cert_file: Path | None) -> Check | None:
     return Check(
         "server", FAIL, f"running server on port {port} answers /healthz with {status}{reason}"
     )
+
+
+#: The environment variable ``clauster doctor`` reads its API token from (TASK-507).
+#: ``procutil.is_secret_env_name`` matches it, so no bridge or agent inherits it.
+API_TOKEN_ENV = "CLAUSTER_API_TOKEN"  # noqa: S105 — a variable name, not a secret
+# The server runs its full doctor (``claude --version``, the login probe, ...) per request.
+_SERVER_DOCTOR_TIMEOUT = 60.0
+_SERVER_DOCTOR_MAX_BYTES = 1 << 20
+# A bearer token that a header can carry: visible ASCII, no space, no CR or LF.
+_HEADER_TOKEN_RE = re.compile(r"[\x21-\x7e]+")
+
+
+def _is_loopback_host(host: str) -> bool:
+    """Return whether the configured bind ``host`` is a loopback name or address."""
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _same_owner(proc: psutil.Process, me: psutil.Process) -> bool:
+    """Return whether ``proc`` runs as the same user as ``me``.
+
+    POSIX compares effective uids. Windows has no uids, so it compares the owner names;
+    reading another user's process there raises ``AccessDenied``, which the caller
+    treats as "cannot check".
+    """
+    if sys.platform == "win32":
+        return proc.username() == me.username()
+    return proc.uids().effective == me.uids().effective
+
+
+def _listener_owner_refusal(port: int) -> str | None:
+    """Return why the listener on ``port`` is not provably this user's, or ``None`` if it is.
+
+    Without TLS nothing proves who holds the port, so a credential goes only to a
+    listener that a process of this same user owns. Every listening socket on the port
+    must pass. A socket that cannot be checked is a refusal: another user's socket has
+    no visible pid for an unprivileged caller, and macOS lists sockets only for root.
+    """
+    try:
+        conns = psutil.net_connections(kind="inet")
+    except (psutil.Error, OSError) as exc:
+        return f"the owner of the listener on port {port} cannot be checked ({type(exc).__name__})"
+    pids = {
+        c.pid for c in conns if c.status == psutil.CONN_LISTEN and c.laddr and c.laddr.port == port
+    }
+    if not pids:
+        return f"the owner of the listener on port {port} cannot be checked (no listening socket)"
+    if None in pids:
+        return f"the listener on port {port} belongs to a process that this user cannot see"
+    try:
+        me = psutil.Process()
+        if not all(_same_owner(psutil.Process(pid), me) for pid in pids if pid is not None):
+            return f"the listener on port {port} belongs to another user"
+    except psutil.Error as exc:
+        return f"the owner of the listener on port {port} cannot be checked ({type(exc).__name__})"
+    return None
+
+
+def _plain_http_refusal(host: str, port: int) -> str | None:
+    """Return why the token must not go over plain HTTP to ``port``, or ``None`` if it may.
+
+    Plain HTTP carries the token only to a loopback bind whose listener this user owns.
+    Any other case fails closed, and the reason says the token was not sent.
+    """
+    if not _is_loopback_host(host):
+        return (
+            f"the server binds {host}, which is not a loopback address, and serves plain "
+            "HTTP; the token is sent only over TLS or to a loopback bind, so it was not sent"
+        )
+    refusal = _listener_owner_refusal(port)
+    return None if refusal is None else f"{refusal}, so the token was not sent"
+
+
+class ServerDoctorUnavailable(Exception):
+    """The running server's doctor results could not be read; the message says why.
+
+    The message never carries the token, a header, or the response body.
+    """
+
+
+@dataclass
+class DoctorReport:
+    """What ``clauster doctor`` prints: the rows, the verdict, and whose results they are."""
+
+    checks: list[Check]
+    ok: bool
+    source: str
+
+
+def _printable(text: str) -> str:
+    """Replace control characters from a server response, so a row cannot drive the terminal."""
+    return "".join(ch if ch.isprintable() else "?" for ch in text)
+
+
+def _parse_server_doctor(body: bytes) -> tuple[list[Check], bool] | None:
+    """Return the rows and verdict of an ``/api/doctor`` body, or ``None`` if it is malformed.
+
+    Fails closed: an empty list or any malformed row rejects the whole body, and the
+    verdict is a pass only when the server says so and no row is a FAIL.
+    """
+    try:
+        data = json.loads(body)
+    except (ValueError, RecursionError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    rows, ok = data.get("checks"), data.get("ok")
+    if not isinstance(rows, list) or not rows or not isinstance(ok, bool):
+        return None
+    checks: list[Check] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            return None
+        name, status, detail = row.get("name"), row.get("status"), row.get("detail")
+        if not (isinstance(name, str) and isinstance(detail, str) and status in (OK, WARN, FAIL)):
+            return None
+        checks.append(Check(_printable(name), status, _printable(detail)))
+    return checks, ok and all(c.status != FAIL for c in checks)
+
+
+def fetch_server_doctor(
+    port: int, *, cert_file: Path | None, token: str
+) -> tuple[list[Check], bool]:
+    """Return the ``/api/doctor`` rows and verdict of the server on loopback ``port``.
+
+    The request carries ``token`` as ``Authorization: Bearer``. It goes only to
+    ``127.0.0.1:port``, and with TLS only after a handshake against the configured
+    certificate (see :func:`_loopback_connection`). Raises
+    :class:`ServerDoctorUnavailable` with a plain reason on any other outcome: a token a
+    header cannot carry, a certificate mismatch, no answer, a refusal (``401``/``403``),
+    another status, or a body this CLI cannot read.
+    """
+    if not _HEADER_TOKEN_RE.fullmatch(token):
+        # Checked before the request: http.client's own rejection quotes the header value.
+        raise ServerDoctorUnavailable(
+            "the API token holds characters that an HTTP header cannot carry"
+        )
+    try:
+        conn = _loopback_connection(port, cert_file=cert_file, timeout=_SERVER_DOCTOR_TIMEOUT)
+    except (OSError, ValueError) as exc:
+        raise ServerDoctorUnavailable(
+            f"the certificate file {cert_file} is unreadable ({type(exc).__name__})"
+        ) from None
+    try:
+        conn.request(
+            "GET",
+            "/api/doctor",
+            headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+        )
+        resp = conn.getresponse()
+        status = resp.status
+        body = resp.read(_SERVER_DOCTOR_MAX_BYTES + 1) if status == 200 else b""
+    except ssl.SSLCertVerificationError:
+        raise ServerDoctorUnavailable(
+            f"the server on port {port} presents a different certificate than {cert_file}"
+        ) from None
+    except (OSError, http.client.HTTPException) as exc:
+        raise ServerDoctorUnavailable(
+            f"the server on port {port} did not answer the doctor request ({type(exc).__name__})"
+        ) from None
+    finally:
+        conn.close()
+    if status in (401, 403):
+        raise ServerDoctorUnavailable(
+            f"the server on port {port} refused the API token (HTTP {status})"
+        )
+    if status != 200:
+        raise ServerDoctorUnavailable(
+            f"the server on port {port} answered the doctor request with HTTP {status}"
+        )
+    parsed = _parse_server_doctor(body) if len(body) <= _SERVER_DOCTOR_MAX_BYTES else None
+    if parsed is None:
+        raise ServerDoctorUnavailable(
+            f"the server on port {port} sent doctor results that this CLI cannot read"
+        )
+    return parsed
+
+
+def run_cli_doctor(config_path: str | None, *, token: str | None) -> DoctorReport:
+    """Return what ``clauster doctor`` shows: the running server's results, else local ones.
+
+    When a server holds the configured port and ``token`` is given, the report is that
+    server's own ``/api/doctor`` result: the same rows the dashboard panel shows,
+    ``bundle`` and the server-side ``extra:*`` rows included. In every other case it is
+    :func:`run_doctor` on this machine, and ``source`` names the reason. The two are never
+    mixed. Nothing here reads a token store: the only credential is the one passed in.
+    """
+    try:
+        config = load_config(config_path)
+    except (OSError, ValueError, yaml.YAMLError):
+        # run_doctor reports the same failure as its `config` row.
+        reason = "the config did not load"
+    else:
+        port = config.port
+        if _check_port(config.host, port).status == OK:
+            reason = f"no server listens on 127.0.0.1:{port}"
+        elif not token:
+            reason = (
+                f"a server listens on port {port}, but no API token was given "
+                f"(pass --token or set {API_TOKEN_ENV})"
+            )
+        else:
+            cert_file = _server_cert_file(config)
+            # With TLS the certificate pin proves the listener; without it, prove the owner.
+            refusal = None if cert_file is not None else _plain_http_refusal(config.host, port)
+            if refusal is not None:
+                reason = refusal
+            else:
+                try:
+                    checks, ok = fetch_server_doctor(port, cert_file=cert_file, token=token)
+                except ServerDoctorUnavailable as exc:
+                    reason = str(exc)
+                else:
+                    return DoctorReport(
+                        checks, ok, f"showing the results of the running server on port {port}"
+                    )
+    checks, ok = run_doctor(config_path)
+    return DoctorReport(checks, ok, f"showing the local checks of this CLI: {reason}")
 
 
 # ----- backup / restore -------------------------------------------------
