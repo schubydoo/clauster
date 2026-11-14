@@ -62,7 +62,7 @@ def test_validate_rejects_each_owned_key(owned_key: str) -> None:
 def test_owned_key_error_names_its_tab(owned_key: str) -> None:
     # Every carved key maps to a real dashboard tab, and the refusal says which.
     tab = cws.OWNED_KEY_TABS[owned_key]
-    assert tab in {"Permissions", "Hooks", "Plugins", "MCP"}
+    assert tab in {"Permissions", "Hooks", "Plugins", "MCP", "Skills"}
     with pytest.raises(cws.SettingsCarveError, match=f"{owned_key} on the {tab} tab"):
         cws.validate_misc_settings({owned_key: {}})
 
