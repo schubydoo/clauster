@@ -188,10 +188,14 @@ async def api_config_write_marketplaces_action(
     binary = config.claude.binary
     # TASK-517: an update reports whether each marketplace's plugin list changed, from a
     # read of its checkout before and after. A failed read BEFORE fails closed, nothing run.
+    # TASK-532: only a github, git or url source keeps a copy that the update rewrites (a
+    # directory or file source is read in place). `live` names every other source, and
+    # their message compares nothing.
     before: dict[str, list[str] | None] = {}
+    live: frozenset[str] = frozenset()
     if op == "update":
         try:
-            before = await asyncio.to_thread(
+            before, live = await asyncio.to_thread(
                 config_write_plugins.marketplace_plugin_names, binary, cwd, name
             )
         except config_write.ConfigWriteError as exc:
@@ -240,12 +244,15 @@ async def api_config_write_marketplaces_action(
         # The refresh committed: a failed read AFTER it is reported, never a 400.
         after: dict[str, list[str] | None] | None
         try:
-            after = await asyncio.to_thread(
+            after, live_after = await asyncio.to_thread(
                 config_write_plugins.marketplace_plugin_names, binary, cwd, name
             )
+            live |= live_after
         except config_write.ConfigWriteError:
             after = None
-        result["message"] = config_write_plugins.describe_marketplace_update(name, before, after)
+        result["message"] = config_write_plugins.describe_marketplace_update(
+            name, before, after, live=live
+        )
     if name is not None:
         result["name"] = name
     if source is not None:

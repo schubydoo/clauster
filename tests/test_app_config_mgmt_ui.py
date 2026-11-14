@@ -553,6 +553,38 @@ def test_plugins_surface_present_when_enabled(write_config):
     assert no_local and '"plugins"' not in no_local.group(1)
 
 
+def test_marketplace_remove_renders_only_where_the_scope_declares_it(write_config):
+    # TASK-527: `marketplace remove --scope` refuses a name that scope does not declare, so
+    # the Remove button sits under the declared-names gate and the page reads them.
+    html = _html(write_config, _ON)
+    gated = re.search(
+        r'<template x-if="configMgmtMarketAtScope\(m\)">\s*<button[^>]*'
+        r"data-test=\"'cm-market-remove-' \+ m\.name\"",
+        html,
+    )
+    assert gated, "the marketplace Remove button must sit under configMgmtMarketAtScope(m)"
+    assert html.count("data-test=\"'cm-market-remove-' + m.name\"") == 1
+    assert '"/api/config-write/marketplaces/declared?"' in html
+    # ...and the read reaches the rows: started with the list, set together with it.
+    assert "const declaredRead = this._loadDeclared(myGen);" in html
+    assert "pl.declared = declared;" in html
+    # A row no read scope declares names what was not read (the E2E covers a failed read;
+    # this editor's User-scope-off wording has no browser test).
+    assert 'if (!read.includes("user")) tail += " User scope can declare it' in html
+    assert '" No other scope that Clauster could read declares it.' in html
+    assert 'if (op === "remove" && !this.configMgmtMarketAtScope({ name: name })) return;' in html
+    assert "data-test=\"'cm-market-readonly-' + m.name\"" in html
+    assert "data-test=\"'cm-market-switch-scope-' + m.name\"" in html
+
+
+@pytest.mark.parametrize(("extra", "rendered"), [(_ON, "false"), (_ON_USER, "true")])
+def test_marketplace_declared_reads_user_file_only_with_user_scope(write_config, extra, rendered):
+    # Project and Local scope read the User file's declarations only when the editor can
+    # open User scope (the declared route refuses user scope otherwise).
+    html = _html(write_config, extra)
+    assert f'if ({rendered}) scopes.push("user");' in html
+
+
 # ---- User scope option is gated on allow_user_scope -------------------------
 
 

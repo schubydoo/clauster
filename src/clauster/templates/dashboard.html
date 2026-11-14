@@ -3659,7 +3659,7 @@
               <!-- Marketplaces -->
               <div class="form-label small mb-1">Marketplaces</div>
               <div class="text-secondary small" x-show="configMgmt.plugins.marketplaces.length === 0" x-cloak>
-                No marketplaces declared at this scope.
+                No marketplaces are known on this host.
               </div>
               <table class="table table-sm mb-2" data-test="cm-marketplaces-table"
                      x-show="configMgmt.plugins.marketplaces.length" x-cloak>
@@ -3674,6 +3674,18 @@
                         <span class="fw-medium" x-text="m.name"></span>
                         <div class="text-secondary small font-monospace text-truncate cm-value-cap-wide"
                              :title="configMgmtMarketSource(m)" x-text="configMgmtMarketSource(m)"></div>
+                        {# TASK-527: the list is one pool for the host. Remove works only where
+                           this scope's settings file declares the marketplace; any other row
+                           says so, with a link to a scope of this project that declares it. #}
+                        <div class="text-secondary small" x-show="!configMgmtMarketAtScope(m)" x-cloak
+                             :data-test="'cm-market-readonly-' + m.name">
+                          <span x-text="configMgmtMarketElsewhereNote(m)"></span>
+                          <button type="button" class="btn btn-link btn-sm p-0 align-baseline"
+                                  x-show="configMgmtMarketScopeLink(m)" x-cloak
+                                  :data-test="'cm-market-switch-scope-' + m.name"
+                                  :aria-label="configMgmtMarketScopeLink(m) + ' for ' + m.name"
+                                  @click="configMgmtOpenMarketScope(m)" x-text="configMgmtMarketScopeLink(m)"></button>
+                        </div>
                         {# The offered list's state for a screen reader: this row is always
                            shown, so the region is always mounted (TASK-508). The visible
                            loading, error and empty lines below are aria-hidden. #}
@@ -3693,9 +3705,11 @@
                           <button type="button" class="btn btn-sm btn-ghost-secondary"
                                   :data-test="'cm-market-update-' + m.name"
                                   :disabled="!configMgmtCanPluginAct()" @click="configMgmtMarketAction(m.name, 'update')">Update</button>
-                          <button type="button" class="btn btn-sm btn-ghost-danger"
-                                  :data-test="'cm-market-remove-' + m.name"
-                                  :disabled="!configMgmtCanPluginActFresh()" @click="configMgmtMarketAction(m.name, 'remove')">Remove</button>
+                          <template x-if="configMgmtMarketAtScope(m)">
+                            <button type="button" class="btn btn-sm btn-ghost-danger"
+                                    :data-test="'cm-market-remove-' + m.name"
+                                    :disabled="!configMgmtCanPluginActFresh()" @click="configMgmtMarketAction(m.name, 'remove')">Remove</button>
+                          </template>
                         </span>
                       </td>
                     </tr>

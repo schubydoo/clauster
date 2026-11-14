@@ -495,8 +495,9 @@ def config_mgmt_plugins_server(
     ``plugin list --available --json`` (TASK-516) offers ``newbie@market`` (its description
     holds markup, which must show as text) next to the installed ones, plus an entry of the
     CLI's built-in directory that the tab must not show. A second marketplace, ``empty``,
-    offers nothing. Every ``claude plugin`` call is logged to ``plugin-argv.jsonl`` beside
-    the state dir (``Server.state_dir.parent``).
+    offers nothing, and a third, ``loose``, is declared by no settings file. Every
+    ``claude plugin`` call is logged to ``plugin-argv.jsonl`` beside the state dir
+    (``Server.state_dir.parent``).
     """
     tmp = tmp_path_factory.mktemp("e2e-configmgmt-plugins")
     yield from _start_plugins_server(tmp, mutable_projects_tree)
@@ -519,6 +520,13 @@ def config_mgmt_plugins_alias_server(
         pytest.skip("this host cannot create symlinks")
     tmp = tmp_path_factory.mktemp("e2e-configmgmt-plugins-alias")
     yield from _start_plugins_server(tmp, mutable_projects_tree)
+
+
+def _write_declared(settings: Path, marketplaces: dict) -> None:
+    """Write a settings file at ``settings`` that declares ``marketplaces``."""
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    doc = {"extraKnownMarketplaces": marketplaces}
+    settings.write_bytes((json.dumps(doc, indent=2) + "\n").encode())
 
 
 def _start_plugins_server(tmp: Path, mutable_projects_tree: Path) -> Iterator[Server]:
@@ -567,7 +575,18 @@ def _start_plugins_server(tmp: Path, mutable_projects_tree: Path) -> Iterator[Se
     marketplaces = [
         {"name": "market", "source": "github", "repo": "owner/repo"},
         {"name": "empty", "source": "directory", "path": "/srv/empty"},
+        {"name": "loose", "source": "github", "repo": "owner/loose"},
     ]
+    # TASK-527: `market` is declared in alpha's Project settings and `empty` in the User
+    # settings, so each scope can remove only its own. No settings file declares `loose`.
+    _write_declared(
+        mutable_projects_tree / "alpha" / ".claude" / "settings.json",
+        {"market": {"source": {"source": "github", "repo": "owner/repo"}}},
+    )
+    _write_declared(
+        tmp / "home" / ".claude" / "settings.json",
+        {"empty": {"source": {"source": "directory", "path": "/srv/empty"}}},
+    )
     yield from _start_server(
         tmp,
         mutable_projects_tree,
