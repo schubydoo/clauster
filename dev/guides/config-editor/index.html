@@ -2246,12 +2246,14 @@ row tells the first two apart:</p>
 <h3 id="the-settings-tab">The Settings tab<a class="headerlink" href="#the-settings-tab" title="Permanent link">&para;</a></h3>
 <p>The Settings tab edits each top-level key of the settings file for the scope,
 except the keys that another tab writes. These are <code>permissions</code> and <code>autoMode</code>
-(the Permissions tab), <code>hooks</code> (the Hooks tab) and <code>enabledPlugins</code> (the Plugins
-tab). A save that names one of them is refused (<code>422</code>), and the error names the
-tab to use. Clauster checks the shape of <code>env</code> only. It does not run or interpret
-any other value. Claude Code reads the values when a session starts. A save
-whose objects and lists nest more than 64 levels deep is refused (<code>422</code>,
-"settings is nested too deeply"). The settings object itself is level 1.</p>
+(the Permissions tab), <code>hooks</code> (the Hooks tab), <code>enabledPlugins</code> (the Plugins
+tab) and <code>skillOverrides</code> (the Skills tab). A save that names one of them is
+refused (<code>422</code>), and the error names the tab to use. The Settings tab does not
+show these keys, and a Settings save keeps their stored values. Clauster checks
+the shape of <code>env</code> only. It does not run or interpret any other value. Claude
+Code reads the values when a session starts. A save whose objects and lists nest
+more than 64 levels deep is refused (<code>422</code>, "settings is nested too deeply"). The
+settings object itself is level 1.</p>
 <p>The tab has two modes, Rows and Raw JSON. In Rows mode, each top-level key of the
 file is one row, and the editor follows the JSON type of the value:</p>
 <ul>
@@ -2296,7 +2298,6 @@ Rows mode, and a note above the rows says why.</p>
 <li><code>enabledMcpjsonServers</code> and <code>disabledMcpjsonServers</code>. The MCP tab shows an
   approval from a settings file as read-only, with a <code>settings</code> badge. Change
   it here.</li>
-<li><code>skillOverrides</code>. The Skills tab has no editor for it yet.</li>
 <li><code>disabledPlugins</code>. Claude Code 2.1.318 does not read this key. If a file
   still has it, remove it here.</li>
 </ul>
@@ -2360,7 +2361,8 @@ object such as <code>env</code> key by key and combines the lists from each file
 value from a higher scope replaces the lower one, and <code>fallbackModel</code> comes
 whole from one file. A key or value that a file is not allowed to set is left
 out. When more than one file makes up a value, the <strong>From</strong> column names each file.
-Managed settings and the <code>--settings</code> flag are not part of the view.</p>
+Managed settings and the <code>--settings</code> flag are not part of the view. The keys
+that another tab writes, such as <code>skillOverrides</code>, are not part of it either.</p>
 <p>If a scope fails to load, the tab clears its rows. A save therefore cannot write
 the values of the scope that you looked at before into the new scope.</p>
 <h3 id="the-permissions-tab">The Permissions tab<a class="headerlink" href="#the-permissions-tab" title="Permanent link">&para;</a></h3>
@@ -3177,9 +3179,12 @@ no key is <code>on</code>.</p>
 </table>
 <p>The panel shows one row for each skill folder at the scope, and one row for
 each key that is already in the file. At Local scope, the rows show the skill
-folders of the project. A key that matches no folder gets a <strong>no skill folder</strong>
-badge, so you can see it and remove it. A stored value that Claude Code does
-not read shows as <strong>Not valid</strong>. Clauster refuses a save until you choose a
+folders of the project and your user skill folders, because Claude Code applies
+a key in <code>.claude/settings.local.json</code> to a user skill too. The user folders show
+only when <code>config_write.allow_user_scope</code> is on. Without it, type the name of a
+user skill in <strong>Add a skill name</strong>. A key that matches no folder gets a
+<strong>no skill folder</strong> badge, so you can see it and remove it. A stored value that
+Claude Code does not read shows as <strong>Not valid</strong>. Clauster refuses a save until you choose a
 value for that row.</p>
 <p>To change the visibility of skills:</p>
 <ol>
@@ -3195,10 +3200,13 @@ value for that row.</p>
 It does not change the other keys in the settings file. If the file changed
 after the panel loaded it, Clauster refuses the save and writes nothing. Close
 and reopen the panel to load the file again.</p>
-<p>A key is the name of a skill, as Claude Code shows it. The key can be a
-frontmatter <code>name</code>, the name of a bundled skill such as <code>doctor</code>, or a name with
-a colon such as <code>anthropic-skills:pdf</code>. Clauster refuses an empty key, the key
-<code>__proto__</code>, and a name that Claude Code cannot show. The refusal names the key,
+<p>A key is the name of a skill, as Claude Code shows it. For a skill in a skills
+folder, the name is the name of its folder, not the <code>name</code> in its frontmatter.
+Claude Code 2.1.319 uses the frontmatter <code>name</code> for display only, and a key with
+that name has no effect. Clauster saves such a key and marks its row
+<strong>no skill folder</strong>. The key can also be the name of a bundled skill such as
+<code>doctor</code>, or a name with a colon such as <code>anthropic-skills:pdf</code>. Clauster refuses
+an empty key, the key <code>__proto__</code>, and a name that Claude Code cannot show. The refusal names the key,
 and Clauster writes nothing. The panel sends each name as you typed it, so a
 space at the start or the end is part of the name.</p>
 <h2 id="troubleshooting-and-limits">Troubleshooting and limits<a class="headerlink" href="#troubleshooting-and-limits" title="Permanent link">&para;</a></h2>
