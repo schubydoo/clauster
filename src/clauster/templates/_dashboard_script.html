@@ -519,6 +519,10 @@
       sortMeta: {},       // project name -> {last_used: iso|null, cost_usd: float|null}; Zone 1 sort (lazy)
       preflight: {},      // project name -> per-project preflight result ({ok, checks}); lazy-loaded
       preflightOpen: {},  // project name -> true while its preflight-warning detail is expanded
+      preflightError: {},  // project name -> why its last check run failed (TASK-489)
+      preflightRechecking: {},  // project name -> true while its "not run" re-check is in flight
+      preflightTimeoutMs: 60000,  // deadline for one /preflight request (the batch checks every project)
+      _preflightSeq: {},  // project name -> newest preflight request number; older answers are dropped
       metrics: {},        // row key (instance_id) -> live CPU/mem/disk sample (key dropped when not running)
       trustState: {},     // project name -> 'trusted' | 'untrusted' (reactive; no reload on trust)
       trusting: {},       // project name -> bool (trust request in flight)
@@ -658,11 +662,15 @@
           this.customName[n] = "";
         }
         this.trustState = { ...INITIAL_TRUST };
-        await this.refresh();
         // Preflight in ONE batched request (server does a single discovery scan) so
         // first paint doesn't fire N per-project /preflight calls (was O(N²) on the
         // server). Usage stays per-project but rides the cached discovery cheaply.
+        // TASK-489: sent beside the first refresh, not after it. The refresh fetches have
+        // no deadline, so a hung poll would otherwise keep every row's checks from running
+        // at all, and a row that never ran its checks looks launch-ready.
+        const firstRefresh = this.refresh();
         this.loadAllPreflight();
+        await firstRefresh;
         for (const n of PROJECT_NAMES) { this.loadUsage(n); }
         this.loadReadiness();  // fire-and-forget: doctor runs subprocess probes, don't block first paint
         this.loadLoginStatus();  // #838: login pill on its own path — never gates core refresh()
@@ -3967,7 +3975,7 @@
           });
           if (c.gen !== gen) return;
           if (this._authExpired(res)) return;
-          if (res.ok) { c.saved = true; ap.confirm = ""; await this._loadMcp(gen); await this.loadPreflight(c.project); if (!this.preflight[c.project]) this.mcpBlockUntilReloaded[c.project] = true; }
+          if (res.ok) { c.saved = true; ap.confirm = ""; this.mcpBlockUntilReloaded[c.project] = true; this._preflightTake(c.project); await this._loadMcp(gen); await this.loadPreflight(c.project); }
           else await this._configMgmtWriteErr(res);
         } catch (e) { this._configMgmtWriteFailed(e, gen, "Save failed."); }
         finally {
@@ -3992,7 +4000,7 @@
           });
           if (c.gen !== gen) return;
           if (this._authExpired(res)) return;
-          if (res.ok) { c.saved = true; ap.resetConfirm = ""; await this._loadMcp(gen); await this.loadPreflight(c.project); if (!this.preflight[c.project]) this.mcpBlockUntilReloaded[c.project] = true; }
+          if (res.ok) { c.saved = true; ap.resetConfirm = ""; this.mcpBlockUntilReloaded[c.project] = true; this._preflightTake(c.project); await this._loadMcp(gen); await this.loadPreflight(c.project); }
           else await this._configMgmtWriteErr(res);
         } catch (e) { this._configMgmtWriteFailed(e, gen, "Reset failed."); }
         finally {
@@ -5781,26 +5789,122 @@
         return Math.round(s / 86400) + "d";
       },
       // --- per-project preflight readiness (FE-1b) ---
+      // TASK-489: a check run that fails sets preflightError[name], and the row shows a
+      // "Checks not run" pill, so "the checks did not run" never looks like the silent
+      // all-good row. Each request has a deadline, so a hung one cannot hide it for good.
+      // A failed run keeps the earlier result, so a stale MCP-approval warning still
+      // soft-blocks a launch (fail closed) until a run succeeds. Each request takes a
+      // per-project sequence number, and only the newest request's answer is applied.
+      _preflightTake(name) {
+        this._preflightSeq[name] = (this._preflightSeq[name] || 0) + 1;
+        return this._preflightSeq[name];
+      },
+      _preflightFailed(name, why) {
+        this.preflightError[name] = why;
+        this.preflightOpen[name] = false;  // a later warning must not re-open with no click
+      },
+      // Returns true when this request's answer (a result or a failure) was applied.
       async loadPreflight(name) {
+        const seq = this._preflightTake(name);
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), this.preflightTimeoutMs);
         try {
-          const res = await fetch(ROOT + "/api/projects/" + encodeURIComponent(name) + "/preflight");
-          if (this._authExpired(res)) return;
-          if (res.ok) { this.preflight[name] = await res.json(); delete this.mcpBlockUntilReloaded[name]; }
-          else delete this.preflight[name];  // drop a stale cache on a non-OK response
-        } catch (e) { delete this.preflight[name]; /* advisory — pill hides on failure */ }
+          const res = await fetch(ROOT + "/api/projects/" + encodeURIComponent(name) + "/preflight",
+                                  { signal: ctrl.signal });
+          if (this._authExpired(res)) return false;
+          const body = res.ok ? await res.json() : null;
+          if (seq !== this._preflightSeq[name]) return false;  // a newer request owns this row
+          if (res.ok) {
+            this.preflight[name] = body;
+            delete this.preflightError[name];
+            delete this.mcpBlockUntilReloaded[name];
+          } else {
+            this._preflightFailed(name, "the server answered HTTP " + res.status);
+          }
+          return true;
+        } catch (e) {
+          if (seq !== this._preflightSeq[name]) return false;
+          this._preflightFailed(name, "the request failed or timed out");
+          return true;
+        } finally { clearTimeout(timer); }
       },
       // First-paint batch: one request returns {name: {ok, checks}} for every
       // project from a single server-side discovery scan (avoids N per-project calls).
       async loadAllPreflight() {
+        const seqs = {};
+        for (const n of PROJECT_NAMES) seqs[n] = this._preflightTake(n);
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), this.preflightTimeoutMs);
         try {
-          const res = await fetch(ROOT + "/api/projects/preflight");
+          const res = await fetch(ROOT + "/api/projects/preflight", { signal: ctrl.signal });
           if (this._authExpired(res)) return;
-          if (!res.ok) return;  // advisory — leave per-project pills hidden
+          if (!res.ok) { this._allPreflightFailed(seqs, "the server answered HTTP " + res.status); return; }
           const all = await res.json();
           for (const n of PROJECT_NAMES) {
-            if (all[n]) this.preflight[n] = all[n];
+            if (seqs[n] !== this._preflightSeq[n]) continue;  // a newer request owns this row
+            if (all && all[n]) {
+              // An applied answer was sent after any config write (the save path supersedes
+              // older requests), so it may clear the write's block like loadPreflight does.
+              this.preflight[n] = all[n];
+              delete this.preflightError[n];
+              delete this.mcpBlockUntilReloaded[n];
+            } else this._preflightFailed(n, "the server sent no result for this project");
           }
-        } catch (e) { /* advisory — pills hide on failure */ }
+        } catch (e) {
+          this._allPreflightFailed(seqs, "the request failed or timed out");
+        } finally { clearTimeout(timer); }
+      },
+      _allPreflightFailed(seqs, why) {
+        for (const n of PROJECT_NAMES) {
+          if (seqs[n] === this._preflightSeq[n]) this._preflightFailed(n, why);
+        }
+      },
+      // One state per project row: checking | unavailable | warning | passed. Only
+      // "passed" is silent; a result with no check rows is "unavailable", never a pass.
+      preflightState(name) {
+        if (this.preflightError[name]) return "unavailable";
+        const p = this.preflight[name];
+        if (!p) return "checking";
+        if (!Array.isArray(p.checks) || !p.checks.length) return "unavailable";
+        return this.preflightWarnCount(name) ? "warning" : "passed";
+      },
+      preflightUnavailableTitle(name) {
+        const why = this.preflightError[name] || "the server sent no check rows";
+        return "Readiness checks for this project did not run (" + why +
+               "), so its readiness is unknown, not a pass. Click to run them again.";
+      },
+      // The "Checks not run" pill's click: one re-check at a time per project. A toast
+      // announces the result (a pass is otherwise silent). When the pill hides, focus moves
+      // to the row's next control instead of falling to the page, but only while the user
+      // has not moved focus elsewhere. A superseded re-check says nothing: the newer
+      // request owns the row.
+      async recheckPreflight(name) {
+        if (this.preflightRechecking[name]) return;
+        this.preflightRechecking[name] = true;
+        const active = document.activeElement;
+        const pill = active && active.dataset && active.dataset.test === "preflight-unavailable" ? active : null;
+        let applied = false;
+        try { applied = await this.loadPreflight(name); } finally { this.preflightRechecking[name] = false; }
+        if (!applied) return;
+        const st = this.preflightState(name);
+        if (st === "passed") this.toast(name + ": readiness checks passed", "success");
+        else if (st === "warning") this.toast(name + ": a readiness check needs attention", "warning");
+        else if (st === "unavailable") this.toast(name + ": readiness checks did not run", "error");
+        if (!pill || st === "unavailable") return;
+        // x-show applies a change in a later animation frame, so the target (the warning
+        // pill) can still be hidden here, and focus() on a hidden element does nothing.
+        // Retry for a few frames until it is visible, and stop once the user moves focus.
+        let frames = 0;
+        const move = () => {
+          const now = document.activeElement;
+          if (now !== pill && now !== document.body && now !== null) return;  // the user moved on
+          const row = document.querySelector('[data-project="' + (window.CSS ? CSS.escape(name) : name) + '"]');
+          const next = row && row.querySelector(st === "warning" ? '[data-test="preflight-pill"]'
+                                                                 : '[data-test="run-launch"]');
+          if (next && next.getClientRects().length) { next.focus(); return; }
+          if (++frames < 30) requestAnimationFrame(move);
+        };
+        this.$nextTick(move);
       },
       // WARN-status checks for a project (the ones worth flagging before a clean launch).
       preflightWarnings(name) {
@@ -6030,10 +6134,12 @@
       _mcpGateBlocks(name) {
         const pty = (this.resumeMode[name] || DEFAULT_RESUME_MODE) === "pty";
         // Fail closed if a just-applied approval/reset couldn't confirm the new readiness
-        // (loadPreflight failed and cleared the cache): a reset re-unapproves the committed
+        // (the cached result predates the write): a reset re-unapproves the committed
         // servers, so skipping the block there would hang the session at claude's prompt
-        // (#858 review). "Launch anyway" remains the override. The flag clears on the next
-        // successful preflight load.
+        // (#858 review). "Launch anyway" remains the override. The save path sets the flag
+        // BEFORE its reload and supersedes every request still in flight, so no answer the
+        // server computed before the write can clear it. Only a newer successful preflight
+        // load clears it, so a failed or superseded reload leaves it set (TASK-489).
         return pty && (!!this.mcpBlockUntilReloaded[name] || !!this._mcpApprovalCheck(name));
       },
       // The check's own message (which lists the specific unapproved servers), shown inside

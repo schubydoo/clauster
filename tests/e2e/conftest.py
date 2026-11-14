@@ -122,11 +122,16 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-def _wait_ready(port: int, proc: subprocess.Popen, timeout: float = 25.0) -> None:
+def _wait_ready(
+    port: int, proc: subprocess.Popen, *, log: Path | None, timeout: float = 25.0
+) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if proc.poll() is not None:
-            out = proc.stdout.read() if proc.stdout else ""
+            if log is not None:
+                out = log.read_text(encoding="utf-8", errors="replace")
+            else:
+                out = proc.stdout.read() if proc.stdout else ""
             raise RuntimeError(f"clauster exited early (code {proc.returncode}):\n{out}")
         conn = http.client.HTTPConnection("127.0.0.1", port, timeout=1)
         try:
@@ -171,25 +176,30 @@ def _start_server(
     # redaction check). The fake reads these from its own environment.
     if extra_env:
         env.update(extra_env)
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "clauster", "run", "-c", str(cfg)],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        start_new_session=True,
-        env=env,
-    )
-    base_url = f"http://127.0.0.1:{port}"
-    try:
-        _wait_ready(port, proc)
-        yield Server(base_url, state_dir, proc)
-    finally:
-        proc.terminate()
+    # The server's output goes to a file, not a pipe: nothing drains a pipe once the server
+    # is ready, so a module with enough requests filled the 64 KiB pipe buffer and the
+    # server blocked on its next log write, hanging every later request.
+    log = tmp / "server.log"
+    with log.open("w", encoding="utf-8") as log_file:
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "clauster", "run", "-c", str(cfg)],
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            text=True,
+            start_new_session=True,
+            env=env,
+        )
+        base_url = f"http://127.0.0.1:{port}"
         try:
-            proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=5)
+            _wait_ready(port, proc, log=log)
+            yield Server(base_url, state_dir, proc)
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5)
 
 
 def _build_projects_tree(root: Path) -> Path:
@@ -416,7 +426,7 @@ def setup_server(tmp_path_factory: pytest.TempPathFactory) -> Iterator[SetupServ
         env=env,
     )
     try:
-        _wait_ready(port, proc)
+        _wait_ready(port, proc, log=None)
         yield SetupServer(f"http://127.0.0.1:{port}", projects, empty / "clauster.yml", proc)
     finally:
         proc.terminate()

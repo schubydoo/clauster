@@ -509,21 +509,15 @@ def test_dashboard_active_zone_precedes_projects_in_dom(write_config):
 
 # Renders the guard below scans. The config panel is gated on `config_write.enabled`, so a
 # render with it off never shows the panel: that is how the hooks mcp_tool inputs (TASK-513)
-# passed this guard while they showed on every hook row.
+# passed this guard while they showed on every hook row. There is no allowlist: TASK-493
+# fixed the last offender. tests/test_template_xshow_display.py scans the template sources
+# too, so a Jinja branch that neither render turns on is still covered.
 _XSHOW_GUARD_CONFIGS = [
     pytest.param("", id="default"),
     pytest.param(
         "config_write:\n  enabled: true\n  allow_user_scope: true\n", id="config-write-on"
     ),
 ]
-# Known offenders, keyed by their full x-show attribute, each with the task that removes it.
-# The config-write render must hold each one exactly once (checked below), so a fixed
-# offender must leave this list and a new tag cannot hide behind an entry.
-_XSHOW_GUARD_KNOWN = {
-    'x-show="configMgmtMcpApprovalsDirty() && !configMgmt.mcp.deletingName"': (
-        "TASK-493: the MCP approvals save bar"
-    ),
-}
 
 
 @pytest.mark.parametrize("extra", _XSHOW_GUARD_CONFIGS)
@@ -546,12 +540,9 @@ def test_no_xshow_element_carries_important_display_utility(write_config, extra)
         if "x-show=" in tag.group(0) and display_util.search(tag.group(0))
     ]
     if extra:
-        # The config-panel render must hold every known offender exactly once, else one was
-        # fixed and its entry is stale, or a second tag shares it (and the render proves the
-        # panel is really in the page).
-        counts = {key: sum(key in tag for tag in tags) for key in _XSHOW_GUARD_KNOWN}
-        assert all(n == 1 for n in counts.values()), counts
-    offenders = [tag[:140] for tag in tags if not any(key in tag for key in _XSHOW_GUARD_KNOWN)]
+        # The config panel must really be in this render, or the scan proves nothing about it.
+        assert 'data-test="cm-mcp-approvals-save"' in page
+    offenders = [tag[:140] for tag in tags]
     assert not offenders, (
         "element(s) carry both x-show and an !important `d-*` display utility, which overrides "
         "x-show's inline display:none and pins them visible regardless of state — move the "
@@ -1260,6 +1251,45 @@ def test_readiness_vocab_is_unified_and_scoped(write_config):
     assert 'id="readiness-detail-head-alpha"' in page
     # the pill's visible token is pluralized check/checks — the bare "preflight" text node is gone
     assert "=== 1 ? 'check' : 'checks'" in page
+
+
+def test_project_readiness_pill_shows_not_run_instead_of_hiding(write_config):
+    # TASK-489: a per-project check run that failed or returned no rows shows a visible
+    # "Checks not run" pill (click re-runs it), never the silent all-good row. The
+    # behaviour itself is pinned in tests/e2e/test_project_readiness_e2e.py.
+    page = _client(write_config).get("/").text
+    assert 'data-test="preflight-unavailable"' in page
+    assert "x-show=\"preflightState('alpha') === 'unavailable'\"" in page
+    assert "@click=\"recheckPreflight('alpha')\"" in page
+    assert "x-show=\"preflightState('alpha') === 'warning'\"" in page
+    assert "Checks not run" in page
+    # Both loaders record why a run failed, and each of the two has a deadline.
+    assert 'this._preflightFailed(name, "the server answered HTTP " + res.status);' in page
+    assert 'this._preflightFailed(name, "the request failed or timed out");' in page
+    assert 'this._allPreflightFailed(seqs, "the request failed or timed out");' in page
+    assert page.count("setTimeout(() => ctrl.abort(), this.preflightTimeoutMs);") == 2
+    # A failed run keeps the earlier result (the MCP soft-block fails closed), and the
+    # save paths set the block and supersede in-flight requests BEFORE their reload, so a
+    # failed reload or a pre-write answer cannot leave the gate open. The behaviour is
+    # pinned in tests/e2e/test_config_mgmt_e2e.py (the mcp_gate tests).
+    assert "delete this.preflight[name]" not in page
+    assert (
+        page.count(
+            "this.mcpBlockUntilReloaded[c.project] = true; this._preflightTake(c.project); "
+            "await this._loadMcp(gen); await this.loadPreflight(c.project); }"
+        )
+        == 2
+    )
+    # Only the newest request's answer lands, on the success and the failure path.
+    assert "if (seq !== this._preflightSeq[name]) return false;  // a newer request owns" in page
+    assert page.count("if (seq !== this._preflightSeq[name]) return false;") == 2
+    assert "if (!applied) return;" in page
+    # An applied batch answer was sent after any write, so it clears the write's block.
+    assert "delete this.mcpBlockUntilReloaded[n];" in page
+    assert "if (seqs[n] !== this._preflightSeq[n]) continue;  // a newer request owns" in page
+    # The old silent-on-failure paths are gone.
+    assert "advisory — pill hides on failure" not in page
+    assert "advisory — leave per-project pills hidden" not in page
 
 
 def test_dashboard_has_bg_agent_dispatch_and_stop_controls(write_config):

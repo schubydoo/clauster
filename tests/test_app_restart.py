@@ -584,11 +584,10 @@ def test_dashboard_bridge_restart_button_and_guards(write_config, monkeypatch):
 def test_dashboard_hosted_restart_button_and_guards(write_config, monkeypatch):
     page = _dashboard(write_config, monkeypatch)
     assert 'data-test="hosted-restart"' in page
-    # Same uuid + project gate as Resume, so Restart is offered only where Resume can follow.
-    assert (
-        "['running', 'starting'].includes(h.status) && h.claude_session_uuid_usable"
-        " && h.project" in page
-    )
+    # Same uuid + project gate as Resume, so Restart is offered only where Resume can follow,
+    # and only on a running session: from PR 1858 the server refuses a starting row with 409.
+    assert "h.status === 'running' && h.claude_session_uuid_usable && h.project" in page
+    assert "['running', 'starting'].includes(h.status) && h.claude_session_uuid_usable" not in page
     assert "if (this.hostedRestarting[id]) return;" in page
     assert "finally { this.hostedRestarting[id] = false; }" in page
     assert "|| !!this.hostedRestarting[h.claustrum_process_id]);" in page

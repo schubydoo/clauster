@@ -283,6 +283,10 @@
     .btn.readiness-pill.btn-outline-warning:is(:hover, :active, :focus-visible) {
       color: var(--tblr-black);
     }
+    /* TASK-489: the same emphasis token for a project row's readiness pills ("N checks"
+       and "Checks not run"). .bg-yellow-lt sets the plain yellow text with !important
+       (~2.0:1 on white). Measured in Chromium, light and dark. */
+    .badge.preflight-badge.bg-yellow-lt { color: var(--tblr-warning-text-emphasis) !important; }
     .inline-flex-center { display: inline-flex; align-items: center; }
     .input-group-narrow { max-width: 320px; }
     .modal-backdrop-dim { background: rgba(0, 0, 0, .4); }
@@ -521,9 +525,11 @@
                   <button type="button" class="btn btn-sm btn-ghost-secondary" data-test="hosted-view-toggle" @click="toggleHosted(h.claustrum_process_id)"
                           x-text="(hostedView[h.claustrum_process_id] && hostedView[h.claustrum_process_id].open) ? 'Hide' : 'View'">View</button>
                   {# Restart (TASK-459): only where Resume could follow the stop — the same
-                     uuid + project gate as the Resume button above. #}
+                     uuid + project gate as the Resume button above — and only on a running
+                     session. The restart route refuses a starting row with 409 from PR 1858
+                     on (a restore pass that is still reattaching also reads starting). #}
                   <button type="button" class="btn btn-sm btn-outline-secondary" data-test="hosted-restart"
-                          x-show="(['running', 'starting'].includes(h.status) && h.claude_session_uuid_usable && h.project) || !!hostedRestarting[h.claustrum_process_id]"
+                          x-show="(h.status === 'running' && h.claude_session_uuid_usable && h.project) || !!hostedRestarting[h.claustrum_process_id]"
                           :disabled="!!hostedRestarting[h.claustrum_process_id] || !!hostedStopping[h.claustrum_process_id]"
                           @click="restartHosted(h)">
                     <span x-text="hostedRestarting[h.claustrum_process_id] ? 'Restarting…' : 'Restart'">Restart</span>
@@ -2889,18 +2895,21 @@
                     </tbody>
                   </table>
                   <!-- Hide the approvals-save confirm while a delete is armed, so only one
-                       scope-token "Type <scope>" input is ever visible at a time (#1043). -->
-                  <div class="d-flex gap-2 align-items-center flex-wrap mb-2"
-                       x-show="configMgmtMcpApprovalsDirty() && !configMgmt.mcp.deletingName" x-cloak>
-                    <input type="text" class="form-control form-control-sm cm-input-cap" data-test="cm-mcp-approvals-confirm"
-                           id="cm-mcp-approvals-confirm" name="cm-mcp-approvals-confirm"
-                           aria-label="Type the confirmation token to save approval choices"
-                           {{ NO_AUTOFILL }} spellcheck="false" x-model="configMgmt.mcp.approvals.confirm"
-                           :placeholder="configMgmtConfirmToken()">
-                    <button type="button" class="btn btn-sm btn-primary" data-test="cm-mcp-approvals-save"
-                            :disabled="!configMgmtCanSaveMcpApprovals()" @click="configMgmtSaveMcpApprovals()">
-                      <span x-text="configMgmt.mcp.approvals.busy ? 'Saving…' : 'Save approvals'">Save approvals</span>
-                    </button>
+                       scope-token "Type <scope>" input is ever visible at a time (#1043).
+                       x-show on a plain wrapper: Tabler's .d-flex is display:flex
+                       !important, which beats x-show's inline display:none (TASK-493). -->
+                  <div x-show="configMgmtMcpApprovalsDirty() && !configMgmt.mcp.deletingName" x-cloak>
+                    <div class="d-flex gap-2 align-items-center flex-wrap mb-2">
+                      <input type="text" class="form-control form-control-sm cm-input-cap" data-test="cm-mcp-approvals-confirm"
+                             id="cm-mcp-approvals-confirm" name="cm-mcp-approvals-confirm"
+                             aria-label="Type the confirmation token to save approval choices"
+                             {{ NO_AUTOFILL }} spellcheck="false" x-model="configMgmt.mcp.approvals.confirm"
+                             :placeholder="configMgmtConfirmToken()">
+                      <button type="button" class="btn btn-sm btn-primary" data-test="cm-mcp-approvals-save"
+                              :disabled="!configMgmtCanSaveMcpApprovals()" @click="configMgmtSaveMcpApprovals()">
+                        <span x-text="configMgmt.mcp.approvals.busy ? 'Saving…' : 'Save approvals'">Save approvals</span>
+                      </button>
+                    </div>
                   </div>
                   <details x-show="!configMgmt.mcp.deletingName" x-cloak>
                     <summary class="small text-secondary">Reset all approval choices</summary>
