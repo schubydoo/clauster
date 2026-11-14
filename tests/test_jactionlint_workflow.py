@@ -10,7 +10,11 @@
 # scanning results.
 
 import json
+import os
 import re
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -118,6 +122,28 @@ def test_upload_runs_after_findings_and_only_after_a_good_sarif():
     assert cond.startswith("${{ !cancelled()"), "a findings run is exactly the one to upload"
     assert "steps.sarif.outcome == 'success'" in cond
     assert _step("Write SARIF").get("id") == "sarif"
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32" or shutil.which("bash") is None, reason="runs the step under bash"
+)
+@pytest.mark.parametrize(("lint_rc", "step_rc"), [(0, 0), (1, 0), (2, 2), (3, 3)])
+def test_write_sarif_survives_findings_under_the_default_bash_e(tmp_path, lint_rc, step_rc):
+    # Actions runs a `run:` step with no `shell:` as `bash -e`. Exit 1 means findings, and the
+    # step must still succeed so the gate annotates them and the upload sends the SARIF; a
+    # bare `rc=$?` after the command is never reached under -e. Exit 2 or 3 must fail it.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    stub = bin_dir / "jactionlint"
+    stub.write_text('#!/bin/sh\nexit "$STUB_RC"\n', encoding="utf-8")
+    stub.chmod(0o755)
+    env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
+    env.update(STUB_RC=str(lint_rc), GH_TOKEN="unused")
+    script = _step("Write SARIF")["run"]
+    done = subprocess.run(  # noqa: S603 - fixed argv; the script is this repo's workflow
+        ["bash", "-e", "-c", script], cwd=tmp_path, env=env, capture_output=True, check=False
+    )
+    assert done.returncode == step_rc, done.stdout + done.stderr
 
 
 def test_upload_posts_to_the_public_endpoint_with_its_own_category():

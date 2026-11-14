@@ -139,9 +139,11 @@ jobs:
           GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
         run: |
           set -uo pipefail
+          # The default shell is `bash -e`, so a bare exit 1 (findings) would end the step
+          # here, skip the gate and the upload. `|| rc=$?` keeps the exit code instead.
+          rc=0
           jactionlint --format sarif --online=strict --online-token-env GH_TOKEN \
-            --shellcheck shellcheck > jactionlint.sarif
-          rc=$?
+            --shellcheck shellcheck > jactionlint.sarif || rc=$?
           # Exit 1 = findings: the SARIF is complete, and the gate below fails the job.
           # Exit 2 or 3 = the run itself failed (3 also when an online lookup was skipped),
           # so the SARIF cannot be trusted.
