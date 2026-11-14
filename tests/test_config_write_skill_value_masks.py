@@ -22,8 +22,8 @@ named like a credential, so gitleaks and CodeQL do not flag the test data.
 
 from __future__ import annotations
 
-import math
 import re
+import sys
 import time
 from pathlib import Path
 
@@ -571,18 +571,45 @@ def test_the_tag_pre_check_reads_a_percent_escape_in_one_word(header: str, held:
 
 def test_the_pre_check_is_linear_in_a_run_of_tag_marks() -> None:
     # Greptile on PR 1855: `![^\s]*%` scanned the rest of a run of `!` again from each `!`.
-    # A ratio, not a time bound: eight times the text must cost far less than 64 times.
-    def cost(n: int) -> float:
-        header = "k: " + "!" * n + "\n"
-        best = math.inf
-        for _ in range(5):
-            start = time.perf_counter()
+    # A ratio over equal work, not a time bound (TASK-547): one header 64 times as long
+    # against 64 short headers, the same text in total. A linear check costs about 1x. Both
+    # sides run for the same few milliseconds, so a preempted run on a shared CI runner hits
+    # either side alike. The old check timed a 0.6 ms case against a 5 ms one, and that
+    # gave 24x to 38x for 8x the text on macOS.
+    #
+    # Two sizes. At 64k the regex above costs about 60x; a 256k stage of it would run past
+    # the test timeout. A slice per `!` (a quadratic with a large linear part) costs only
+    # 5x to 10x at 64k, but about 25x at 256k.
+    def batch(header: str, calls: int) -> float:
+        start = time.perf_counter()
+        for _ in range(calls):
             sk._may_hold_masked(header)
-            best = min(best, time.perf_counter() - start)
-        return best
+        return time.perf_counter() - start
 
-    small, large = cost(20_000), cost(160_000)
-    assert large < 24 * max(small, 1e-6)
+    for size, calls in ((1_000, 3), (4_000, 1)):
+        short, long = "k: " + "!" * size + "\n", "k: " + "!" * (64 * size) + "\n"
+        # Neither header holds a word of the fixed-word regex, so both reach the tag scan.
+        assert sk._may_hold_masked(short) is False
+        assert sk._may_hold_masked(long) is False
+        # A real quadratic fails every attempt; a load spike does not. The two batches
+        # alternate, so a load change hits both, and one pair decides a passing size. On
+        # Python 3.13 and lower, the line tracer of coverage slows each step of a
+        # Python-level scan about 5x, which hides a quadratic, so it is off while they run.
+        # On 3.14 coverage uses sys.monitoring, which this does not pause and which costs
+        # little after the first hit of a line. The checks above cover the lines.
+        tracer = sys.gettrace()
+        sys.settrace(None)
+        try:
+            ratios = []
+            for _ in range(3):
+                ratios.append(batch(long, calls) / max(batch(short, 64 * calls), 1e-6))
+                if ratios[-1] < 4.0:
+                    break
+        finally:
+            sys.settrace(tracer)
+        if ratios[-1] >= 4.0:
+            tries = ", ".join(f"{ratio:.1f}x" for ratio in ratios)
+            pytest.fail(f"{64 * size} chars cost {tries} of 64 headers of {size}: not linear")
 
 
 def test_an_oversized_header_is_masked_whole_before_any_scan(
