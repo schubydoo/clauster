@@ -1,5 +1,35 @@
 # Changelog
 
+## 1.5.0 (2026-11-14)
+
+[Compare with 1.4.0](https://github.com/schubydoo/clauster/compare/v1.4.0...v1.5.0)
+
+### Features
+
+- With an API token (`CLAUSTER_API_TOKEN` or `--token`) and either `tls` or a loopback bind that the same user owns, `clauster doctor` prints the running server's own results, the same rows as the dashboard panel, and its `port` row is OK when this deployment's healthy server holds the port. ([#1860](https://github.com/schubydoo/clauster/pull/1860))
+- The config editor now saves a hook event, hook type, MCP transport or field, permission key or mode, or subagent or skill value that is not on its list of known values, with a warning instead of a `422`. ([#1869](https://github.com/schubydoo/clauster/pull/1869))
+- The Plugins tab can list the plugins each marketplace offers and install one from that list, and one typed confirm now covers a series of Enable, Disable and Update clicks. ([#1857](https://github.com/schubydoo/clauster/pull/1857))
+- Each running bridge and Direct Session has a Restart button that stops it and starts it again, so it runs the Claude Code version that is installed now. ([#1848](https://github.com/schubydoo/clauster/pull/1848))
+
+### Fixes
+
+- A background resume now resolves its directory once and uses it for both the permission check and the start (`409` when it cannot be resolved), and a background worker no longer reads as stopped after a system clock correction on Linux. ([#1851](https://github.com/schubydoo/clauster/pull/1851))
+- In the standalone binary on Linux and macOS, a newly started pty keeper runs as its own copy of the binary, so it keeps working after a Clauster restart deletes the server's unpacked files. ([#1853](https://github.com/schubydoo/clauster/pull/1853))
+- A Direct Session's open permission prompt now survives a Clauster restart or is named on the card, the hosted `502` details are redacted, and these now answer `409`: Restart of a hosted row that is not running, Stop, Kill or Forget of an `Error` row whose kill is not confirmed, Kill of a running or reattaching row, and Stop of a row whose session a reconnect retired meanwhile. ([#1858](https://github.com/schubydoo/clauster/pull/1858))
+- A Direct Session that a dropped daemon connection left unreachable is reattached on the next daemon connection, Resume on an Error card ends the old agent first, and a fault in a stream's failure path no longer stops the shutdown persist. ([#1854](https://github.com/schubydoo/clauster/pull/1854))
+- The config editor's line masks now mask the next lines of a secret value that goes on past its line, such as `env: {token:`, an unclosed quote or an anchor. ([#1855](https://github.com/schubydoo/clauster/pull/1855))
+- On macOS a running background agent now reads as alive, so Stop sends it the orderly double SIGINT instead of reporting no live worker. ([#1859](https://github.com/schubydoo/clauster/pull/1859))
+- The Plugins tab offers marketplace Remove only at the scope that declares the marketplace, and an Update of a directory or file marketplace no longer claims that its plugin list did not change. ([#1868](https://github.com/schubydoo/clauster/pull/1868))
+- The config editor now refuses frontmatter `[...]`/`{...}` values and Settings saves nested more than 64 levels deep (`422`) before any slow parse, and a plugin or marketplace list nested that deep is a named `400` (it was a `500` past about 250 levels). ([#1865](https://github.com/schubydoo/clauster/pull/1865))
+- A new Interactive Session no longer shows its own bridge as an extra EXTERNAL (unmanaged) row when it becomes ready while a session poll is running. ([#1863](https://github.com/schubydoo/clauster/pull/1863))
+- A project row now shows "Checks not run" when its readiness checks fail to load instead of looking launch-ready, the MCP approvals Save row hides until a choice changes, and a Direct Session shows Restart only while it is running. ([#1867](https://github.com/schubydoo/clauster/pull/1867))
+- An Interactive Session that stops at claude's login screen, or whose keeper reports an error during startup, no longer shows an Error card with no reason for a moment before the reason appears. ([#1892](https://github.com/schubydoo/clauster/pull/1892))
+- An Interactive Session whose `claude` is not logged in now fails with an error that names the login problem instead of showing Running, and the pty keeper no longer captures a truncated session id when the connect URL is split across two reads. ([#1856](https://github.com/schubydoo/clauster/pull/1856))
+- The Skills editor keeps a saved script's mode on Linux and macOS, refuses a directory, FIFO, device or unreadable skill file with a named `422` instead of a `500` or a hang, and caps a stored skill at 4096 entries; skill and subagent frontmatter refuses an unquoted `?` inside `{...}` or `[...]` that YAML 1.1 and Claude Code's YAML 1.2 read differently. ([#1861](https://github.com/schubydoo/clauster/pull/1861))
+- The Settings tab no longer edits `skillOverrides` (a save that names it is refused with `422`; use the Skills tab), and Local-scope skill visibility also lists your user skill folders when `config_write.allow_user_scope` is on. ([#1866](https://github.com/schubydoo/clauster/pull/1866))
+- The Skills editor masks `mcpServers` `headers` and `env` values and hook `headers` values in `SKILL.md` frontmatter, also any server or hook value that those tabs mask by its loaded value (an escaped credential URL or `--api-key=` item in `args`), and its line masks now catch list items, flow-mapping pairs and block values under a secret-shaped key. ([#1852](https://github.com/schubydoo/clauster/pull/1852))
+- Update the vendored Tabler UI assets to 1.7.4. ([#1879](https://github.com/schubydoo/clauster/pull/1879))
+
 ## 1.4.0 (2026-11-06)
 
 [Compare with 1.3.3](https://github.com/schubydoo/clauster/compare/v1.3.3...v1.4.0)
