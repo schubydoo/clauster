@@ -2834,11 +2834,19 @@ The scope rules and the update results below were checked against Claude Code
   the update. It then shows the version change ("Updated x from version 1.0.0
   to version 1.1.0."), or "already up to date" with the version. The marketplace
   Update reads the marketplace's own plugin list (the <code>marketplace.json</code> file in
-  its checkout) before and after. It then shows whether that list changed, how
-  many plugins the marketplace now offers, and which names were added or
-  removed. If a read after the update fails, the message says that the update
-  ran and that Clauster could not read the result. If the read before the update
-  fails, Clauster does not run the update and shows the error.</li>
+  its checkout, or the downloaded file of a <code>url</code> source) before and after. It
+  then shows whether that list changed, how many plugins the marketplace now
+  offers, and which names were added or removed. Clauster compares the two
+  lists only for a <code>github</code>, <code>git</code> or <code>url</code> source, whose update rewrites a copy
+  of the list. A <code>directory</code> or <code>file</code>
+  marketplace has no copy: Claude Code reads the local source in place, so the
+  read before the update already shows the current list. For these sources, and
+  for any other source type, the message gives only the number of plugins that
+  the marketplace offers now, and says that Clauster cannot say what changed.
+  For a <code>file</code> source, Clauster reads the file that the source names. If a read
+  after the update fails, the message says
+  that the update ran and that Clauster could not read the result. If the read
+  before the update fails, Clauster does not run the update and shows the error.</li>
 <li><strong>Install and update never accept a marketplace command for you.</strong> Some
   marketplace entries install a plugin by running a command, or fetch it with a
   <code>headersHelper</code> command. Claude Code shows that command and asks before it
@@ -2861,6 +2869,18 @@ The scope rules and the update results below were checked against Claude Code
 <li><strong>Each marketplace row shows the source type and its location</strong>, for example
   <code>github · owner/repo</code>. A URL that carries a user name or password, such as
   <code>https://user:token@host/repo.git</code>, shows as <code>********</code>.</li>
+<li><strong>Remove shows only on a marketplace that the current scope declares.</strong> The
+  marketplace list holds every marketplace on the host, from every scope and
+  project. Claude Code removes a marketplace at a scope only when that scope's
+  settings file declares it in <code>extraKnownMarketplaces</code>. At any other scope it
+  refuses, for example with "is not declared in project settings". Clauster
+  reads the declarations of the scope you chose, and of the other scopes of the
+  same project, from the settings files. A row that another scope declares is
+  read-only for Remove. It names that scope, and a link switches the editor to
+  it. At User scope, Clauster reads only the User file, so a row that a project
+  declares has no link. The User file is read from Project and Local scope only
+  when <code>config_write.allow_user_scope</code> is on. Update stays on every row, because
+  <code>marketplace update</code> takes no scope.</li>
 <li><strong>Show plugins lists the plugins that a marketplace offers.</strong> Clauster runs
   <code>claude plugin list --available --json</code> from the directory of the scope that
   you chose. At User scope, that is the home directory of the user that runs
