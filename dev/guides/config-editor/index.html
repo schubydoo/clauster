@@ -834,6 +834,17 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
+  <a href="#known-values-are-suggestions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Known values are suggestions
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#mcp-server-definitions" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1644,6 +1655,17 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
+  <a href="#known-values-are-suggestions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Known values are suggestions
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#mcp-server-definitions" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2085,6 +2107,38 @@ on; the User scope additionally requires <code>config_write.allow_user_scope</co
 </tr>
 </tbody>
 </table>
+<h3 id="known-values-are-suggestions">Known values are suggestions<a class="headerlink" href="#known-values-are-suggestions" title="Permanent link">&para;</a></h3>
+<p>Clauster copies its lists of known values by hand from the Claude Code
+documentation. These lists are the hook events, hook types and hook fields, the
+MCP transports and server fields, the permission keys and modes, and the
+frontmatter values of subagents and skills. A list can be older than the
+Claude Code version on the host. For this reason, a value that is not in a list
+does not stop the save. Clauster saves the value as you typed it. A warning under
+the <strong>Saved</strong> message names each such value. In the Hooks rows, the event box
+offers the known events as suggestions, and a warning under the box names an
+event that is not in the list.</p>
+<p>Read each warning before you start a session. Claude Code can ignore a value
+that it does not know. It can also reject the whole settings file because of one
+such value. The warning at save time is the only check for this.</p>
+<p>These checks still stop the save with a <code>422</code>, and nothing is written:</p>
+<ul>
+<li>A value of the wrong type, for example a number where Claude Code reads
+  text, or a list where it reads an object. A value under a key that is not in
+  a list must be at most 32 levels deep and hold only finite numbers.</li>
+<li>A scope rule, for example <code>autoMode</code> or <code>defaultMode: "auto"</code> at Project or
+  Local scope.</li>
+<li>A security gate. Examples are <code>bypassPermissions</code> as a mode in any spelling,
+  also under a misspelled key such as <code>defaultmode</code>, and a masked value
+  (<code>********</code>) that Clauster cannot bind to its stored value.</li>
+<li>A masked value in a hook or an MCP server when you changed a field or key
+  that is not in the known lists, also inside <code>oauth</code> or a <code>tools</code> item.
+  Clauster cannot tell whether that field names where the stored value goes.
+  Type the masked values again, or undo the change. A masked value in a hook or
+  server whose <code>type</code> is not in the known lists is refused for the same reason.</li>
+<li>The mode <code>inherit</code>, which is Clauster's own launch setting and not a Claude
+  Code mode.</li>
+</ul>
+<p>The <a href="#the-settings-tab">Settings tab</a> uses the same rule for its rows.</p>
 <h3 id="mcp-server-definitions">MCP server definitions<a class="headerlink" href="#mcp-server-definitions" title="Permanent link">&para;</a></h3>
 <p>The MCP tab edits each server in one of two modes. Use the <strong>Fields</strong> and
 <strong>Raw JSON</strong> buttons above the definition to switch between them:</p>
@@ -2160,15 +2214,18 @@ for that transport even when the documentation does not list it:</p>
 </table>
 <p>Every transport also accepts <code>timeout</code> (milliseconds, a positive integer),
 <code>alwaysLoad</code> and <code>bareElicitationCapability</code> (both <code>true</code> or <code>false</code>), and
-<code>role</code> (only <code>"comms"</code>). The <code>oauth</code> object accepts <code>clientId</code>, <code>callbackPort</code>
+<code>role</code> (the known value is <code>"comms"</code>). The <code>oauth</code> object accepts <code>clientId</code>, <code>callbackPort</code>
 (1 to 65535), <code>authServerMetadataUrl</code> (an <code>https://</code> URL), <code>scopes</code> (a
 space-separated string) and <code>xaa</code> (<code>true</code> or <code>false</code>). On <code>http</code> and <code>sse</code>,
 <code>tools</code> is a list of <code>{"name": …, "permission_policy": …}</code> objects, where the
 policy is <code>always_allow</code>, <code>always_ask</code> or <code>always_deny</code>. <code>toolPermissions</code> maps
 a tool name to <code>allow</code>, <code>ask</code> or <code>blocked</code>.</p>
-<p>The editor refuses the whole entry when a field is unknown or has the wrong
-type. It also refuses these values, because Claude Code refuses, skips or
-ignores them:</p>
+<p>The editor refuses the whole entry when a field has the wrong type. A <code>type</code>,
+a field or a value that is not in the lists above saves with a warning. See
+<a href="#known-values-are-suggestions">Known values are suggestions</a>. For a <code>type</code>
+that is not in the list, the editor checks only the type of each known field,
+and a save cannot keep a masked value in that server. The editor refuses these
+values, because Claude Code refuses, skips or ignores them:</p>
 <ul>
 <li>
 <p>The <code>transport</code> key, and <code>env</code> on an <code>http</code>, <code>sse</code> or <code>ws</code> server. Earlier
@@ -2196,6 +2253,9 @@ ignores them:</p>
   compares the text exactly. It does not hand a stored value to a new command.
   Type the masked values again. A change to an unmasked <code>env</code> value keeps the
   other masked values.</li>
+<li>A masked value in any server when you changed a key that is not in the lists
+  above, also a key inside <code>oauth</code> or a <code>tools</code> item. See
+  <a href="#known-values-are-suggestions">Known values are suggestions</a>.</li>
 <li>A reserved name, such as <code>workspace</code>, <code>claude-in-chrome</code> or <code>computer-use</code>.</li>
 <li>An entry with a <code>url</code> and no <code>type</code>. Claude Code reads such an entry as a
   stdio server and skips it.</li>
@@ -2381,8 +2441,11 @@ documents for the <code>permissions</code> object:</p>
   <code>blockWritesOutsideWorkingDirectories</code>, and <code>"disable"</code> for
   <code>disableBypassPermissionsMode</code> and <code>disableAutoMode</code>.</li>
 </ul>
-<p>A shape that the rows cannot show opens in Raw JSON. A save with an unknown key
-or a wrong type is refused whole, with a <code>422</code> that names the key.</p>
+<p>A shape that the rows cannot show opens in Raw JSON. A save with a wrong type is
+refused whole, with a <code>422</code> that names the key. A key, a switch value or a
+<code>defaultMode</code> that is not in the known lists saves with a warning, also in the
+<code>autoMode</code> box. Type such a value in Raw JSON. See
+<a href="#known-values-are-suggestions">Known values are suggestions</a>.</p>
 <p><code>bypassPermissions</code> is not offered, and a save that sets it as <code>defaultMode</code> is
 refused at every scope, so Clauster never writes it. A hand-written
 <code>bypassPermissions</code> in User or managed settings takes effect for a session that
@@ -2607,7 +2670,9 @@ saves the file. It checks each field in the
 It accepts every value that the installed Claude Code (2.1.318) reads for
 that field, also a value that the reference does not list. It refuses a value
 that Claude Code rejects or ignores. If one field fails, Clauster refuses the
-whole save and writes nothing.</p>
+whole save and writes nothing. A text value that is not in a list of known
+values saves with a warning instead. See
+<a href="#known-values-are-suggestions">Known values are suggestions</a>.</p>
 <p>Clauster reads YAML 1.1 and Claude Code reads YAML 1.2, so a few unquoted
 spellings mean different things to the two. Clauster refuses the ones it can
 detect. For example, write <code>true</code>, not <code>yes</code>. Write a plain decimal number,
@@ -2620,11 +2685,11 @@ this editor.</p>
   characters, and the same as the name of the file. The name is also the
   file name, so this rule is narrower than the Claude Code rule. A file with
   a longer or other name does not show in the list.</li>
-<li><code>memory</code>, <code>color</code> and <code>experimental.cacheTtl</code> accept only their listed
-  values, written exactly as listed.</li>
+<li><code>memory</code>, <code>color</code> and <code>experimental.cacheTtl</code> offer their listed values,
+  written exactly as listed. Another text value saves with a warning.</li>
 <li><code>effort</code> accepts a level name in any case, the alias <code>med</code>, or an integer.
-  <code>isolation</code> accepts <code>worktree</code> and also <code>remote</code>, which Claude Code reads
-  but does not document.</li>
+  Another word saves with a warning. <code>isolation</code> offers <code>worktree</code> and also
+  <code>remote</code>, which Claude Code reads but does not document.</li>
 <li><code>maxTurns</code> and <code>autoCompactWindow</code> accept a number or a string that Claude
   Code reads as a whole number, for example <code>200000</code>, <code>"200,000"</code> or <code>2e5</code>.
   <code>autoCompactWindow</code> must be from <code>100000</code> to <code>1000000</code>. Do not write
@@ -2638,8 +2703,9 @@ this editor.</p>
   configured already, or one <code>name: definition</code> object. Claude Code reads only
   the list form and ignores a mapping. See
   <a href="#inline-mcp-servers">Inline MCP servers</a> for the checks on a definition.</li>
-<li><code>permissionMode</code> accepts <code>manual</code> as an alias for <code>default</code>. It refuses
-  <code>bypassPermissions</code>, as every config-editor surface does. See the
+<li><code>permissionMode</code> accepts <code>manual</code> as an alias for <code>default</code>. Another mode
+  saves with a warning. It refuses <code>bypassPermissions</code> in any spelling, as
+  every config-editor surface does, and <code>inherit</code>. See the
   <a href="../../security/#bypasspermissions-footgun-gate">bypassPermissions footgun gate</a>.</li>
 <li>A field that is not in the reference is saved as written. Claude Code
   ignores a field that it does not recognize. The one exception is <code>env</code>:
@@ -2701,14 +2767,17 @@ on the host.</p>
 accepts every hook event, every matcher form, every hook type, and every handler
 field that the <a href="https://code.claude.com/docs/en/hooks">Claude Code hooks reference</a>
 documents. It also accepts the fields that the Claude Code CLI reads but the
-reference does not list: <code>rewakeMessage</code>, <code>rewakeSummary</code>, and <code>cloud</code>. Any
-other field for that hook type stops the save with a validation error (<code>422</code>),
-and nothing is written. A <code>timeout</code> must be a number of seconds above 0, as the
-CLI requires.
+reference does not list: <code>rewakeMessage</code>, <code>rewakeSummary</code>, and <code>cloud</code>. An
+event, a hook type, a field, or a <code>shell</code> or <code>onFailure</code> value that is not in
+these lists saves with a warning. See
+<a href="#known-values-are-suggestions">Known values are suggestions</a>. A value of the
+wrong type stops the save with a validation error (<code>422</code>), and nothing is
+written. A <code>timeout</code> must be a number of seconds above 0, as the CLI requires.
 Clauster stores each hook as data and never runs it. It does not run a command,
 send a request to a URL, call an MCP tool, or send a prompt to a model.</p>
 <p>In Rows view, each hook has two lines. The first line holds the event, the
-matcher, and the type. The second line holds the handler inputs of the selected
+matcher, and the type. The event box offers the known events. You can also
+type another event name. The second line holds the handler inputs of the selected
 type and only those, then the timeout and the Remove button.</p>
 <table>
 <thead>
@@ -3083,7 +3152,9 @@ file. The fields are those of the
 The editor accepts every value that Claude Code 2.1.318 reads for that field,
 including a value that the reference does not list. Version 2.1.318 is the
 version that these checks were last compared against. Clauster refuses a
-value that Claude Code rejects or ignores, and it then writes nothing.
+value that Claude Code rejects or ignores, and it then writes nothing. A word
+that is not in a list of known values saves with a warning instead. See
+<a href="#known-values-are-suggestions">Known values are suggestions</a>.
 Clauster never runs a hook command or a skill script from this editor.</p>
 <ul>
 <li>Every field is optional. A <code>SKILL.md</code> without frontmatter is also valid:
@@ -3110,9 +3181,11 @@ Clauster never runs a hook command or a skill script from this editor.</p>
   list as <code>issue-number</code>. Clauster refuses a mapping. The field is
   <code>when_to_use</code>. Claude Code does not read <code>when-to-use</code>.</li>
 <li><code>effort</code> accepts a level name in any case, the alias <code>med</code>, or an integer.
-  It accepts these inside a one-item list too, such as <code>[high]</code>.</li>
-<li><code>model</code> accepts any alias, any model ID, or <code>inherit</code>. <code>context</code> accepts
-  only <code>fork</code>. <code>shell</code> accepts <code>bash</code> or <code>powershell</code> in any case.</li>
+  It accepts these inside a one-item list too, such as <code>[high]</code>. Another word
+  saves with a warning.</li>
+<li><code>model</code> accepts any alias, any model ID, or <code>inherit</code>. The known value of
+  <code>context</code> is <code>fork</code>. <code>shell</code> offers <code>bash</code> or <code>powershell</code> in any case.
+  Another word saves with a warning.</li>
 <li><code>name</code> is the command name. It can differ from the folder name and can
   hold single spaces. Clauster refuses a name that Claude Code cannot show.
   Examples are a hidden or direction-changing character, two spaces in a row,
@@ -3121,9 +3194,10 @@ Clauster never runs a hook command or a skill script from this editor.</p>
   mark, even where Claude Code shows it.</li>
 <li>Clauster checks <code>hooks</code> with the same rules as the
   <a href="#the-hooks-tab">Hooks tab</a> and as subagent frontmatter hooks. So it accepts
-  every documented hook event, hook type and field, and it refuses any other
-  value. Claude Code drops a bad entry under most events and keeps the others,
-  but Clauster refuses the save instead.</li>
+  every documented hook event, hook type and field, and an event, type or field
+  that is not in its lists saves with a warning. Claude Code drops a bad entry
+  under most events and keeps the others, but Clauster refuses the save of a
+  value with the wrong type instead.</li>
 <li>Clauster also refuses hook definitions outside <code>hooks</code>, because Claude Code
   then loads the skill with no hooks and no <code>allowed-tools</code>. A hook definition
   is a <code>PreToolUse</code> or <code>PermissionRequest</code> key, or a matcher group (a <code>matcher</code>
@@ -3145,8 +3219,10 @@ example, <code>description: yes</code> is the text <code>yes</code> to Claude Co
 10 to Claude Code but 8 to Clauster. Quote the value, or write it as a plain
 number. Clauster accepts <code>user-invocable: yes</code>, because both read it as true.</p>
 <p>If you open a <code>SKILL.md</code> that holds a field whose value Claude Code ignores,
-the editor can remove that field from the text. Examples are <code>shell: zsh</code> and
-<code>effort: banana</code>. Claude Code treats such a field as if it were not there.
+the editor can remove that field from the text. Examples are <code>shell: 5</code> and
+<code>background: maybe</code>. Claude Code treats such a field as if it were not there.
+A word that is not in a list of known values, such as <code>shell: zsh</code>, is not
+removed: it saves with a warning.
 The removal does not change what the skill does. The editor then shows a note
 above the text. The file on disk does not change until you save.</p>
 <p>The editor removes fields only if all of these conditions are true:</p>
@@ -3203,9 +3279,10 @@ folders of the project and your user skill folders, because Claude Code applies
 a key in <code>.claude/settings.local.json</code> to a user skill too. The user folders show
 only when <code>config_write.allow_user_scope</code> is on. Without it, type the name of a
 user skill in <strong>Add a skill name</strong>. A key that matches no folder gets a
-<strong>no skill folder</strong> badge, so you can see it and remove it. A stored value that
-Claude Code does not read shows as <strong>Not valid</strong>. Clauster refuses a save until you choose a
-value for that row.</p>
+<strong>no skill folder</strong> badge, so you can see it and remove it. A stored text value
+that is not one of the four known values shows as <strong>Not a known value</strong>. A save
+keeps it, with a warning. A stored value that is not text shows as <strong>Not valid</strong>,
+and Clauster refuses a save until you choose a value for that row.</p>
 <p>To change the visibility of skills:</p>
 <ol>
 <li>Open <strong>Manage Claude Code config</strong>, select the scope and the project, then
