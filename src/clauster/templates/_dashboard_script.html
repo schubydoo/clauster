@@ -5891,14 +5891,20 @@
         else if (st === "warning") this.toast(name + ": a readiness check needs attention", "warning");
         else if (st === "unavailable") this.toast(name + ": readiness checks did not run", "error");
         if (!pill || st === "unavailable") return;
-        this.$nextTick(() => {
+        // x-show applies a change in a later animation frame, so the target (the warning
+        // pill) can still be hidden here, and focus() on a hidden element does nothing.
+        // Retry for a few frames until it is visible, and stop once the user moves focus.
+        let frames = 0;
+        const move = () => {
           const now = document.activeElement;
           if (now !== pill && now !== document.body && now !== null) return;  // the user moved on
           const row = document.querySelector('[data-project="' + (window.CSS ? CSS.escape(name) : name) + '"]');
           const next = row && row.querySelector(st === "warning" ? '[data-test="preflight-pill"]'
                                                                  : '[data-test="run-launch"]');
-          if (next) next.focus();
-        });
+          if (next && next.getClientRects().length) { next.focus(); return; }
+          if (++frames < 30) requestAnimationFrame(move);
+        };
+        this.$nextTick(move);
       },
       // WARN-status checks for a project (the ones worth flagging before a clean launch).
       preflightWarnings(name) {

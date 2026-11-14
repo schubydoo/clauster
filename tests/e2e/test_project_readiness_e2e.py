@@ -243,6 +243,33 @@ def test_passing_recheck_moves_focus_and_announces_the_result(
     browser.expect_text("body", "alpha: readiness checks passed")
 
 
+def test_warning_recheck_moves_focus_to_the_warning_pill(
+    browser: AgentBrowser, open_server: str
+) -> None:
+    """A re-check that ends in a warning moves focus to the warning pill, once it shows.
+
+    x-show reveals the pill a frame or so later. A test-only style keeps it hidden for
+    100 ms, so a single focus() call always misses it and only a retry lands.
+    """
+    _settle(browser, open_server)
+    _stub(browser, _ALPHA, 500, {}, "await d.loadPreflight('alpha');")
+    browser.expect_visible(_NOT_RUN)
+    _stub(browser, _ALPHA, 200, _MCP_WARN)
+    browser.eval_js(
+        "(async function(){const el=document.querySelector('" + _NOT_RUN + "');"
+        "const hide=document.createElement('style');"
+        "hide.textContent='[data-test=\"preflight-pill\"]{display:none!important}';"
+        "document.head.appendChild(hide);setTimeout(()=>hide.remove(),100);"
+        "el.focus();await " + _ROOT + ".recheckPreflight('alpha');"
+        "await new Promise(r=>setTimeout(r,400));return 1})()"
+    )
+    browser.expect_hidden(_NOT_RUN)
+    browser.expect_visible(_WARN)
+    focused = browser.eval_json("(()=>document.activeElement.dataset.test||'')()")
+    assert focused == "preflight-pill", focused
+    browser.expect_text("body", "alpha: a readiness check needs attention")
+
+
 def test_recheck_does_not_steal_focus_after_the_user_moves_on(
     browser: AgentBrowser, open_server: str
 ) -> None:
