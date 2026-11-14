@@ -93,7 +93,7 @@ def test_linter_gets_the_read_token_and_upload_gets_the_write_token():
 
 def test_both_tokens_are_minted_before_the_lint_runs():
     # The gate exits nonzero on findings. A mint after it (implicit success()) would be skipped,
-    # leaving the always() upload with no token.
+    # leaving the !cancelled() upload with no token.
     names = [s.get("name") for s in _job()["steps"]]
     first_lint = min(names.index("Write SARIF"), names.index("Run jactionlint"))
     assert names.index("Mint GitHub App token") < first_lint
@@ -114,7 +114,7 @@ def test_mints_and_upload_are_same_repo_only():
 
 def test_upload_runs_after_findings_and_only_after_a_good_sarif():
     cond = _cond(_step("Upload SARIF"))
-    assert cond.startswith("${{ always()"), "a findings run is exactly the one to upload"
+    assert cond.startswith("${{ !cancelled()"), "a findings run is exactly the one to upload"
     assert "steps.sarif.outcome == 'success'" in cond
     assert _step("Write SARIF").get("id") == "sarif"
 
@@ -135,7 +135,8 @@ def test_both_runs_are_strict_online_and_require_shellcheck():
     assert "--format github" in gate and "--strict-exit" in gate
     assert "--format sarif" in sarif
     for run in (gate, sarif):
-        assert "--online --online-token-env GH_TOKEN" in run
+        # strict: a skipped lookup (rate limit, bad token) fails the run instead of passing.
+        assert "--online=strict --online-token-env GH_TOKEN" in run
         assert "--shellcheck shellcheck" in run
 
 

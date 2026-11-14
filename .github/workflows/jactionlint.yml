@@ -7,8 +7,10 @@ name: jactionlint
 #     shellcheck) the shell in every `run:` block;
 #   - the zizmor audits: the Actions security checks. This replaces the former zizmor
 #     "workflow audit" job of security.yml, including its SARIF upload to code scanning.
-# --strict-exit makes a warn or info finding fail the run too. --online adds the checks
-# that query the GitHub API (known-vulnerable action versions, impostor commits).
+# --strict-exit makes a warn or info finding fail the run too. --online=strict adds the
+# checks that query the GitHub API (known-vulnerable action versions, impostor commits), and
+# fails the run (exit 3) when a lookup is skipped, for example on a rate limit, so those
+# checks never pass without running.
 #
 # Runs on EVERY pull request (no `paths:` filter), on push to main, and weekly. Deliberately
 # NOT paths-filtered: the run takes seconds, and a paths-filtered check that is ALSO a
@@ -43,7 +45,7 @@ jobs:
     # Runs on drafts too: it is a cheap required check. Only its SARIF upload skips drafts
     # (see tests/test_workflow_draft_guard.py and the upload steps below).
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     permissions:
       # `contents: read` is all the job token needs: the checkout, and the online checks on a
       # fork PR, only read. The SARIF upload uses a minted App token, so the job token never
@@ -73,8 +75,8 @@ jobs:
       # A SECOND App token, `security-events: write` only, for the code-scanning/sarifs POST
       # below. Minted here, before the lint runs: `Run jactionlint` exits nonzero on
       # findings, and a mint placed after it with a bare `if:` (implicit `success()`) would
-      # then be skipped, leaving the `always()` upload with no token. Minted only when the
-      # upload runs: same-repo, and not on a draft PR.
+      # then be skipped, leaving the upload (which runs after a failed gate) with no token.
+      # Minted only when the upload runs: same-repo, and not on a draft PR.
       - name: Mint SARIF upload token
         id: sarif-token
         if: >-
@@ -113,11 +115,12 @@ jobs:
           GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
         run: |
           set -uo pipefail
-          jactionlint --format sarif --online --online-token-env GH_TOKEN \
+          jactionlint --format sarif --online=strict --online-token-env GH_TOKEN \
             --shellcheck shellcheck > jactionlint.sarif
           rc=$?
           # Exit 1 = findings: the SARIF is complete, and the gate below fails the job.
-          # Exit 2 or 3 = the run itself failed, so the SARIF cannot be trusted.
+          # Exit 2 or 3 = the run itself failed (3 also when an online lookup was skipped),
+          # so the SARIF cannot be trusted.
           if [ "$rc" -gt 1 ]; then
             echo "::error title=jactionlint SARIF::jactionlint exited $rc"
             exit "$rc"
@@ -126,12 +129,13 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
         run: >-
-          jactionlint --format github --strict-exit --online --online-token-env GH_TOKEN
+          jactionlint --format github --strict-exit --online=strict --online-token-env GH_TOKEN
           --shellcheck shellcheck
       - name: Upload SARIF
-        # `always()`: jactionlint exits nonzero when it has findings, which is exactly when
-        # the SARIF is worth sending to the Security tab. Gated on `Write SARIF` having
-        # succeeded, so a skipped (draft, fork) or failed SARIF run uploads nothing.
+        # `!cancelled()`: the gate exits nonzero when it has findings, which is exactly when
+        # the SARIF is worth sending to the Security tab. A run that a newer push cancelled
+        # uploads nothing for its old SHA. Gated on `Write SARIF` having succeeded, so a
+        # skipped (draft, fork) or failed SARIF run uploads nothing either.
         # `upload-sarif` cannot take an App token: inside Actions it uploads through
         # `PUT /repos/{owner}/{repo}/code-scanning/analysis` (its `analyses.ts`), an
         # Actions-only route that answered "Not Found" to this App token on PR 1435 (run
@@ -143,7 +147,7 @@ jobs:
         # into the script body (template-injection). Same-repo only: a fork PR cannot write
         # code scanning results, so the step skips rather than reds the check.
         if: >-
-          ${{ always()
+          ${{ !cancelled()
           && steps.sarif.outcome == 'success'
           && (github.event_name != 'pull_request'
           || github.event.pull_request.head.repo.full_name == github.repository)
