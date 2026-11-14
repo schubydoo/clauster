@@ -513,7 +513,7 @@ def test_record_value_warnings_adds_to_the_active_save_only() -> None:
 def test_a_skill_member_with_no_restored_text_keeps_all_its_warnings() -> None:
     text = "---\ndescription: d\nshell: zsh\n---\nBody.\n"
     with cw.collect_value_warnings() as warnings:
-        sk._validate_member(sk.SKILL_FILENAME, text, sent=text)
+        sk._validate_member(sk.SKILL_FILENAME, text, sent=text, stored=text)
     assert len(warnings) == 1 and "'shell' 'zsh'" in warnings[0]
 
 
