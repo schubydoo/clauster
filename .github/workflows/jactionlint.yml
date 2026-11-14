@@ -96,9 +96,10 @@ jobs:
       - name: Install jactionlint (version, sha256 and attestation pinned)
         env:
           # Keep the annotation directly above the VERSION line and the SHA256 line right
-          # after it: the Renovate preset reads them as a group. Renovate cannot compute the
-          # SHA256 itself. Its postUpgradeTask runs scripts/check_binary_dep_pins.py --fix,
-          # which writes the digest that GitHub publishes for the release asset. Keep the
+          # after it: the clauster preset in schubydoo/renovate-config reads them as a group.
+          # Renovate cannot compute the SHA256 itself. The preset's postUpgradeTask runs
+          # scripts/check_binary_dep_pins.py --fix, which writes the digest that GitHub
+          # publishes for the release asset; `sha256sum -c` fails a stale pin. Keep the
           # `jactionlint==` pin in .pre-commit-config.yaml equal to this version.
           # renovate: datasource=github-releases depName=jdx/jactionlint
           JACTIONLINT_VERSION: "2.6.0"
@@ -114,7 +115,11 @@ jobs:
           cd "$dir"
           gh release download "v${JACTIONLINT_VERSION}" --repo jdx/jactionlint --pattern "$archive"
           echo "${JACTIONLINT_SHA256}  ${archive}" | sha256sum -c -
-          gh attestation verify "$archive" --repo jdx/jactionlint
+          # Not only "some workflow of jdx/jactionlint": the release workflow, on this tag,
+          # on a GitHub-hosted runner.
+          gh attestation verify "$archive" --repo jdx/jactionlint \
+            --signer-workflow jdx/jactionlint/.github/workflows/release.yaml \
+            --source-ref "refs/tags/v${JACTIONLINT_VERSION}" --deny-self-hosted-runners
           tar -xzf "$archive" jactionlint
           ./jactionlint --version
           echo "$dir" >> "$GITHUB_PATH"

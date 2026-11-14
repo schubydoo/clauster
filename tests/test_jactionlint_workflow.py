@@ -154,10 +154,18 @@ def test_install_pins_version_sha256_and_attestation():
     assert re.fullmatch(r"[0-9a-f]{64}", env["JACTIONLINT_SHA256"])
     assert env["GH_TOKEN"] == "${{ github.token }}", "the download needs no App token"
     run = install["run"]
-    assert run.startswith("set -euo pipefail\n")
+    first_command = next(
+        line.strip() for line in run.splitlines() if line.strip() and not line.strip()[0] == "#"
+    )
+    assert first_command == "set -euo pipefail", "each failed check must stop the step"
     assert 'gh release download "v${JACTIONLINT_VERSION}" --repo jdx/jactionlint' in run
     assert "sha256sum -c -" in run
-    assert 'gh attestation verify "$archive" --repo jdx/jactionlint' in run
+    verify = " ".join(run[run.index("gh attestation verify") :].split("tar -xzf")[0].split())
+    assert verify == (
+        'gh attestation verify "$archive" --repo jdx/jactionlint \\ '
+        "--signer-workflow jdx/jactionlint/.github/workflows/release.yaml \\ "
+        '--source-ref "refs/tags/v${JACTIONLINT_VERSION}" --deny-self-hosted-runners'
+    ), "pin the signer workflow, the tag and a GitHub-hosted runner, not only the repo"
     # Each check must run before the archive is unpacked.
     assert run.index("sha256sum -c -") < run.index("tar -xzf")
     assert run.index("gh attestation verify") < run.index("tar -xzf")
