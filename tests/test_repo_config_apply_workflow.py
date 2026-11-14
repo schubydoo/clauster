@@ -81,7 +81,7 @@ def test_apply_actions_are_sha_pinned():
     ]
     assert refs
     unpinned = [r for r in refs if not _SHA.match(r.split("@", 1)[1] if "@" in r else "")]
-    assert unpinned == [], f"unpinned uses would fail zizmor: {unpinned}"
+    assert unpinned == [], f"unpinned uses would fail jactionlint: {unpinned}"
 
 
 def test_tracked_label_is_in_the_baseline():

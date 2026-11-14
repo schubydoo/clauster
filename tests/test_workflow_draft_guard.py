@@ -40,12 +40,15 @@ DRAFT_GUARD = "github.event.pull_request.draft != true"
 #     coverage; or
 #   * a security scan that is cheap AND uploads no SARIF, so a per-draft run costs nothing
 #     from the shared GITHUB_TOKEN pool the skip protects (gitleaks).
+# `jactionlint` is a required check (the first reason). Its SARIF upload is a STEP, so the
+# job runs on drafts while the upload steps carry the draft guard themselves; see
+# test_jactionlint_sarif_upload_skips_drafts below.
 # Every job NOT listed here must still carry the draft guard.
 RUNS_ON_DRAFTS = frozenset(
     {
         ("pr-title.yml", "validate"),
         ("lint.yml", "lint"),
-        ("actionlint.yml", "actionlint"),
+        ("jactionlint.yml", "jactionlint"),
         ("changeset-check.yml", "changeset"),
         ("repo-config-drift.yml", "drift"),
         ("security.yml", "gitleaks"),
@@ -56,17 +59,19 @@ RUNS_ON_DRAFTS = frozenset(
 # draft term there would be dead code (e.g. security.yml's trivy-image).
 #
 # ⚠️ This must be matched as a LEADING CONJUNCT, never as a substring. security.yml's
-# zizmor job reads `(github.event_name != 'pull_request' || github.event.action !=
+# former zizmor job read `(github.event_name != 'pull_request' || github.event.action !=
 # 'synchronize') && <guard>` — there the string appears as a DISJUNCT, where it excludes
 # nothing and the job really does run on PR opened/reopened/ready_for_review. A substring
 # test skipped that job, so deleting its draft guard left this suite green.
 PR_EXCLUDED = "github.event_name != 'pull_request'"
 
-# The four workflows backing a required status context. They are evaluated per head SHA,
+# The workflows backing a required status context. They are evaluated per head SHA,
 # so dropping `synchronize` would leave a fixup push's head with no check run and hang
 # the PR at "Expected — waiting for status". osv-scanner, repo-config-drift, and
 # cflite_pr trim their types deliberately and are NOT in this set.
-REQUIRED_CTX_WORKFLOWS = frozenset({"ci.yml", "lint.yml", "security.yml", "pr-title.yml"})
+REQUIRED_CTX_WORKFLOWS = frozenset(
+    {"ci.yml", "lint.yml", "security.yml", "pr-title.yml", "jactionlint.yml"}
+)
 DEFAULT_PR_TYPES = frozenset({"opened", "reopened", "synchronize"})
 
 
@@ -183,3 +188,21 @@ def test_every_pull_request_job_has_the_correct_draft_behavior(workflow, job_id,
         f"push/schedule (null `draft`) still run. If it is a cheap required check or a "
         f"no-SARIF secret scan that SHOULD run on drafts, add it to RUNS_ON_DRAFTS instead."
     )
+
+
+def test_jactionlint_sarif_upload_skips_drafts():
+    """The jactionlint job runs on drafts, but its SARIF steps carry the draft guard.
+
+    The job is on RUNS_ON_DRAFTS because it is a cheap required check. Its SARIF upload is
+    what the draft skip protects, so the steps that write, mint for, and post the SARIF must
+    each carry the guard as an AND conjunct, or every draft push uploads to code scanning.
+    """
+    doc = yaml.safe_load((WORKFLOWS / "jactionlint.yml").read_text(encoding="utf-8"))
+    steps = {s.get("name"): s for s in doc["jobs"]["jactionlint"]["steps"]}
+    for name in ("Mint SARIF upload token", "Write SARIF", "Upload SARIF"):
+        assert name in steps, f"jactionlint.yml: expected a `{name}` step"
+        condition = " ".join(str(steps[name].get("if", "")).split())
+        assert _has_draft_guard(condition), (
+            f"jactionlint.yml `{name}` runs on draft PRs — its `if:` is {condition!r}. Add "
+            f"`{DRAFT_GUARD}` as an AND conjunct."
+        )

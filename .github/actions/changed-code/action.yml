@@ -75,9 +75,8 @@ runs:
         # which is how a change HERE, or to osv-scanner.yml's paths filter, or to
         # the rulesets, still gets validated despite the `tests` matrix skipping.
         # CodeQL is never gated on this classifier, and `conventional PR title`
-        # always runs. Known thinner spot: zizmor's workflow audit skips on
-        # `synchronize` (pre-existing), so a fixup push to a workflow-only PR is
-        # audited on the next open/reopen/ready_for_review, not on that push.
+        # always runs, and so does `jactionlint` (the workflow lint and audit), on every
+        # push of every PR.
         # `.pre-commit-config.yaml` is repo automation at the root (outside `.github/`):
         # changing it alters no runtime behaviour, so pytest / `uv build` / the Docker image
         # have nothing to prove. yamllint (in the always-on `lint` job) still validates it.

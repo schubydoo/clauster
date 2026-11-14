@@ -1,0 +1,70 @@
+# jactionlint configuration.
+#
+# jactionlint (https://jactionlint.jdx.dev/) is a fork of actionlint that also runs the
+# zizmor audits. The jactionlint workflow runs it on every pull request and on push to
+# main, and uploads its SARIF to code scanning. To run it locally, see the "Changing a
+# workflow?" note in CLAUDE.md.
+#
+# The default profile runs the actionlint checks and the zizmor audits. It understands
+# the `$/` self-repository `uses:` syntax and validates those calls (a bad input to
+# `$/.github/actions/setup` is reported), so the ignores that actionlint needed for `$/`
+# (clauster issue 1361) are gone.
+profile: default
+
+# ⚠️ Keep this list equal to the required status checks of the `main` ruleset
+# (.github/rulesets/main.json; tests/test_jactionlint_workflow.py compares the two). The
+# rule unreachable-required-check then fails lint when a renamed job, or a `paths:` or
+# `branches:` filter, would leave a required check pending forever.
+required-checks:
+  - name: ci required checks passed
+    branches: [main]
+  - name: security required checks passed
+    branches: [main]
+  - name: conventional PR title
+    branches: [main]
+  - name: lint
+    branches: [main]
+  - name: jactionlint
+    branches: [main]
+
+rules:
+  # Rules of the pedantic profile that this repo passes (0 findings, measured on
+  # 2026-11-13). They guard future changes. The rest of that profile is mostly style
+  # (require-shell and similar).
+  argument-injection: warn
+  command-injection: warn
+  comment-trigger-authorization: warn
+  output-clobbering: warn
+  unused-workflow-input: warn
+  unused-workflow-secret: warn
+  unused-ignore: warn
+  missing-version-comment: warn
+  # unpinnable-action with `pedantic: true` (as in shared-workflows) is left off: it reports
+  # 9 pins that cannot hold here (measured 2026-11-13, online), because ossf/scorecard-action
+  # and the google/clusterfuzzlite actions run Docker images by tag. Fixing that means
+  # forking those actions, which is out of scope.
+  # The only actions in use: GitHub's own (`actions/*`), and each third-party repository
+  # by name. A new action, also one from an owner already listed, is a deliberate change
+  # to this list. Local `$/` and `./` actions are never reported.
+  forbidden-uses:
+    allow:
+      - actions/*
+      - amannn/action-semantic-pull-request
+      - aquasecurity/trivy-action
+      - astral-sh/setup-uv
+      - cachix/install-nix-action
+      - codecov/codecov-action
+      - docker/build-push-action
+      - docker/login-action
+      - docker/metadata-action
+      - docker/setup-buildx-action
+      - docker/setup-qemu-action
+      - github/codeql-action/*
+      - gitleaks/gitleaks-action
+      - google/clusterfuzzlite/*
+      - knope-dev/action
+      - ossf/scorecard-action
+      - pypa/gh-action-pypi-publish
+      - schubydoo/shared-workflows/*
+      - sigstore/cosign-installer
+      - sigstore/gh-action-sigstore-python

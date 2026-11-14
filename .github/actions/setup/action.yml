@@ -14,6 +14,13 @@ inputs:
       build job only needs the build backend, not the test/lint tooling.
     required: false
     default: dev
+  enable-cache:
+    description: >-
+      "true" restores and saves the uv cache (the default). A job that publishes on a
+      release tag passes "false", so that a poisoned cache entry cannot reach what it
+      publishes (jactionlint cache-poisoning).
+    required: false
+    default: "true"
 runs:
   using: composite
   steps:
@@ -25,7 +32,7 @@ runs:
         # input for astral-sh/setup-uv and opens a bump PR — keep the pin in the other workflows
         # (build-binaries, security, release, knope-*, nightly) in step with this one.
         version: "0.13.8"
-        enable-cache: true
+        enable-cache: ${{ inputs.enable-cache }}
     # The version flows through an env var (not inlined into `run:`) so zizmor's
     # template-injection analysis stays quiet; the value is always a hard-coded
     # matrix string, never PR-controlled input.

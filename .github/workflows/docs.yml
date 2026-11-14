@@ -114,6 +114,10 @@ jobs:
         with:
           python-version: "3.13"
           extras: docs
+          # No uv cache on a release tag run (jactionlint cache-poisoning), the same as
+          # the deploy job below: the tag lane publishes the X.Y snapshot. Main pushes
+          # and PRs keep the cache.
+          enable-cache: ${{ !startsWith(github.ref, 'refs/tags/') }}
       - name: mkdocs build --strict
         # --no-sync: use the env the setup action already synced (extras: docs);
         # don't let a `.python-version` drift rebuild it without the docs extra.
@@ -173,6 +177,9 @@ jobs:
         with:
           python-version: "3.13"
           extras: docs
+          # No uv cache on a release tag run (jactionlint cache-poisoning): the tag lane
+          # publishes the X.Y snapshot. Main pushes and manual dispatches keep the cache.
+          enable-cache: ${{ !startsWith(github.ref, 'refs/tags/') }}
       - name: Configure git + push auth
         env:
           GH_TOKEN: ${{ github.token }}

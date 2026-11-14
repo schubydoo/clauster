@@ -243,7 +243,7 @@ def test_main_fix_refuses_partial_write_on_other_pin_failure(
     assert "SKIP" in capsys.readouterr().out
 
 
-# --- workflow pins: the second source (osv-scanner.yml / actionlint.yml) -----------------------
+# --- workflow pins: the second source (osv-scanner.yml) ----------------------------------------
 
 
 def _osv_pin(script, filename: str = "osv-scanner.yml"):
@@ -272,24 +272,20 @@ def _install_workflow_pins(script, monkeypatch, pins, root):
     monkeypatch.setattr(script, "_load_workflow_pins", lambda: (tuple(pins), root))
 
 
-def test_workflow_pin_derivations_cover_both_shapes(script):
-    # The two real pins derive their tag + asset differently — lock both so a future edit to one
-    # can't silently regress the other (osv: v-prefixed version, constant asset; actionlint: bare
-    # version -> v-prefixed tag, version-embedded tarball).
+def test_workflow_pin_derivations(script):
+    # Lock the real pin's tag + asset derivation (osv: v-prefixed version, constant asset), so a
+    # future edit can't silently resolve the wrong release or asset.
     by_repo = {pin.repo: pin for pin in script._WORKFLOW_PINS}
     osv = by_repo["osv-scanner"]
     assert osv.tag("v2.5.1") == "v2.5.1"
     assert osv.asset("v2.5.1") == "osv-scanner_linux_amd64"
-    actionlint = by_repo["actionlint"]
-    assert actionlint.tag("1.7.12") == "v1.7.12"
-    assert actionlint.asset("1.7.12") == "actionlint_1.7.12_linux_amd64.tar.gz"
 
 
 def test_real_workflow_pins_are_parseable_in_the_committed_files(script):
     # Guard the regexes against a workflow reformat: every real pin must still locate its VERSION +
     # 64-hex SHA256 in its committed file, and derive a well-formed tag/asset. No network.
     pins, root = script._WORKFLOW_PINS, script._repo_root()
-    assert {pin.repo for pin in pins} == {"osv-scanner", "actionlint"}
+    assert {pin.repo for pin in pins} == {"osv-scanner"}
     for pin in pins:
         text = (root / pin.path).read_text(encoding="utf-8")
         vmatch = pin.version_re.search(text)
@@ -300,12 +296,9 @@ def test_real_workflow_pins_are_parseable_in_the_committed_files(script):
         tag, asset = pin.tag(version), pin.asset(version)
         # Assert the EXACT derivation, not just "non-empty" (#1482 review nit): a drifted
         # tag/asset lambda would resolve the wrong release or asset and 404 at fetch time.
-        if pin.repo == "osv-scanner":
-            assert tag == version  # OSV_VERSION already carries the leading "v"
-            assert asset == "osv-scanner_linux_amd64"  # a constant asset name
-        else:  # actionlint: a bare version -> "v"+version tag + a version-stamped tarball
-            assert tag == f"v{version}"
-            assert asset == f"actionlint_{version}_linux_amd64.tar.gz"
+        assert pin.repo == "osv-scanner"
+        assert tag == version  # OSV_VERSION already carries the leading "v"
+        assert asset == "osv-scanner_linux_amd64"  # a constant asset name
 
 
 def test_every_workflow_pin_is_in_the_binary_dep_pins_paths_filter(script):

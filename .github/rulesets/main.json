@@ -33,7 +33,8 @@
           { "context": "ci required checks passed", "integration_id": 15368 },
           { "context": "security required checks passed", "integration_id": 15368 },
           { "context": "conventional PR title", "integration_id": 15368 },
-          { "context": "lint", "integration_id": 15368 }
+          { "context": "lint", "integration_id": 15368 },
+          { "context": "jactionlint", "integration_id": 15368 }
         ]
       }
     },

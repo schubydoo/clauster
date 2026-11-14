@@ -1,14 +1,16 @@
 # Guard for the `$/` self-repository migration (code-scanning alerts 139-148).
 #
-# actionlint's local-action call checks — the referenced action exists, every `with:`
-# key is a declared input, every `required:`-without-default input is supplied — are
-# gated on the `./` uses-prefix internally. Migrating to `$/` (immune to runtime
-# filesystem substitution; treated as pinned by GitHub) makes actionlint see an
-# unrecognised remote action and silently skip ALL of that, so a typo'd input would
-# lint clean and fail only at run time. This module re-asserts the same validation
-# over every local `uses:` form, `$/` and `./` alike, so the migration moves the
-# coverage here instead of losing it. Remove alongside `.github/actionlint.yaml`
-# once rhysd/actionlint issue 711 ships native `$/` support (clauster issue 1361).
+# The local-action call checks — the referenced action exists, every `with:` key is a
+# declared input, every `required:`-without-default input is supplied — were gated on
+# the `./` uses-prefix inside actionlint, so after the migration to `$/` (immune to
+# runtime filesystem substitution; treated as pinned by GitHub) actionlint skipped ALL
+# of them and a typo'd input would lint clean and fail only at run time. This module
+# re-asserts the same validation over every local `uses:` form, `$/` and `./` alike.
+#
+# jactionlint, which replaced actionlint, understands `$/` and runs those checks itself
+# (a bad input to `$/.github/actions/setup` is reported as unknown-action-input). This
+# module stays as defense in depth: it also runs in the `lint` job's `pytest -m
+# repo_meta`, with no dependency on the linter's version.
 
 from pathlib import Path
 
@@ -44,7 +46,7 @@ def _action_calls_param():
 def test_local_action_call_matches_its_declared_inputs(workflow, job, uses, supplied):
     """Every local `uses:` resolves, and its `with:` matches the action's inputs.
 
-    Exactly what actionlint checks for `./` refs and skips for `$/` ones: the action
+    What actionlint checked for `./` refs only (jactionlint checks `$/` too): the action
     directory must exist with an action.yml, every supplied `with:` key must be a
     declared input, and every `required: true` input without a `default:` must be
     supplied. A failure here is what a typo'd or missing input looks like BEFORE it

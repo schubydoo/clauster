@@ -54,8 +54,8 @@ the CI coverage-gate interpreter (`uv` still supports the full 3.11+ floor).
   types; CI remains the full-repo backstop.
 - **Security checks** — nothing extra to run locally: Bandit-style SAST is ruff's
   `S` rules, already covered by the `ruff check .` above. CI additionally runs
-  CodeQL, Trivy (filesystem + image), dependency review, and a workflow audit
-  (zizmor). For a fork PR the `code_scanning` rule still blocks merge (a fork is
+  CodeQL, Trivy (filesystem + image), dependency review, and a workflow lint and
+  audit (jactionlint, which includes the zizmor audits). For a fork PR the `code_scanning` rule still blocks merge (a fork is
   not exempt), but the CodeQL result is self-attested: the fork's own run produces
   it, so a green check carries no assurance and does not shorten review. A
   maintainer reads the fork's full diff, including any `.github/workflows/` change,

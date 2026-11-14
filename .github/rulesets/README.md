@@ -10,7 +10,9 @@ protection.
 It encodes the same contract the project has always enforced:
 
 - required status checks (`ci required checks passed`, `security required checks
-  passed`, `conventional PR title`, `lint`) with strict / up-to-date branches,
+  passed`, `conventional PR title`, `lint`, `jactionlint`) with strict / up-to-date
+  branches. `.github/jactionlint.yaml` lists the same checks under `required-checks`,
+  so keep the two lists equal,
 - linear history, conversation resolution, a pull request required (0 approvals —
   solo maintainer), and blocked deletions / force-pushes,
 - `enforcement: active` with an empty `bypass_actors` list — i.e. admins are

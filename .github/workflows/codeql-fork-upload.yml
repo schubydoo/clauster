@@ -54,7 +54,7 @@
 # - Same-repo, main, and schedule Security runs produce no fork artifact; the job `if:`
 #   below skips them (it runs only when the triggering run was a fork `pull_request`).
 # - `permission-security-events: write` is minted on the App's own rate bucket (≥5,000
-#   REST req/hr per installation — the same App bucket the zizmor job cites), off the
+#   REST req/hr per installation — the same App bucket the jactionlint job cites), off the
 #   shared GITHUB_TOKEN pool. A re-run re-POSTs and supersedes the prior series (via
 #   `automationDetails.id`), so it is idempotent and never fails on a duplicate.
 # - PRE-MERGE LIMITATION: `workflow_run` executes the workflow file from the DEFAULT
