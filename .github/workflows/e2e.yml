@@ -92,6 +92,8 @@ jobs:
           # renovate: datasource=custom.chrome-for-testing depName=chrome-for-testing
           CHROME_VERSION: "157.0.8103.78"
         run: |
+          # pipefail: without it a failed `browsers install` is hidden behind awk's exit 0.
+          set -o pipefail
           exe=$(node_modules/.bin/browsers install "chrome@${CHROME_VERSION}" --path "$RUNNER_TEMP/cft" \
             | awk 'END{print $NF}')
           test -x "$exe"

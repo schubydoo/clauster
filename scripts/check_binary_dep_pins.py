@@ -12,7 +12,8 @@ Two pin sources, checked the same way:
 
 * :data:`clauster.deps.BINARY_DEPS` — the managed standalone-binary pins (Shawl, claustrum).
 * :data:`_WORKFLOW_PINS` — the ``*_VERSION`` + ``*_SHA256`` pairs embedded in the GitHub Actions
-  workflow files that download a release binary inline (``osv-scanner.yml``, ``actionlint.yml``).
+  workflow files that download a release binary inline (``osv-scanner.yml``,
+  ``jactionlint.yml``).
   These carry the same ``# renovate:`` annotation, so self-hosted Renovate CE bumps the version
   but likewise can't rewrite the asset sha256 — ``--fix`` rewrites it in the workflow file.
 
@@ -89,17 +90,17 @@ _WORKFLOW_PINS: tuple[_WorkflowPin, ...] = (
         tag=lambda v: v,
         asset=lambda v: "osv-scanner_linux_amd64",
     ),
-    # actionlint.yml pins the linux amd64 tarball, whose name embeds the version. The version is
-    # bare (e.g. "1.7.12"), so the tag is "v" + version and the asset name is built the same way
-    # the workflow's run-script builds its download URL (actionlint_${VERSION}_linux_amd64.tar.gz).
+    # jactionlint.yml pins the linux amd64 tarball, whose name embeds the version. The version is
+    # bare (e.g. "2.6.0"), so the tag is "v" + version and the asset name is built the same way
+    # the workflow's run-script names its download (jactionlint_${VERSION}_linux_amd64.tar.gz).
     _WorkflowPin(
-        path=".github/workflows/actionlint.yml",
-        owner="rhysd",
-        repo="actionlint",
-        version_re=re.compile(r'ACTIONLINT_VERSION:\s*"([^"]+)"'),
-        sha_re=re.compile(r'ACTIONLINT_SHA256:\s*"([0-9a-f]{64})"'),
+        path=".github/workflows/jactionlint.yml",
+        owner="jdx",
+        repo="jactionlint",
+        version_re=re.compile(r'JACTIONLINT_VERSION:\s*"([^"]+)"'),
+        sha_re=re.compile(r'JACTIONLINT_SHA256:\s*"([0-9a-f]{64})"'),
         tag=lambda v: f"v{v}",
-        asset=lambda v: f"actionlint_{v}_linux_amd64.tar.gz",
+        asset=lambda v: f"jactionlint_{v}_linux_amd64.tar.gz",
     ),
 )
 

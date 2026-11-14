@@ -48,10 +48,14 @@ pointer.
   that had already shipped, and vice versa.
 - **Say what actually happened.** If tests fail, show the output. If a step was
   skipped, say so. Don't describe work as verified when it was only written.
-- **Changing a workflow?** `just check` does not lint `.github/workflows/`. Run both:
-  `uvx zizmor <file>.yml` (the security audit CI runs) and `actionlint <file>.yml`
-  (schema, expressions, and shellcheck over the embedded `run:` blocks — install it
-  separately, and it silently skips the shell linting if `shellcheck` isn't on PATH).
+- **Changing a workflow?** `just check` does not lint `.github/workflows/`. From the
+  repo root, run `uvx --from jactionlint==<pin> jactionlint --strict-exit --shellcheck shellcheck`
+  with the pin from `.github/workflows/jactionlint.yml`. It is the check CI runs: the
+  actionlint checks (schema, expressions, and shellcheck over the embedded `run:`
+  blocks) plus the zizmor security audits, with `.github/jactionlint.yaml`. The explicit
+  `--shellcheck` fails the run if `shellcheck` is not on PATH, instead of skipping the
+  shell linting. CI also adds `--online`; to run that locally, set
+  `GH_TOKEN=$(gh auth token)` and add `--online --online-token-env GH_TOKEN`.
 - **When delegating to a subagent**, pass the same verification requirement
   explicitly — a sweep that trusts doc prose will report stale status as fact.
 

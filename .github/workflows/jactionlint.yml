@@ -1,0 +1,229 @@
+name: jactionlint
+
+# Lints every workflow and composite action with jactionlint (https://jactionlint.jdx.dev/),
+# a fork of actionlint that also runs the zizmor audits. One tool does two jobs, with the
+# default profile and the rules in .github/jactionlint.yaml:
+#   - the actionlint checks: YAML schema, `${{ }}` expression types, and (through
+#     shellcheck) the shell in every `run:` block;
+#   - the zizmor audits: the Actions security checks. This replaces the former zizmor
+#     "workflow audit" job of security.yml, including its SARIF upload to code scanning.
+# --strict-exit makes a warn or info finding fail the run too. --online=strict adds the
+# checks that query the GitHub API (known-vulnerable action versions, impostor commits), and
+# fails the run (exit 3) when a lookup is skipped, for example on a rate limit, so those
+# checks never pass without running.
+#
+# Runs on EVERY pull request (no `paths:` filter), on push to main, and weekly. Deliberately
+# NOT paths-filtered: the run takes seconds, and a paths-filtered check that is ALSO a
+# required status hangs a non-workflow PR at "Expected — waiting for status" (#196; see the
+# same reasoning in osv-scanner.yml). The `jactionlint` job is meant to be a required check,
+# and the unreachable-required-check rule in .github/jactionlint.yaml keeps a filter off it.
+# The weekly run keeps the online checks current for a main that does not change, as the
+# zizmor job's weekly run did.
+
+on:
+  pull_request:
+    # Explicit list = the implicit defaults (opened/synchronize/reopened) PLUS
+    # `ready_for_review`, which re-fires the job on the draft → ready flip —
+    # setting any `types:` replaces the defaults (#623).
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [main]
+  schedule:
+    - cron: "41 4 * * 1" # weekly, Monday 04:41 UTC
+
+permissions:
+  contents: read
+
+concurrency:
+  # event_name keeps the weekly run and a main push out of each other's way.
+  group: jactionlint-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
+
+jobs:
+  jactionlint:
+    name: jactionlint
+    # Runs on drafts too: it is a cheap required check. Only its SARIF upload skips drafts
+    # (see tests/test_workflow_draft_guard.py and the upload steps below).
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      # `contents: read` is all the job token needs: the checkout, and the online checks on a
+      # fork PR, only read. The SARIF upload uses a minted App token, so the job token never
+      # holds `security-events: write`.
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Mint a clauster-ci App token (≥5,000 REST req/hr) for the online checks, so they do
+      # not exhaust the 1,000/hr github-actions[bot] pool under bursts (the zizmor job saw
+      # /advisories 403s there). This token carries `contents: read` only and goes to the
+      # jactionlint runs below. The SARIF upload uses a SECOND token with
+      # `security-events: write`, so the `jactionlint` binary never holds a scope that could
+      # rewrite the Security tab (#1437). Same-repo runs only: a fork PR lacks the App
+      # secrets, so this step is skipped and the online checks fall back to GITHUB_TOKEN.
+      - name: Mint GitHub App token
+        id: app-token
+        if: >-
+          ${{ github.event_name != 'pull_request'
+          || github.event.pull_request.head.repo.full_name == github.repository }}
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ secrets.CLAUSTER_CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CLAUSTER_CI_APP_PRIVATE_KEY }}
+          permission-contents: read
+      # A SECOND App token, `security-events: write` only, for the code-scanning/sarifs POST
+      # below. Minted here, before the lint runs: `Run jactionlint` exits nonzero on
+      # findings, and a mint placed after it with a bare `if:` (implicit `success()`) would
+      # then be skipped, leaving the upload (which runs after a failed gate) with no token.
+      # Minted only when the upload runs: same-repo, and not on a draft PR.
+      - name: Mint SARIF upload token
+        id: sarif-token
+        if: >-
+          ${{ (github.event_name != 'pull_request'
+          || github.event.pull_request.head.repo.full_name == github.repository)
+          && github.event.pull_request.draft != true }}
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ secrets.CLAUSTER_CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CLAUSTER_CI_APP_PRIVATE_KEY }}
+          permission-security-events: write
+      # Install the release binary, pinned three ways: the version, the sha256 of the archive,
+      # and GitHub's build attestation, which proves that jdx/jactionlint's own release
+      # workflow built the archive. So a moved release asset or a binary built elsewhere
+      # fails here, before anything runs under the App token. The archive is unpacked in
+      # RUNNER_TEMP, outside the checkout that jactionlint lints.
+      - name: Install jactionlint (version, sha256 and attestation pinned)
+        env:
+          # Keep the annotation directly above the VERSION line and the SHA256 line right
+          # after it: the clauster preset in schubydoo/renovate-config reads them as a group.
+          # Renovate cannot compute the SHA256 itself. The preset's postUpgradeTask runs
+          # scripts/check_binary_dep_pins.py --fix, which writes the digest that GitHub
+          # publishes for the release asset; `sha256sum -c` fails a stale pin. Keep the
+          # `jactionlint==` pin in .pre-commit-config.yaml equal to this version.
+          # renovate: datasource=github-releases depName=jdx/jactionlint
+          JACTIONLINT_VERSION: "2.6.0"
+          JACTIONLINT_SHA256: "d5400967b8f0d3a5ae9a4cee21f56400a50eb3f05d0cbb4ef17184f17f0760c8"
+          # The job token is enough for the release download and the attestation lookup:
+          # both read a public repository. Not the App token: this step needs no rate bucket.
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          archive="jactionlint_${JACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          dir="$RUNNER_TEMP/jactionlint"
+          mkdir -p "$dir"
+          cd "$dir"
+          gh release download "v${JACTIONLINT_VERSION}" --repo jdx/jactionlint --pattern "$archive"
+          echo "${JACTIONLINT_SHA256}  ${archive}" | sha256sum -c -
+          # Not only "some workflow of jdx/jactionlint": the release workflow, on this tag,
+          # on a GitHub-hosted runner.
+          gh attestation verify "$archive" --repo jdx/jactionlint \
+            --signer-workflow jdx/jactionlint/.github/workflows/release.yaml \
+            --source-ref "refs/tags/v${JACTIONLINT_VERSION}" --deny-self-hosted-runners
+          tar -xzf "$archive" jactionlint
+          ./jactionlint --version
+          echo "$dir" >> "$GITHUB_PATH"
+      # jactionlint writes one output format per run, so it runs twice: SARIF for code
+      # scanning here, then the `github` format (annotations on the PR diff) as the gate. The
+      # second run answers its online lookups from the cache of the first one (default TTL
+      # 1h), so it costs no extra API calls. An explicit --shellcheck makes a missing
+      # shellcheck fail the run (exit 3), so `run:` blocks never go silently unlinted.
+      - name: Write SARIF
+        id: sarif
+        # Only when it is uploaded (the same condition as the upload token above).
+        if: >-
+          ${{ (github.event_name != 'pull_request'
+          || github.event.pull_request.head.repo.full_name == github.repository)
+          && github.event.pull_request.draft != true }}
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          # The default shell is `bash -e`, so a bare exit 1 (findings) would end the step
+          # here, skip the gate and the upload. `|| rc=$?` keeps the exit code instead.
+          rc=0
+          jactionlint --format sarif --online=strict --online-token-env GH_TOKEN \
+            --shellcheck shellcheck > jactionlint.sarif || rc=$?
+          # Exit 1 = findings: the SARIF is complete, and the gate below fails the job.
+          # Exit 2 or 3 = the run itself failed (3 also when an online lookup was skipped),
+          # so the SARIF cannot be trusted.
+          if [ "$rc" -gt 1 ]; then
+            echo "::error title=jactionlint SARIF::jactionlint exited $rc"
+            exit "$rc"
+          fi
+      - name: Run jactionlint
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+        run: >-
+          jactionlint --format github --strict-exit --online=strict --online-token-env GH_TOKEN
+          --shellcheck shellcheck
+      - name: Upload SARIF
+        # `!cancelled()`: the gate exits nonzero when it has findings, which is exactly when
+        # the SARIF is worth sending to the Security tab. A run that a newer push cancelled
+        # uploads nothing for its old SHA. Gated on `Write SARIF` having succeeded, so a
+        # skipped (draft, fork) or failed SARIF run uploads nothing either.
+        # `upload-sarif` cannot take an App token: inside Actions it uploads through
+        # `PUT /repos/{owner}/{repo}/code-scanning/analysis` (its `analyses.ts`), an
+        # Actions-only route that answered "Not Found" to this App token on PR 1435 (run
+        # 33700073187); codeql-action#2719 is the same failure. So this posts to the public
+        # `POST /repos/{owner}/{repo}/code-scanning/sarifs` endpoint, which the REST docs
+        # limit "per user or app installation", giving the App its own bucket instead of the
+        # shared GITHUB_TOKEN pool that hit "API rate limit exceeded for installation" on
+        # PR 1431. Every dynamic value arrives through `env:`, so nothing is interpolated
+        # into the script body (template-injection). Same-repo only: a fork PR cannot write
+        # code scanning results, so the step skips rather than reds the check.
+        if: >-
+          ${{ !cancelled()
+          && steps.sarif.outcome == 'success'
+          && (github.event_name != 'pull_request'
+          || github.event.pull_request.head.repo.full_name == github.repository)
+          && github.event.pull_request.draft != true }}
+        env:
+          GH_TOKEN: ${{ steps.sarif-token.outputs.token }}
+          REPO: ${{ github.repository }}
+          COMMIT_SHA: ${{ github.sha }}
+          REF: ${{ github.ref }}
+          CHECKOUT_URI: file://${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          # `automationDetails.id` is the analysis category; the sarifs endpoint takes no
+          # category field, so set it here so these uploads supersede the `jactionlint`
+          # series instead of duplicating it. The trailing slash is load-bearing: GitHub
+          # parses the id as `category/run-id`, so an id without one records an EMPTY
+          # category and starts a new alert series.
+          sarif_b64="$(jq '.runs[].automationDetails.id = "jactionlint/"' jactionlint.sarif \
+            | gzip -c | base64 -w0)"
+          sarif_id="$(gh api "repos/$REPO/code-scanning/sarifs" \
+            -f "commit_sha=$COMMIT_SHA" \
+            -f "ref=$REF" \
+            -f "checkout_uri=$CHECKOUT_URI" \
+            -f "tool_name=jactionlint" \
+            -f "sarif=$sarif_b64" \
+            --jq .id)"
+          echo "Uploaded jactionlint SARIF (id=$sarif_id); waiting for processing."
+          last_err=""
+          for _ in $(seq 1 30); do
+            # A transient GET error must not red an upload that already succeeded, so
+            # keep polling and remember the last error for the timeout message below.
+            if ! status="$(gh api "repos/$REPO/code-scanning/sarifs/$sarif_id" \
+              --jq .processing_status 2>"$RUNNER_TEMP/gh_poll_err")"; then
+              last_err="$(cat "$RUNNER_TEMP/gh_poll_err")"
+              status="pending"
+            fi
+            echo "processing_status=$status"
+            case "$status" in
+              complete) exit 0 ;;
+              failed)
+                echo "jactionlint SARIF processing failed:" >&2
+                gh api "repos/$REPO/code-scanning/sarifs/$sarif_id" --jq '.errors[]?' >&2
+                exit 1 ;;
+            esac
+            sleep 5
+          done
+          # A slow-but-not-failed upload must not red this check: the lint verdict is the
+          # `Run jactionlint` step, and the analysis lands a moment later. Warn and pass, but
+          # surface the last GET error so a persistent id or permission problem is not
+          # misread as a slow upload.
+          echo "::warning title=jactionlint SARIF::still '$status' after the bounded wait;" \
+            "not failing the check. last GET error: ${last_err:-none}"
+          exit 0

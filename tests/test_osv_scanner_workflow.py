@@ -1,7 +1,7 @@
 # Guard for the OSV-Scanner workflow (#320, #1469).
 #
-# Every `uses:` must be SHA-pinned, NOT tag-pinned: a tag-pin would (a) fail the required
-# `zizmor` "workflow audit" check (unpinned-uses) and (b) re-introduce the Scorecard
+# Every `uses:` must be SHA-pinned, NOT tag-pinned: a tag-pin would (a) fail the `jactionlint`
+# check (zizmor's unpinned-uses audit) and (b) re-introduce the Scorecard
 # Pinned-Dependencies alerts that #319 cleared. The upstream OSV docs show tags, so this is an
 # easy regression; this guard fails fast — before CI does.
 #
@@ -65,7 +65,7 @@ def test_osv_uses_are_sha_pinned():
     refs = _all_uses(_doc())
     assert refs, "expected at least the checkout + app-token step `uses:`"
     unpinned = [r for r in refs if not _is_pinned(r)]
-    assert unpinned == [], f"tag-pinned uses would fail zizmor + Scorecard: {unpinned}"
+    assert unpinned == [], f"tag-pinned uses would fail jactionlint + Scorecard: {unpinned}"
 
 
 def test_osv_is_fork_safe_trigger():

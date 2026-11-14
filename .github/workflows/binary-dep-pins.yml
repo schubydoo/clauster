@@ -2,7 +2,7 @@ name: Binary dep pins
 
 # Verify each pinned release-asset sha256 still matches GitHub's published digest (#934):
 # the managed-binary pins in deps.py (BINARY_DEPS, e.g. Shawl) AND the version+sha256 pairs
-# the osv-scanner / actionlint workflows download inline. Renovate bumps the version but
+# the osv-scanner / jactionlint workflows download inline. Renovate bumps the version but
 # CANNOT rewrite the source-pinned checksum (its github-releases digest is the git-tag commit,
 # not the asset file hash), so this catches a bumped-but-stale hash in either source.
 #
@@ -21,14 +21,14 @@ on:
       - "src/clauster/deps.py"
       - "scripts/check_binary_dep_pins.py"
       - ".github/workflows/osv-scanner.yml"
-      - ".github/workflows/actionlint.yml"
+      - ".github/workflows/jactionlint.yml"
   push:
     branches: [main]
     paths:
       - "src/clauster/deps.py"
       - "scripts/check_binary_dep_pins.py"
       - ".github/workflows/osv-scanner.yml"
-      - ".github/workflows/actionlint.yml"
+      - ".github/workflows/jactionlint.yml"
 
 permissions:
   contents: read

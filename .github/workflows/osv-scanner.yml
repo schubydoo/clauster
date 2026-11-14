@@ -136,7 +136,7 @@ jobs:
           exit 0 # never fail here — upload the SARIF first, then surface a real error below
       - name: Upload SARIF
         # Post to the public `code-scanning/sarifs` endpoint with the minted App token, the
-        # same path the trivy/codeql/zizmor jobs use, so this upload draws on the App's own
+        # same path the trivy/codeql/jactionlint jobs use, so this upload draws on the App's own
         # per-installation rate bucket instead of the shared GITHUB_TOKEN pool. `upload-sarif`
         # cannot take an App token (codeql-action#2719). Every dynamic value comes through
         # `env:`, so nothing is interpolated into the script body. Same-repo only (a fork PR

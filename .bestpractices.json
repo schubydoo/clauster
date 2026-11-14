@@ -118,7 +118,7 @@
   "no_leaked_credentials_status": "Met",
   "no_leaked_credentials_justification": "No credentials are stored in the repository; gitleaks and GitHub secret scanning run in CI, sensitive config is gitignored, and session URLs/tokens are redacted in logs.",
   "static_analysis_status": "Met",
-  "static_analysis_justification": "Static analysis runs in CI: ruff (including flake8-bandit `S` security rules), pyright, CodeQL, and Trivy, plus OpenSSF Scorecard and zizmor (GitHub Actions workflow security auditing).",
+  "static_analysis_justification": "Static analysis runs in CI: ruff (including flake8-bandit `S` security rules), pyright, CodeQL, and Trivy, plus OpenSSF Scorecard and jactionlint (GitHub Actions workflow linting, including the zizmor security audits).",
   "static_analysis_common_vulnerabilities_status": "Met",
   "static_analysis_common_vulnerabilities_justification": "CodeQL and ruff-S specifically target common vulnerability patterns.",
   "static_analysis_fixed_status": "Met",

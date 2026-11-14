@@ -22,6 +22,10 @@ name: Homebrew tap sync trigger
 #     no-ops when the formula is unchanged, so an early/duplicate fire is harmless, and
 #     the daily cron remains the fallback if this ever fails.
 
+# No `concurrency:` on purpose. The job runs only when a packaging-bump PR merges, once
+# per release, and a duplicate dispatch is harmless (see above), so there is no run to
+# cancel.
+# jactionlint ignore=concurrency-limits
 on:
   pull_request:
     types: [closed]

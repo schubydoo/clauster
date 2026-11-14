@@ -3,6 +3,10 @@ name: Claude review
 # On-demand PR review: comment "@claude review" on a pull request.
 # The job and all its settings live in schubydoo/shared-workflows. This file only calls it.
 
+# No `concurrency:` on purpose. The workflow starts on every PR comment, and most comments
+# are not "@claude review", so cancel-in-progress would kill a running review each time
+# someone comments on the PR.
+# jactionlint ignore=concurrency-limits
 on:
   # A comment starts the review, so this trigger is required.
   issue_comment: # zizmor: ignore[dangerous-triggers]
