@@ -1489,25 +1489,38 @@ def test_config_mgmt_new_skill_round_trip(
     assert "an e2e skill" in saved.read_text(encoding="utf-8")
 
 
-# Lets the skill PUT's headers through but holds its body until `__releaseBody()` runs: the
-# window between `res.ok` and `res.json()` in which the operator can start a new skill.
-_HOLD_SKILL_PUT_BODY = """(() => {
-  window.__holdBody = new Promise(r => { window.__releaseBody = r; });
-  const real = window.fetch;
-  window.fetch = function (url, opts) {
-    const p = real.apply(this, arguments);
-    const u = String(url);
-    const isPut = opts && opts.method === "PUT" && u.includes("/api/config-write/skills")
-      && !u.includes("/overrides");
-    if (!isPut) return p;
-    return p.then(res => {
-      const json = res.json.bind(res);
-      res.json = () => window.__holdBody.then(json);
-      return res;
-    });
-  };
-  return true;
-})()"""
+def _hold_put_body(overrides: bool) -> str:
+    """JS that lets a skills PUT's headers through but holds its body until released.
+
+    That is the window between `res.ok` and `res.json()` in which the operator can start
+    a new skill. `overrides` picks the visibility PUT, else the skill editor's PUT.
+    """
+    match = "u.includes('/overrides')" if overrides else "!u.includes('/overrides')"
+    return (
+        "(() => {"
+        "window.__holdBody = new Promise(r => { window.__releaseBody = r; });"
+        "const real = window.fetch;"
+        "window.fetch = function (url, opts) {"
+        "const p = real.apply(this, arguments); const u = String(url);"
+        "const isPut = opts && opts.method === 'PUT'"
+        " && u.includes('/api/config-write/skills') && " + match + ";"
+        "if (!isPut) return p;"
+        "return p.then(res => { const json = res.json.bind(res);"
+        " res.json = () => window.__holdBody.then(json); return res; });"
+        "}; return true; })()"
+    )
+
+
+def _release_body(browser: AgentBrowser) -> None:
+    browser.eval_json("(() => { window.__releaseBody(); return true; })()")
+
+
+def _stays_visible(browser: AgentBrowser, selector: str, seconds: float = 2.0) -> None:
+    """Fail if `selector` is ever hidden during `seconds` (a reload that closes it)."""
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        assert browser.is_visible(selector), f"{selector} was closed"
+        time.sleep(0.1)
 
 
 def test_config_mgmt_new_skill_opened_during_a_save_stays_open(
@@ -1523,7 +1536,7 @@ def test_config_mgmt_new_skill_opened_during_a_save_stays_open(
     browser.fill('[data-test="cm-skill-name"]', "first-skill")
     browser.fill('[data-test="cm-skill-content"]', "---\nname: first-skill\n---\nBody.\n")
     browser.fill('[data-test="cm-skill-confirm"]', "alpha")
-    assert browser.eval_json(_HOLD_SKILL_PUT_BODY) is True
+    assert browser.eval_json(_hold_put_body(overrides=False)) is True
     browser.click('[data-test="cm-skill-save"]')
     saved = alpha / ".claude" / "skills" / "first-skill" / "SKILL.md"
     deadline = time.monotonic() + 10
@@ -1533,10 +1546,46 @@ def test_config_mgmt_new_skill_opened_during_a_save_stays_open(
     browser.expect_visible('[data-test="cm-skill-new"]')
     browser.click('[data-test="cm-skill-new"]')  # a second, new editor during the wait
     browser.fill('[data-test="cm-skill-name"]', "second-skill")
-    browser.eval_json("(() => { window.__releaseBody(); return true; })()")
-    time.sleep(1.0)  # let a reload, if one ran, finish
-    browser.expect_visible('[data-test="cm-skill-editor"]')
+    _release_body(browser)
+    _stays_visible(browser, '[data-test="cm-skill-editor"]')
     browser.expect_value('[data-test="cm-skill-name"]', "second-skill")
+
+
+def test_config_mgmt_visibility_save_lands_when_an_editor_opens_during_its_body_wait(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """Edit during a visibility save's body read does not drop its hash and baseline.
+
+    Edit (like New skill) clears `saved` but leaves the visibility load current, so the save
+    must still reload: a skipped reload leaves the old hash, and the next save is refused.
+    """
+    alpha = _projects_root(config_mgmt_server) / "alpha"
+    _seed_skill(alpha, "greeter")
+    settings = alpha / ".claude" / "settings.json"
+    _open_skill_visibility(browser, config_mgmt_server)
+    browser.select('[data-test="cm-skill-ov-greeter"]', "off")
+    assert browser.eval_json(_hold_put_body(overrides=True)) is True
+    _save_skill_visibility(browser, "alpha")
+    deadline = time.monotonic() + 10
+    while not (settings.exists() and "greeter" in settings.read_text(encoding="utf-8")):
+        assert time.monotonic() < deadline, "the held save never reached the server"
+        time.sleep(0.1)
+    # "Saved." shows once the headers are handled, so the click lands in the body wait: a
+    # click before it is overwritten when the page then sets `saved`.
+    browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
+    browser.click('[data-test="cm-skill-edit-greeter"]')  # clears `saved`, not the load
+    browser.expect_visible('[data-test="cm-skill-editor"]')
+    _release_body(browser)
+    time.sleep(0.5)
+    browser.click('[data-test="cm-skill-cancel"]')
+    browser.expect_value('[data-test="cm-skill-ov-greeter"]', "off")
+    browser.expect_hidden('[data-test="cm-skill-ov-changed-greeter"]', timeout_ms=_SAVE_TIMEOUT)
+    browser.select('[data-test="cm-skill-ov-greeter"]', "name-only")
+    _save_skill_visibility(browser, "alpha")
+    browser.expect_hidden('[data-test="cm-skill-ov-confirm"]', timeout_ms=_SAVE_TIMEOUT)
+    browser.expect_hidden('[data-test="cm-error"]')
+    on_disk = json.loads(settings.read_text(encoding="utf-8"))
+    assert on_disk["skillOverrides"] == {"greeter": "name-only"}
 
 
 def test_config_mgmt_skill_edit_and_delete_round_trip(

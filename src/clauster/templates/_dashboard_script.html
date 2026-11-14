@@ -3138,14 +3138,17 @@
       },
       // TASK-524: keep the `warnings` a successful save response carries. Call it right
       // after setting `saved`; `stillMine` says whether the panel still shows this write
-      // once the body is read (a scope or surface switch means it does not). Returns that
-      // answer: reading the body is a wait, so the caller must not reload a panel the
-      // operator has since moved on from (the reload would clear their newer edits).
+      // once the body is read (a scope or surface switch means it does not). Returns
+      // `stillMine()` after that wait, so the caller does not reload a panel the operator
+      // has since moved on from (the reload would clear their newer edits). `c.saved` only
+      // decides whether the warnings show: an Edit or New skill clears it without making
+      // a visibility save stale, and that save must still land its new hash and baseline.
       async _configMgmtTakeWarnings(res, stillMine) {
         const c = this.configMgmt;
         c.warnings = [];
         const d = await res.json().catch(() => null);
-        if (!stillMine() || !c.saved) return false;
+        const mine = stillMine();
+        if (!mine || !c.saved) return mine;
         const list = d && Array.isArray(d.warnings) ? d.warnings : [];
         c.warnings = list.filter((w) => typeof w === "string" && w);
         return true;
@@ -3889,8 +3892,9 @@
           if (res.ok) {
             c.saved = true; m.editing = false; m.confirm = "";
             const current = await this._configMgmtTakeWarnings(res, () => c.gen === gen);
-            // An editor opened during the wait stays open: the reload would close it.
-            if (!current || m.editing) return;
+            // An editor opened during the wait stays open, and an approval toggled during it
+            // (it clears `saved`) keeps its choice: the reload would reset both.
+            if (!current || !c.saved || m.editing) return;
             await this._loadMcp(gen);
           }
           else await this._configMgmtWriteErr(res);
