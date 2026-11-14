@@ -249,7 +249,9 @@ def test_warning_recheck_moves_focus_to_the_warning_pill(
     """A re-check that ends in a warning moves focus to the warning pill, once it shows.
 
     x-show reveals the pill a frame or so later. A test-only style keeps it hidden for
-    100 ms, so a single focus() call always misses it and only a retry lands.
+    100 ms, so a single focus() call always misses it and only a retry lands. The page's
+    style-src is nonce-gated, so the style carries the page's nonce. The test checks the
+    pill at 50 ms, after x-show has revealed it, so a blocked style fails the test.
     """
     _settle(browser, open_server)
     _stub(browser, _ALPHA, 500, {}, "await d.loadPreflight('alpha');")
@@ -258,11 +260,16 @@ def test_warning_recheck_moves_focus_to_the_warning_pill(
     browser.eval_js(
         "(async function(){const el=document.querySelector('" + _NOT_RUN + "');"
         "const hide=document.createElement('style');"
+        "hide.nonce=document.querySelector('script[nonce],style[nonce]').nonce;"
         "hide.textContent='[data-test=\"preflight-pill\"]{display:none!important}';"
         "document.head.appendChild(hide);setTimeout(()=>hide.remove(),100);"
+        "setTimeout(()=>{window.__pillRects="
+        "document.querySelector('" + _WARN + "').getClientRects().length},50);"
         "el.focus();await " + _ROOT + ".recheckPreflight('alpha');"
         "await new Promise(r=>setTimeout(r,400));return 1})()"
     )
+    hidden_rects = browser.eval_json("(()=>window.__pillRects)()")
+    assert hidden_rects == 0, "the test-only style did not hide the warning pill"
     browser.expect_hidden(_NOT_RUN)
     browser.expect_visible(_WARN)
     focused = browser.eval_json("(()=>document.activeElement.dataset.test||'')()")
