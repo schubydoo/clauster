@@ -56,7 +56,7 @@ import json
 import math
 import re
 import sys
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 from typing import Any, Literal
 
@@ -548,6 +548,132 @@ def validate_candidate(candidate: Any, validator: Callable[[Any], None]) -> None
         raise
     except Exception as exc:  # noqa: BLE001 - any structural failure ⇒ reject, never crash
         raise InvalidCandidateError(str(exc)) from exc
+
+
+#: Request-scoped sink for the known-value warnings of one config-write save (TASK-524). The
+#: lists of known event names, types, keys and values that the validators hold are copied
+#: by hand from the Claude Code docs and lag behind each new Claude Code release, so a value
+#: outside one of them saves as typed and the save response carries a warning instead of a
+#: 422. A route sets this to a fresh list around the write (the same pattern as
+#: :data:`cli_argv_sink`, and it reaches the worker thread the same way). Default ``None`` =
+#: "not collecting": a validator called outside a save (a read, a test) records nothing.
+value_warning_sink: contextvars.ContextVar[list[str] | None] = contextvars.ContextVar(
+    "value_warning_sink", default=None
+)
+
+
+@contextlib.contextmanager
+def collect_value_warnings() -> Iterator[list[str]]:
+    """Collect the :func:`warn_unknown_value` messages recorded inside the block (TASK-524).
+
+    Yields the list the messages land in. It sets :data:`value_warning_sink` for the block
+    and restores the previous sink after it, also when the block raises.
+    """
+    sink: list[str] = []
+    token = value_warning_sink.set(sink)
+    try:
+        yield sink
+    finally:
+        value_warning_sink.reset(token)
+
+
+#: The longest value a known-value warning quotes; a longer one is cut short.
+_WARNING_VALUE_MAX = 80
+
+#: The most known values a warning names; a longer list (the hook events) is not spelled out.
+_WARNING_LIST_MAX = 10
+
+
+def warn_unknown_value(what: str, value: Any, known: Iterable[str]) -> None:
+    """Record that ``value`` of ``what`` is not one of the ``known`` values (TASK-524).
+
+    Never refuses: the write goes on and saves the value as typed. Shape checks, scope
+    rules and security gates still raise :class:`InvalidCandidateError` in their
+    validators; only a hand-written list of known values comes here. The message quotes
+    the value through :func:`redact_secrets` and cuts it at :data:`_WARNING_VALUE_MAX`
+    characters, because a save response must never echo a secret that a merge restored
+    from the file. A no-op when no save is collecting (:data:`value_warning_sink`), and a
+    message already recorded is not added twice.
+    """
+    sink = value_warning_sink.get()
+    # A resent mask means "keep the stored value", which this save cannot judge.
+    if sink is None or value == REDACTION_SENTINEL:
+        return
+    shown = redact_secrets(value) if isinstance(value, str) else value
+    text = repr(shown)
+    if len(text) > _WARNING_VALUE_MAX:
+        text = text[: _WARNING_VALUE_MAX - 1] + "…"
+    names = sorted(known)
+    listed = f" ({', '.join(names)})" if len(names) <= _WARNING_LIST_MAX else ""
+    message = (
+        f"{what} {text} is not one of the known values{listed}. It saves as typed. "
+        "The list comes from the Claude Code docs and can be out of date."
+    )
+    if message not in sink:
+        sink.append(message)
+
+
+def record_value_warnings(messages: Iterable[str]) -> None:
+    """Add already-built known-value ``messages`` to the active save's warnings, if any.
+
+    For a check that ran in a throwaway :func:`collect_value_warnings` block and keeps only
+    some of its messages (a check over text with stored values put back behind masks).
+    """
+    sink = value_warning_sink.get()
+    if sink is None:
+        return
+    for message in messages:
+        if message not in sink:
+            sink.append(message)
+
+
+#: The deepest container nesting a value outside the known lists may hold (TASK-524). The
+#: read masks, the keep-stored merges and the JSON renderer all recurse, so an unbounded
+#: value would end in a ``RecursionError`` (a 500, and a file the dashboard cannot read).
+MAX_UNKNOWN_VALUE_DEPTH = 32
+
+
+def walkable_value(value: Any) -> bool:
+    """Whether ``value`` is JSON that the read and merge paths can walk (TASK-524).
+
+    A key outside a known list is stored as typed, so only the shape of its value is
+    checked: no container (a dict, list, tuple or set) sits
+    :data:`MAX_UNKNOWN_VALUE_DEPTH` or more levels below it, and every number is finite
+    (``1e400`` parses to ``inf``, which JSON cannot store).
+    Iterative, so the check itself cannot overflow the stack.
+    """
+    stack: list[tuple[Any, int]] = [(value, 0)]
+    while stack:
+        node, depth = stack.pop()
+        if isinstance(node, float) and not math.isfinite(node):
+            return False
+        if isinstance(node, dict | list | tuple | set | frozenset):
+            # A YAML frontmatter value can also be a tuple (`!!omap`) or a set (`!!set`).
+            if depth >= MAX_UNKNOWN_VALUE_DEPTH:
+                return False
+            children = node.values() if isinstance(node, dict) else node
+            stack.extend((child, depth + 1) for child in children)
+    return True
+
+
+def warn_unknown_keys(obj: dict[Any, Any], known: Iterable[str], what: str) -> None:
+    """Warn about each key of ``obj`` outside ``known``; refuse one that is not text or walkable.
+
+    A key outside the known list is stored as typed with a warning
+    (:func:`warn_unknown_value`). Its value must still pass :func:`walkable_value`, and the
+    key must be text: a frontmatter mapping comes from YAML, where a key can be a number or
+    null. ``key=str`` sorts such mixed keys without a ``TypeError``.
+    """
+    known = frozenset(known)
+    for key in sorted(set(obj) - known, key=str):
+        if not isinstance(key, str):
+            raise InvalidCandidateError(f"{what} {key!r} must be text")
+        warn_unknown_value(what, key, known)
+        if not walkable_value(obj[key]):
+            raise InvalidCandidateError(
+                f"{what} {key!r} holds a value nested {MAX_UNKNOWN_VALUE_DEPTH} or more levels "
+                "deep, or a number that is not finite"
+            )
 
 
 def hash_bytes(data: bytes) -> str:

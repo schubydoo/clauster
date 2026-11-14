@@ -176,9 +176,41 @@ def test_hooks_rows_editor_present_when_enabled(write_config):
     assert "const HOOK_EVENTS =" in html
 
 
+def test_hook_event_box_suggests_known_events_and_warns_about_others(write_config):
+    # TASK-524: the event is a text box over a datalist of the known events (not a
+    # <select>), with a warning under it for any other name, as the Settings rows do.
+    html = _html(write_config, _ON)
+    box = re.search(r'<input [^>]*data-test="cm-hook-event"[^>]*>', html)
+    assert box, "the hook event box is not a text input"
+    assert 'list="cm-hook-event-options"' in box.group(0)
+    assert "cm-hook-event-warn-" in box.group(0)  # aria-describedby to the warning
+    assert '<select class="form-select form-select-sm" data-test="cm-hook-event"' not in html
+    assert '<datalist id="cm-hook-event-options"' in html
+    assert 'data-test="cm-hook-event-warning"' in html
+    assert "configMgmtHookEventWarning(" in html
+    # A filled row with no event would be dropped on save: the rows warning blocks it.
+    assert "Type an event for row" in html
+
+
+def test_save_warnings_are_shown_and_announced(write_config):
+    # TASK-524: a save response's `warnings` show under the Saved banner, and a
+    # persistent live region announces them.
+    html = _html(write_config, _ON)
+    assert 'data-test="cm-save-warnings"' in html
+    assert "configMgmtSaveWarnings()" in html
+    # One persistent live region, always mounted, as cm-saved-live is.
+    live = re.findall(r'<div [^>]*data-test="cm-save-warnings-live"[^>]*>', html)
+    assert len(live) == 1 and 'role="status"' in live[0] and "visually-hidden" in live[0]
+    # Every configMgmt save success either takes the response's warnings or clears them:
+    # the five routes that answer `warnings` take them, the seven other writes clear them
+    # (plus the clear inside the helper itself).
+    assert html.count("await this._configMgmtTakeWarnings(res, ") == 5
+    assert html.count("c.warnings = [];") == 8
+
+
 def test_hook_events_match_backend_recognized_events(write_config):
-    # The injected HOOK_EVENTS const must equal the backend's RECOGNIZED_EVENTS (sorted)
-    # so the rows editor's event <select> never offers an event the write surface rejects.
+    # The injected HOOK_EVENTS const must equal the backend's RECOGNIZED_EVENTS (sorted):
+    # they are the event box's suggestions, and a name outside them warns (TASK-524).
     import json
     import re
 
@@ -519,8 +551,8 @@ def test_local_skill_visibility_lists_user_folders_only_with_user_scope(
 
 
 def test_skill_visibility_values_match_the_backend(write_config):
-    # The panel tells a known stored value from a "Not valid" one with this list. If the
-    # backend gains a value, the panel must too, or it shows a valid value as not valid.
+    # The panel tells a known stored value from a "Not a known value" one with this list. If
+    # the backend gains a value, the panel must too, or it shows a known value as unknown.
     html = _html(write_config, _ON)
     js = re.search(r"configMgmtSkillOvValues:\s*\[([^\]]*)\]", html)
     assert js

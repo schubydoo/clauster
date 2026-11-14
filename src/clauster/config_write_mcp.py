@@ -34,7 +34,8 @@ Every transport also takes ``timeout``, ``alwaysLoad``, ``bareElicitationCapabil
 ``role``. The accepted fields per transport are the ones Claude Code documents at
 https://code.claude.com/docs/en/mcp plus the ones the live 2.1.318 CLI parses and keeps
 (TASK-449.8); see :data:`_STDIO_KEYS`, :data:`_HTTP_SSE_KEYS` and :data:`_WS_KEYS`.
-Unknown keys or wrong types ⇒ 422, nothing written. Every ``env``/``headers`` value,
+Wrong types ⇒ 422, nothing written; a key or type outside these lists saves with a
+warning (TASK-524). Every ``env``/``headers`` value,
 every ``headersHelper`` command, the ``oauth`` strings and a token-bearing ``url`` flow
 through :func:`_redact_entry` / :func:`~clauster.config_write.merge_redacted` so the
 browser never reads a stored secret out and a returned ``"********"`` sentinel keeps
@@ -69,6 +70,7 @@ the stored value.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from pathlib import Path
@@ -140,6 +142,13 @@ PROJECTS_KEY = "projects"
 #: Every ``type`` value Claude Code reads, mapped to the transport it means. ``streamable-http``
 #: is the MCP specification's name for ``http`` and Claude Code accepts it as an alias
 #: (https://code.claude.com/docs/en/mcp, "Option 1"). An entry with no ``type`` is stdio.
+#:
+#: SUGGESTIONS ONLY (TASK-524), like every list of known keys and values below: a save with
+#: a ``type``, a key, an ``oauth`` key, a ``tools`` item key or a tool permission outside
+#: them goes through with a warning (:func:`~clauster.config_write.warn_unknown_value`),
+#: because Claude Code adds them faster than these copies are updated. The refusals stay:
+#: :data:`_RUNTIME_ONLY_TYPES`, the legacy ``transport`` key, ``env`` on a remote server, the
+#: server name rules and every check of a value's JSON type.
 TRANSPORT_ALIASES = {
     "stdio": "stdio",
     "http": "http",
@@ -234,6 +243,11 @@ def entry_transport(entry: dict[str, Any]) -> str:
     entry relying on it would load as stdio). ``sdk``, ``sse-ide``, ``ws-ide`` and
     ``claudeai-proxy`` are refused: the CLI registers them at runtime and refuses them in
     a config file.
+
+    The validator itself accepts a ``type`` outside :data:`TRANSPORT_ALIASES` with a warning
+    (TASK-524) and does not call this for it. Every other caller still gets the error, so a
+    masked value in such an entry has no destination and is never restored
+    (:func:`_destination`).
     """
     if "transport" in entry:
         # Promise a reload-and-save fix only where _convert_legacy_entry makes one: a set
@@ -281,9 +295,7 @@ def _validate_oauth(name: str, oauth: Any) -> None:
     label = f"server {name!r} 'oauth'"
     if not isinstance(oauth, dict):
         raise cw.InvalidCandidateError(f"{label} must be an object")
-    unknown = set(oauth) - _OAUTH_KEYS
-    if unknown:
-        raise cw.InvalidCandidateError(f"{label} has unknown keys: {sorted(unknown, key=str)}")
+    cw.warn_unknown_keys(oauth, _OAUTH_KEYS, f"{label} key")
     if "clientId" in oauth and not isinstance(oauth["clientId"], str):
         raise cw.InvalidCandidateError(f"{label} 'clientId' must be a string")
     if "callbackPort" in oauth:
@@ -324,35 +336,38 @@ def _validate_tool_policies(name: str, entry: dict[str, Any]) -> None:
         for tool in tools:
             if not isinstance(tool, dict) or not isinstance(tool.get("name"), str):
                 raise cw.InvalidCandidateError(f"{label} items need a string 'name'")
-            unknown = set(tool) - {"name", "permission_policy"}
-            if unknown:
-                raise cw.InvalidCandidateError(
-                    f"{label} item has unknown keys: {sorted(unknown, key=str)}"
-                )
-            if "permission_policy" in tool and not (
-                isinstance(tool["permission_policy"], str)
-                and tool["permission_policy"] in _TOOL_POLICIES
-            ):
-                raise cw.InvalidCandidateError(
-                    f"{label} 'permission_policy' must be one of {sorted(_TOOL_POLICIES)}"
-                )
+            cw.warn_unknown_keys(tool, {"name", "permission_policy"}, f"{label} item key")
+            if "permission_policy" in tool:
+                policy = tool["permission_policy"]
+                if not isinstance(policy, str):
+                    raise cw.InvalidCandidateError(
+                        f"{label} 'permission_policy' must be a string, such as one of "
+                        f"{sorted(_TOOL_POLICIES)}"
+                    )
+                if policy not in _TOOL_POLICIES:
+                    cw.warn_unknown_value(f"{label} 'permission_policy'", policy, _TOOL_POLICIES)
     if "toolPermissions" in entry:
         perms = entry["toolPermissions"]
         if not isinstance(perms, dict) or not all(
-            isinstance(k, str) and isinstance(v, str) and v in TOOL_PERMISSION_VALUES
-            for k, v in perms.items()
+            isinstance(k, str) and isinstance(v, str) for k, v in perms.items()
         ):
             raise cw.InvalidCandidateError(
-                f"server {name!r} 'toolPermissions' must map tool names to one of "
-                f"{sorted(TOOL_PERMISSION_VALUES)}"
+                f"server {name!r} 'toolPermissions' must map tool names to strings, such as "
+                f"one of {sorted(TOOL_PERMISSION_VALUES)}"
             )
+        for value in perms.values():
+            if value not in TOOL_PERMISSION_VALUES:
+                cw.warn_unknown_value(
+                    f"server {name!r} 'toolPermissions' value", value, TOOL_PERMISSION_VALUES
+                )
 
 
 def _validate_common_fields(name: str, entry: dict[str, Any]) -> None:
     """Validate the shared scalar fields (``timeout``, the booleans, ``role``, ``displayName``).
 
-    ``discoveryCache`` and ``displayName`` are only in the http/sse key set, so the key
-    check has already refused them on stdio and ws before this runs.
+    ``discoveryCache`` and ``displayName`` are only in the http/sse key set. On stdio and ws
+    the key check has already warned about them (TASK-524), and their type is still checked
+    here.
     """
     if "timeout" in entry and not _is_positive_int(entry["timeout"]):
         raise cw.InvalidCandidateError(
@@ -361,8 +376,11 @@ def _validate_common_fields(name: str, entry: dict[str, Any]) -> None:
     for key in ("alwaysLoad", "bareElicitationCapability", "discoveryCache"):
         if key in entry and not isinstance(entry[key], bool):
             raise cw.InvalidCandidateError(f"server {name!r} {key!r} must be true or false")
-    if "role" in entry and entry["role"] != "comms":
-        raise cw.InvalidCandidateError(f"server {name!r} 'role' must be \"comms\"")
+    if "role" in entry:
+        if not isinstance(entry["role"], str):
+            raise cw.InvalidCandidateError(f"server {name!r} 'role' must be a string (\"comms\")")
+        if entry["role"] != "comms":
+            cw.warn_unknown_value(f"server {name!r} 'role'", entry["role"], ("comms",))
     if "displayName" in entry and not isinstance(entry["displayName"], str):
         raise cw.InvalidCandidateError(f"server {name!r} 'displayName' must be a string")
 
@@ -370,9 +388,10 @@ def _validate_common_fields(name: str, entry: dict[str, Any]) -> None:
 def _validate_server_entry(name: Any, entry: Any) -> None:
     """Structurally validate one ``name -> entry`` MCP server, or raise (→ 422).
 
-    The allowed keys depend on the transport (:func:`entry_transport`); unknown keys are
-    rejected. Stdio entries require a non-empty string ``command`` (``args`` a list of
-    strings, ``env`` a string→string map); remote entries require a non-empty string
+    The known keys depend on the transport (:func:`entry_transport`); another key saves
+    with a warning (TASK-524). Stdio entries require a non-empty string ``command``
+    (``args`` a list of strings, ``env`` a string→string map); remote entries require a
+    non-empty string
     ``url`` (``headers`` a string→string map, ``headersHelper`` a string, ``oauth`` per
     :func:`_validate_oauth`). The ``name`` must additionally match
     :data:`_SERVER_NAME_RE` (no leading ``-``, Claude Code's charset) and not be one of
@@ -404,6 +423,20 @@ def _validate_server_fields(name: str, entry: Any) -> None:
     if not isinstance(entry, dict):
         raise cw.InvalidCandidateError(f"server {name!r} must be an object")
 
+    declared = entry.get("type")
+    if (
+        isinstance(declared, str)
+        and declared
+        and declared not in TRANSPORT_ALIASES
+        and declared not in _RUNTIME_ONLY_TYPES
+        and "transport" not in entry
+    ):
+        # A type outside the known list (TASK-524): its keys are unknown, so only the shape
+        # of each value is checked, and a masked value in it is never restored
+        # (_destination has no transport for it).
+        cw.warn_unknown_value(f"server {name!r} 'type'", declared, TRANSPORT_ALIASES)
+        _validate_unknown_transport(name, entry)
+        return
     transport = entry_transport(entry)
     if transport == "stdio" and "type" not in entry and "url" in entry and "command" not in entry:
         # Claude Code reads an entry with no `type` as stdio and skips this one with the
@@ -417,13 +450,7 @@ def _validate_server_fields(name: str, entry: Any) -> None:
             "server; remove it. The editor drops a stored remote 'env' when it loads the "
             "server, so reload the server and save it"
         )
-    unknown = set(entry) - _KEYS_BY_TRANSPORT[transport]
-    if unknown:
-        # `key=str`: a subagent's inline definition comes from YAML, where a key can be a
-        # number or null, and a mixed-type sort would raise TypeError instead of this 422.
-        raise cw.InvalidCandidateError(
-            f"{transport} server {name!r} has unknown keys: {sorted(unknown, key=str)}"
-        )
+    cw.warn_unknown_keys(entry, _KEYS_BY_TRANSPORT[transport], f"{transport} server {name!r} key")
     _validate_common_fields(name, entry)
 
     if "env" in entry:
@@ -457,6 +484,65 @@ def _validate_server_fields(name: str, entry: Any) -> None:
     args = entry.get("args", [])
     if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
         raise cw.InvalidCandidateError(f"server {name!r} 'args' must be a list of strings")
+
+
+def _validate_unknown_transport(name: str, entry: dict[str, Any]) -> None:
+    """Validate an entry whose ``type`` is outside :data:`TRANSPORT_ALIASES` (TASK-524).
+
+    Nothing says which keys such a transport takes, so none is required and none is warned
+    about one by one. Each key must be text and its value walkable
+    (:func:`~clauster.config_write.walkable_value`), and a key that a known transport
+    defines must hold the JSON type it has there.
+    """
+    for key, value in entry.items():
+        if not isinstance(key, str):
+            raise cw.InvalidCandidateError(f"server {name!r} key {key!r} must be text")
+        if not cw.walkable_value(value):
+            raise cw.InvalidCandidateError(
+                f"server {name!r} {key!r} holds a value nested too deeply or a number that "
+                "is not finite"
+            )
+    _validate_common_fields(name, entry)
+    for key in ("env", "headers"):
+        if key in entry:
+            _validate_str_dict(entry[key], f"server {name!r} {key!r}")
+    for key in ("command", "url", "headersHelper"):
+        if key in entry and not isinstance(entry[key], str):
+            raise cw.InvalidCandidateError(f"server {name!r} {key!r} must be a string")
+    if "args" in entry and not (
+        isinstance(entry["args"], list) and all(isinstance(a, str) for a in entry["args"])
+    ):
+        raise cw.InvalidCandidateError(f"server {name!r} 'args' must be a list of strings")
+    if "oauth" in entry:
+        _validate_oauth(name, entry["oauth"])
+    if "request_timeout_ms" in entry and not _is_positive_int(entry["request_timeout_ms"]):
+        raise cw.InvalidCandidateError(
+            f"server {name!r} 'request_timeout_ms' must be a positive integer"
+        )
+    _validate_tool_policies(name, entry)
+
+
+def has_unknown_fields(entry: dict[str, Any]) -> bool:
+    """Whether ``entry`` holds a ``type``, a key or an ``oauth``/``tools`` key outside the lists.
+
+    Such a value saves with a warning (TASK-524), but nothing says whether it holds a
+    secret, so the MCP CLI path keeps it off ``claude mcp add-json``'s argv
+    (:func:`~clauster.config_write_mcp_cli.entry_needs_direct_write`). Call it on a
+    validated entry.
+    """
+    try:
+        transport = entry_transport(entry)
+    except cw.InvalidCandidateError:
+        return True  # a type outside TRANSPORT_ALIASES: the validator accepted it
+    if set(entry) - _KEYS_BY_TRANSPORT[transport]:
+        return True
+    oauth = entry.get("oauth")
+    if isinstance(oauth, dict) and set(oauth) - _OAUTH_KEYS:
+        return True
+    tools = entry.get("tools")
+    return isinstance(tools, list) and any(
+        isinstance(tool, dict) and set(tool) - {"name", "permission_policy"} for tool in tools
+    )
 
 
 def validate_mcp_servers(candidate: Any) -> None:
@@ -772,13 +858,22 @@ def _destination(entry: dict[str, Any], stored: dict[str, Any]) -> tuple[Any, ..
     A stdio entry hands its ``env`` to the program it runs, so its destination is the exact
     ``command`` and the exact ``args`` list, element by element, in order. A masked element
     takes the stored value at the same place, as ``merge_redacted`` will write it. An absent
-    ``args`` reads as ``[]``, the CLI's own default. ``None`` means the destination cannot
-    be decided.
+    ``args`` reads as ``[]``, the CLI's own default. The exact value of every key outside
+    the transport's known keys is part of the destination too (TASK-524). ``None`` means
+    the destination cannot be decided.
     """
     try:
         transport = entry_transport(entry)
     except cw.InvalidCandidateError:
         return None
+    # TASK-524: a key outside the known lists saves with a warning, and nothing says it
+    # does not name where a value goes, so its exact value binds the masks too: as it will
+    # be written, a nested mask resolved as merge_redacted resolves it.
+    unknown = json.dumps(
+        cw.merge_redacted(_unknown_part(entry, transport), _unknown_part(stored, transport)),
+        sort_keys=True,
+        default=repr,
+    )
     if transport == "stdio":
         command = entry.get("command")
         if command == cw.REDACTION_SENTINEL:
@@ -791,8 +886,41 @@ def _destination(entry: dict[str, Any], stored: dict[str, Any]) -> tuple[Any, ..
                 (held[i] if i < len(held) else None) if a == cw.REDACTION_SENTINEL else a
                 for i, a in enumerate(args)
             ]
-        return "stdio", command, args
-    return transport, _url_texts(entry, stored)
+        return "stdio", command, args, unknown
+    return transport, _url_texts(entry, stored), unknown
+
+
+def _unknown_part(entry: dict[str, Any], transport: str) -> dict[str, Any]:
+    """Return the keys of ``entry`` outside the known lists, with those of ``oauth``/``tools``.
+
+    The top-level keys outside the transport's known keys, the ``oauth`` keys outside
+    :data:`_OAUTH_KEYS` and, per ``tools`` item, the keys other than ``name`` and
+    ``permission_policy`` (TASK-524). Part of :func:`_destination`.
+
+    Only keys outside the lists count: an empty part is left out, so adding or removing an
+    ``oauth`` block or a tool that holds only known keys never changes the destination. A
+    tool's part is keyed by its index, so :func:`~clauster.config_write.merge_redacted`
+    resolves a mask in it from the stored tool at the same index, as the real write does.
+    """
+    part: dict[str, Any] = {
+        "top": {str(k): v for k, v in entry.items() if k not in _KEYS_BY_TRANSPORT[transport]}
+    }
+    oauth = entry.get("oauth")
+    if isinstance(oauth, dict):
+        extra = {str(k): v for k, v in oauth.items() if k not in _OAUTH_KEYS}
+        if extra:
+            part["oauth"] = extra
+    tools = entry.get("tools")
+    if isinstance(tools, list):
+        items = {
+            str(i): {str(k): v for k, v in t.items() if k not in ("name", "permission_policy")}
+            for i, t in enumerate(tools)
+            if isinstance(t, dict)
+        }
+        items = {i: d for i, d in items.items() if d}
+        if items:
+            part["tools"] = items
+    return part
 
 
 def _check_destination(name: str, entry: Any, stored: Any, *, masked: bool) -> None:
@@ -828,7 +956,20 @@ def _check_destination(name: str, entry: Any, stored: Any, *, masked: bool) -> N
     stored_entry = _convert_legacy_entry(stored)[0]
     now = _destination(entry, stored_entry)
     then = _destination(stored_entry, stored_entry)
-    if now is None or now != then:
+    if now is None:
+        # A type outside the known list (TASK-524): nothing says where it sends a value.
+        raise cw.InvalidCandidateError(
+            f"server {name!r} keeps a masked value '********' but its type is not one "
+            "Clauster knows, so it cannot tell where the stored value would go. Retype "
+            "every masked value"
+        )
+    if now != then:
+        if then is not None and now[:-1] == then[:-1]:
+            raise cw.InvalidCandidateError(
+                f"server {name!r} keeps a masked value '********' but a key that is not on "
+                "the known list changed; Clauster cannot tell whether it names where the "
+                "stored value goes. Retype every masked value, or undo that change"
+            )
         if now is not None and then is not None and now[0] == then[0] == "stdio":
             raise cw.InvalidCandidateError(
                 f"server {name!r} keeps a masked value '********' but its command or args "

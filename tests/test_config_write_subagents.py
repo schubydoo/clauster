@@ -659,7 +659,6 @@ def test_validate_frontmatter_accepts_well_formed_env() -> None:
         {"name": "x", "description": "d", "model": ""},
         {"name": "x", "description": "d", "model": 5},
         {"name": "x", "description": "d", "permissionMode": 5},
-        {"name": "x", "description": "d", "permissionMode": "not-a-real-mode"},
         {"name": "x", "description": "d", "mcpServers": "nope"},
         {"name": "x", "description": "d", "mcpServers": {"srv": "not-an-object"}},
         # The mapping spelling: Claude Code ignores a non-list `mcpServers` entirely.
@@ -670,8 +669,6 @@ def test_validate_frontmatter_accepts_well_formed_env() -> None:
         {"name": "x", "description": "d", "mcpServers": [{"srv": "not-an-object"}]},
         {"name": "x", "description": "d", "mcpServers": [{"": {"command": "x"}}]},
         {"name": "x", "description": "d", "mcpServers": [{1: {"command": "x"}}]},
-        {"name": "x", "description": "d", "permissionMode": "Manual"},  # case matters
-        {"name": "x", "description": "d", "hooks": {"NotAnEvent": []}},
         {"name": "x", "description": "d", "maxTurns": 0},
         {"name": "x", "description": "d", "maxTurns": -1},
         {"name": "x", "description": "d", "maxTurns": True},
@@ -682,13 +679,15 @@ def test_validate_frontmatter_accepts_well_formed_env() -> None:
         {"name": "x", "description": "d", "maxTurns": "1e400"},  # Infinity is not whole
         {"name": "x", "description": "d", "initialPrompt": 5},
         {"name": "x", "description": "d", "memory": 5},
-        # `memory` is a closed list now; a free string or a mapping was accepted before
-        # and Claude Code ignores both.
-        {"name": "x", "description": "d", "memory": "some memory"},
+        # `memory` takes a string; a mapping was accepted before and Claude Code ignores it.
         {"name": "x", "description": "d", "memory": {"k": "v"}},
+        # Since TASK-524 a string outside a known list warns; these shapes stay refused.
+        {"name": "x", "description": "d", "permissionMode": "inherit"},  # Clauster's own
+        {"name": "x", "description": "d", "permissionMode": "BypassPermissions"},
+        {"name": "x", "description": "d", "hooks": {"": []}},
+        {"name": "x", "description": "d", "effort": "9" * 400},  # a number the CLI cannot hold
+        {"name": "x", "description": "d", "experimental": {"cache_ttl": ["1h"]}},
         {"name": "x", "description": "d", "effort": ""},
-        {"name": "x", "description": "d", "effort": "extreme"},
-        {"name": "x", "description": "d", "effort": " high"},  # the CLI does not trim it
         {"name": "x", "description": "d", "effort": True},
         {"name": "x", "description": "d", "effort": None},
         {"name": "x", "description": "d", "effort": ["high"]},
@@ -697,10 +696,7 @@ def test_validate_frontmatter_accepts_well_formed_env() -> None:
         {"name": "x", "description": "d", "background": 1},
         {"name": "x", "description": "d", "omitClaudeMd": "yes"},
         {"name": "x", "description": "d", "isolation": ""},
-        {"name": "x", "description": "d", "isolation": "Worktree"},
-        {"name": "x", "description": "d", "isolation": "container"},
         {"name": "x", "description": "d", "color": ""},
-        {"name": "x", "description": "d", "color": "magenta"},
         {"name": "x", "description": "d", "color": 5},
         {"name": "x", "description": "d", "autoCompactWindow": 99999},  # below the range
         {"name": "x", "description": "d", "autoCompactWindow": 1000001},  # above the range
@@ -708,13 +704,7 @@ def test_validate_frontmatter_accepts_well_formed_env() -> None:
         {"name": "x", "description": "d", "autoCompactWindow": 200000.5},
         {"name": "x", "description": "d", "autoCompactWindow": True},
         {"name": "x", "description": "d", "experimental": "1h"},  # not a map
-        {"name": "x", "description": "d", "experimental": {"cacheTtl": "2h"}},
         {"name": "x", "description": "d", "experimental": {"cacheTtl": 5}},
-        # Claude Code matches the key with `-`/`_` dropped and case folded, then ignores a
-        # bad value, so these spellings get the same closed-list check.
-        {"name": "x", "description": "d", "experimental": {"cachettl": "2h"}},
-        {"name": "x", "description": "d", "experimental": {"CACHE_TTL": "bogus"}},
-        {"name": "x", "description": "d", "experimental": {"cache-ttl": "1d"}},
         {"name": "x" * (sub.MAX_NAME_CHARS + 1), "description": "d"},  # filename too long
         {"name": "x", "description": "d", "env": 42},  # not a mapping
         {"name": "x", "description": "d", "env": {"": "v"}},  # empty var name
@@ -724,6 +714,35 @@ def test_validate_frontmatter_accepts_well_formed_env() -> None:
 def test_validate_frontmatter_rejects_bad_shape(candidate: object) -> None:
     with pytest.raises(cw.InvalidCandidateError):
         sub.validate_frontmatter(candidate)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "warned"),
+    [
+        ("permissionMode", "not-a-real-mode", "'permissionMode' 'not-a-real-mode'"),
+        ("permissionMode", "Manual", "'permissionMode' 'Manual'"),  # the CLI matches case
+        ("hooks", {"NotAnEvent": []}, "hooks event 'NotAnEvent'"),
+        ("memory", "some memory", "'memory' 'some memory'"),
+        ("effort", "extreme", "'effort' 'extreme'"),
+        ("effort", " high", "'effort' ' high'"),  # the CLI does not trim it
+        ("isolation", "Worktree", "'isolation' 'Worktree'"),
+        ("isolation", "container", "'isolation' 'container'"),
+        ("color", "magenta", "'color' 'magenta'"),
+        ("experimental", {"cacheTtl": "2h"}, "'cacheTtl' '2h'"),
+        # Claude Code finds the key with `-`/`_` dropped and case folded, so these too.
+        ("experimental", {"cachettl": "2h"}, "'cachettl' '2h'"),
+        ("experimental", {"CACHE_TTL": "bogus"}, "'CACHE_TTL' 'bogus'"),
+        ("experimental", {"cache-ttl": "1d"}, "'cache-ttl' '1d'"),
+    ],
+)
+def test_validate_frontmatter_warns_about_a_value_outside_a_known_list(
+    field: str, value: object, warned: str
+) -> None:
+    """TASK-524: the known values are suggestions; another string saves with a warning."""
+    with cw.collect_value_warnings() as warnings:
+        sub.validate_frontmatter({"name": "x", "description": "d", field: value})
+    assert len(warnings) == 1, warnings
+    assert warned in warnings[0] and "is not one of the known values" in warnings[0]
 
 
 def test_validate_frontmatter_rejects_bypass_permissions() -> None:
@@ -1386,24 +1405,23 @@ def test_inline_servers_accept_what_the_agent_loader_reads(item: object) -> None
         # The MCP tab's field refusals, now reached for inline servers too.
         ([{"srv": {"transport": "sse", "url": "https://e.com"}}], "'transport' is not"),
         ([{"srv": {"type": "http", "url": "https://e.com", "env": {"A": "b"}}}], "has 'env'"),
-        ([{"srv": {"command": "x", "cwd": "/tmp"}}], r"unknown keys: \['cwd'\]"),
         ([{"srv": {"url": "https://e.com"}}], "has a 'url' but no 'type'"),
         ([{"srv": {"type": "sdk", "name": "x"}}], "registered at runtime"),
-        ([{"srv": {"type": "bogus", "command": "x"}}], "unknown server transport"),
+        ([{"srv": {"type": "bogus", "command": 5}}], "'command' must be a string"),
         ([{"srv": {"type": "http"}}], "requires a non-empty string 'url'"),
         ([{"srv": {"args": ["a"]}}], "requires a non-empty string 'command'"),
         ([{"srv": {"command": "x", "timeout": 0}}], "'timeout' must be a positive integer"),
-        ([{"srv": {"type": "ws", "url": "wss://e", "oauth": {}}}], "unknown keys"),
         ([{"srv": "not-an-object"}], "must be an object"),
         # What the agent-file loader skips.
         ([{"a": {"command": "x"}, "b": {"command": "y"}}], "defines 2 servers"),
         ([{"gh": {"command": "x"}}, {"gh": {"command": "y"}}], "defines inline server 'gh' twice"),
-        # YAML can give a definition a number or null key; the 422 still names the keys.
-        ([{"srv": {"command": "x", 1: "y", None: "z"}}], r"unknown keys: \[1, None\]"),
-        ([{"srv": {"type": "http", "url": "u", "oauth": {1: "a", "b": "c"}}}], "unknown keys"),
+        # YAML can give a definition a number or null key; the 422 names the key. Since
+        # TASK-524 a TEXT key outside the known list warns instead.
+        ([{"srv": {"command": "x", 1: "y", None: "z"}}], "key 1 must be text"),
+        ([{"srv": {"type": "http", "url": "u", "oauth": {1: "a", "b": "c"}}}], "key 1 must be"),
         (
             [{"srv": {"type": "http", "url": "u", "tools": [{"name": "n", 1: "a", "b": "c"}]}}],
-            "unknown",
+            "key 1 must be text",
         ),
     ],
 )
@@ -1414,6 +1432,23 @@ def test_inline_servers_refuse_what_the_cli_rejects_or_ignores(
         sub.validate_frontmatter(_servers(*items))
     # The message says which subagent field and which server it is about.
     assert str(exc.value).startswith("frontmatter 'mcpServers'")
+
+
+@pytest.mark.parametrize(
+    ("definition", "warned"),
+    [
+        ({"command": "x", "cwd": "/srv"}, "stdio server 'srv' key 'cwd'"),
+        ({"type": "bogus", "command": "x"}, "server 'srv' 'type' 'bogus'"),
+        ({"type": "ws", "url": "wss://e", "oauth": {}}, "ws server 'srv' key 'oauth'"),
+    ],
+)
+def test_inline_servers_warn_about_a_key_or_type_outside_the_known_lists(
+    definition: dict, warned: str
+) -> None:
+    """TASK-524: an inline server takes the MCP tab's suggestions-plus-warning rule."""
+    with cw.collect_value_warnings() as warnings:
+        sub.validate_frontmatter(_servers({"srv": definition}))
+    assert len(warnings) == 1 and warned in warnings[0], warnings
 
 
 @pytest.mark.parametrize("name", sorted(sub._FRONTMATTER_SKIPPED_SERVER_NAMES))
@@ -1764,7 +1799,7 @@ def test_unconverted_inline_field_says_how_to_fix_it_by_hand(
     assert str(raised.value).endswith(fix)
     # A field the converter never touches gets no such hint.
     with pytest.raises(cw.InvalidCandidateError) as exc:
-        sub.validate_frontmatter(_servers({"srv": {"command": "x", "cwd": "/"}}))
+        sub.validate_frontmatter(_servers({"srv": {"command": "x", "timeout": 0}}))
     assert "by hand" not in str(exc.value)
 
 

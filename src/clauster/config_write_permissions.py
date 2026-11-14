@@ -82,6 +82,7 @@ a rule string is harmless inert data.
 
 from __future__ import annotations
 
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -120,7 +121,25 @@ _PERMISSION_KEYS = _STRING_LIST_KEYS | _BOOL_KEYS | _DISABLE_KEYS | {"defaultMod
 #: The mode this surface refuses to set — it stays behind the footgun gate (#347/#685).
 BYPASS_MODE = "bypassPermissions"
 
-#: The recognized permission-mode values: the canonical permission-label vocabulary
+
+def is_bypass_mode(mode: str) -> bool:
+    """Whether ``mode`` spells :data:`BYPASS_MODE` once normalized (NFKC, case, punctuation).
+
+    Only letters and digits count, after NFKC folds fullwidth and compatibility forms, so
+    ``-``, ``_``, spaces, a byte order mark and zero-width characters are all ignored.
+
+    Claude Code 2.1.319 matches a mode exactly, so a variant such as ``BypassPermissions``
+    is ignored today. Since TASK-524 a mode outside the known list saves with a warning, so
+    the gate refuses every such variant too: a later Claude Code that matched modes loosely
+    must never turn a warned value into bypass mode.
+    """
+    kept = "".join(c for c in unicodedata.normalize("NFKC", mode) if c.isalnum())
+    return kept.casefold() == BYPASS_MODE.casefold()
+
+
+#: The recognized permission-mode values (suggestions, TASK-524: a ``defaultMode`` or a
+#: subagent ``permissionMode`` outside them saves with a warning, except
+#: :data:`BYPASS_MODE`, which stays refused): the canonical permission-label vocabulary
 #: minus :data:`BYPASS_MODE`, which is footgun-gated and never settable here. Derived
 #: from :data:`~clauster.config.PERMISSION_LABELS` so the two never drift (#685).
 #: ``inherit`` (#1231) is subtracted too: it is a Clauster *launch-time* sentinel meaning
@@ -168,16 +187,18 @@ def validate_permissions(candidate: Any) -> None:
     """Structural validator for the whole ``permissions`` object (the Foundation hook).
 
     ``candidate`` is the desired ``permissions`` object: a ``dict`` whose only
-    recognized keys are the documented ones (see the module docstring). The string
-    lists hold non-empty strings, the Booleans are ``bool``, the ``"disable"`` switches
-    hold exactly ``"disable"``, and ``defaultMode`` is one of
-    :data:`SETTINGS_DEFAULT_MODES`. Unknown keys, wrong types, or an unrecognized mode
-    reject the whole write (→ 422 via :func:`config_write.validate_candidate`), so a
-    partial/garbled block never lands.
+    known keys are the documented ones (see the module docstring). The string lists hold
+    non-empty strings, the Booleans are ``bool``, and the ``"disable"`` switches and
+    ``defaultMode`` are strings. A wrong type rejects the whole write (→ 422 via
+    :func:`config_write.validate_candidate`), so a partial/garbled block never lands. A key
+    outside the known keys, a switch other than ``"disable"`` and a ``defaultMode`` outside
+    :data:`SETTINGS_DEFAULT_MODES` save as typed with a warning (TASK-524): the lists are
+    copied by hand and lag behind each new Claude Code release.
 
     :data:`BYPASS_MODE` is **not** a recognized mode: a request to set it as
-    ``defaultMode`` is rejected here, keeping ``bypassPermissions`` behind the existing
-    footgun gate. **Never parses or executes any rule string.**
+    ``defaultMode``, in any spelling :func:`is_bypass_mode` matches, is rejected here,
+    keeping ``bypassPermissions`` behind the existing footgun gate. **Never parses or
+    executes any rule string.**
     """
     if not isinstance(candidate, dict):
         raise cw.InvalidCandidateError("permissions must be an object")
@@ -187,9 +208,14 @@ def validate_permissions(candidate: Any) -> None:
             "autoMode is a top-level settings key, not part of permissions; "
             "put it in the auto mode rules section at User scope instead"
         )
-    unknown = set(candidate) - _PERMISSION_KEYS
-    if unknown:
-        raise cw.InvalidCandidateError(f"permissions has unknown keys: {sorted(unknown)}")
+    cw.warn_unknown_keys(candidate, _PERMISSION_KEYS, "permissions key")
+    for key in sorted(set(candidate) - _PERMISSION_KEYS, key=str):
+        # A misspelled key such as `defaultmode` saves with a warning; it must never carry
+        # bypass mode past the gate, should a later Claude Code read it.
+        if any(is_bypass_mode(s) for s in _string_leaves(candidate[key])):
+            raise cw.InvalidCandidateError(
+                f"permissions {key!r} cannot be 'bypassPermissions' (footgun-gated)"
+            )
 
     for key in sorted(_STRING_LIST_KEYS & set(candidate)):
         _validate_string_list(candidate[key], f"permissions {key!r}")
@@ -197,41 +223,91 @@ def validate_permissions(candidate: Any) -> None:
         if not isinstance(candidate[key], bool):
             raise cw.InvalidCandidateError(f"permissions {key!r} must be true or false")
     for key in sorted(_DISABLE_KEYS & set(candidate)):
-        if candidate[key] != DISABLE_VALUE:
+        if not isinstance(candidate[key], str):
             raise cw.InvalidCandidateError(
-                f"permissions {key!r} must be the string {DISABLE_VALUE!r}"
+                f"permissions {key!r} must be a string ({DISABLE_VALUE!r})"
             )
+        if candidate[key] != DISABLE_VALUE:
+            cw.warn_unknown_value(f"permissions {key!r}", candidate[key], (DISABLE_VALUE,))
 
     if "defaultMode" in candidate:
         mode = candidate["defaultMode"]
         if not isinstance(mode, str):
             raise cw.InvalidCandidateError("permissions 'defaultMode' must be a string")
-        if mode == BYPASS_MODE:
+        if is_bypass_mode(mode):
             # Fail closed: bypassPermissions stays behind the footgun gate, never here.
             raise cw.InvalidCandidateError(
                 "permissions 'defaultMode' cannot be 'bypassPermissions' (footgun-gated)"
             )
-        if mode not in SETTINGS_DEFAULT_MODES:
+        if mode == INHERIT_PERMISSION_MODE:
+            # Clauster's own launch sentinel (#1231), never a Claude Code mode: refused, not
+            # a stale-list miss.
             raise cw.InvalidCandidateError(
-                f"unknown permission defaultMode {mode!r} "
-                f"(want one of {sorted(SETTINGS_DEFAULT_MODES)})"
+                "permissions 'defaultMode' cannot be 'inherit': that is Clauster's launch "
+                "setting for 'pass no --permission-mode', not a Claude Code mode"
             )
+        if mode not in SETTINGS_DEFAULT_MODES:
+            cw.warn_unknown_value("permissions 'defaultMode'", mode, SETTINGS_DEFAULT_MODES)
+
+
+def _string_leaves(value: Any) -> list[str]:
+    """Return every string in ``value``, nested dicts and lists included (iterative)."""
+    found: list[str] = []
+    stack = [value]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, str):
+            found.append(node)
+        elif isinstance(node, dict):
+            stack.extend(node.values())
+        elif isinstance(node, list):
+            stack.extend(node)
+    return found
+
+
+def _mask_outside_list_entries(value: Any) -> bool:
+    """Whether a mask sits in ``value`` anywhere but as a direct entry of a list ``value``.
+
+    Iterative; the caller has already checked that ``value`` is walkable.
+    """
+    if isinstance(value, list):
+        # A direct string entry is restored by _merge_auto_mode; only containers can hide one.
+        stack = [v for v in value if isinstance(v, dict | list)]
+    else:
+        stack = [value]
+    while stack:
+        node = stack.pop()
+        if node == cw.REDACTION_SENTINEL:
+            return True
+        if isinstance(node, dict):
+            stack.extend(node.values())
+        elif isinstance(node, list):
+            stack.extend(node)
+    return False
 
 
 def validate_auto_mode(candidate: Any) -> None:
     """Structural validator for a top-level ``autoMode`` object.
 
-    ``candidate`` must be a ``dict`` with only the documented keys: the prose rule lists
+    ``candidate`` must be a ``dict``. Its documented keys are the prose rule lists
     ``environment``/``allow``/``soft_deny``/``hard_deny`` (non-empty strings, the
-    ``"$defaults"`` entry included) and the ``classifyAllShell`` Boolean. Anything else
-    rejects the whole write. Rules are prose for the classifier and are **never parsed or
-    executed** here.
+    ``"$defaults"`` entry included) and the ``classifyAllShell`` Boolean, and a wrong type in
+    one rejects the whole write. Any other key saves as typed with a warning (TASK-524), but
+    a mask in it that :func:`_merge_auto_mode` cannot restore is refused. Rules are prose
+    for the classifier and are **never parsed or executed** here.
     """
     if not isinstance(candidate, dict):
         raise cw.InvalidCandidateError("autoMode must be an object")
-    unknown = set(candidate) - _AUTO_MODE_KEYS
-    if unknown:
-        raise cw.InvalidCandidateError(f"autoMode has unknown keys: {sorted(unknown)}")
+    cw.warn_unknown_keys(candidate, _AUTO_MODE_KEYS, "autoMode key")
+    for key in sorted(set(candidate) - _AUTO_MODE_KEYS, key=str):
+        # The read view masks prose leaves anywhere in the block, but a resent mask is only
+        # restored as a direct entry of a list (_merge_auto_mode). Anywhere else it would be
+        # written as the literal mask over the stored value.
+        if _mask_outside_list_entries(candidate[key]):
+            raise cw.InvalidCandidateError(
+                f"autoMode {key!r} keeps a masked value ({cw.REDACTION_SENTINEL}) where "
+                "Clauster cannot restore it; type the real value"
+            )
     for key in sorted(_AUTO_MODE_LIST_KEYS & set(candidate)):
         _validate_string_list(candidate[key], f"autoMode {key!r}")
     for key in sorted(_AUTO_MODE_BOOL_KEYS & set(candidate)):
@@ -304,15 +380,22 @@ def _merge_auto_mode(incoming: dict[str, Any], stored: Any) -> dict[str, Any]:
     sent. Must run under the file lock, on the stored value read there.
     """
     stored_obj = stored if isinstance(stored, dict) else {}
+    # The masked entries are the ones the READ VIEW masked: a key outside the known lists
+    # with a secret-shaped name masks every entry of its list (TASK-524), not only the
+    # entries _is_masked_entry flags.
+    view = _redact_auto_mode(stored_obj)
     out: dict[str, Any] = {}
     for key, member in incoming.items():
         if not isinstance(member, list) or cw.REDACTION_SENTINEL not in member:
             out[key] = member
             continue
         stored_list = stored_obj.get(key)
+        shown = view.get(key) if isinstance(view, dict) else None
         masked = (
-            [e for e in stored_list if _is_masked_entry(e)]
+            [e for e, v in zip(stored_list, shown, strict=True) if v == cw.REDACTION_SENTINEL]
             if isinstance(stored_list, list)
+            and isinstance(shown, list)
+            and len(shown) == len(stored_list)
             else []
         )
         if member.count(cw.REDACTION_SENTINEL) != len(masked):

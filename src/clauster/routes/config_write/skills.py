@@ -110,6 +110,7 @@ async def api_config_write_skills_file_read(
 
 
 @router.put("/api/config-write/skills")
+@_base.reports_value_warnings
 async def api_config_write_skills_write(
     config: ConfigDep, runner: RunnerOrNoneDep, body: dict
 ) -> dict:
@@ -280,6 +281,7 @@ async def api_config_write_skills_overrides_read(
 
 
 @router.put("/api/config-write/skills/overrides")
+@_base.reports_value_warnings
 async def api_config_write_skills_overrides_write(
     config: ConfigDep, runner: RunnerOrNoneDep, body: dict
 ) -> dict:

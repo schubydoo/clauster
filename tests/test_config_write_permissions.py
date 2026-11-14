@@ -79,9 +79,9 @@ def test_validate_accepts_every_recognized_mode(mode: str) -> None:
         {"ask": [1]},  # ask rule not a string
         {"ask": [""]},  # empty ask rule string
         {"defaultMode": 5},  # mode not a string
-        {"defaultMode": "nonsense"},  # unknown mode
-        {"bogus": 1},  # unknown key
-        {"allow": ["ok"], "extra": 2},  # one unknown key among valid ones
+        # An unknown mode or key saves with a warning (TASK-524); its value must be walkable.
+        {"bogus": 1e400},
+        {"allow": ["ok"], "extra": float("nan")},  # one unknown key among valid ones
     ],
 )
 def test_validate_rejects_bad_shape(candidate: object) -> None:
@@ -232,7 +232,7 @@ def test_project_read_rejects_malformed_json(tmp_path: Path) -> None:
 def test_project_write_bad_shape_writes_nothing(tmp_path: Path) -> None:
     with pytest.raises(cw.InvalidCandidateError):
         perms.write_project_permissions(
-            tmp_path, {"defaultMode": "nope"}, expected_hash=None, auto_mode=None
+            tmp_path, {"defaultMode": 5}, expected_hash=None, auto_mode=None
         )
     # Validation precedes the mkdir, so even the .claude dir is not created.
     assert not (tmp_path / ".claude").exists()
@@ -315,7 +315,7 @@ def test_local_write_gitignore_idempotent_across_writes(tmp_path: Path) -> None:
 def test_local_write_bad_shape_writes_nothing_and_no_gitignore(tmp_path: Path) -> None:
     with pytest.raises(cw.InvalidCandidateError):
         perms.write_project_local_permissions(
-            tmp_path, {"defaultMode": "nope"}, expected_hash=None, auto_mode=None
+            tmp_path, {"defaultMode": 5}, expected_hash=None, auto_mode=None
         )
     assert not (tmp_path / ".claude").exists()
     assert not (tmp_path / ".gitignore").exists()  # validation failure never touches gitignore
@@ -434,16 +434,15 @@ def test_route_bad_shape_is_422_and_writes_nothing(write_config, tmp_path, proje
                 "scope": "project",
                 "project": "alpha",
                 "confirm": "alpha",
-                "permissions": {"bogus": 1},  # unknown key
+                "permissions": {"allow": "Bash(ls)"},  # a list key holding a string
             },
         )
         assert resp.status_code == 422
     assert not (projects_root / "alpha" / ".claude" / "settings.json").exists()
 
 
-def test_route_unknown_mode_is_422_and_writes_nothing(
-    write_config, tmp_path, projects_root
-) -> None:
+def test_route_unknown_mode_saves_with_a_warning(write_config, tmp_path, projects_root) -> None:
+    """TASK-524: a defaultMode outside the known list saves as typed, and the response warns."""
     with _client(write_config, tmp_path, _ON) as c:
         resp = c.put(
             _URL,
@@ -454,8 +453,11 @@ def test_route_unknown_mode_is_422_and_writes_nothing(
                 "permissions": {"defaultMode": "nonsense"},
             },
         )
-        assert resp.status_code == 422
-    assert not (projects_root / "alpha" / ".claude" / "settings.json").exists()
+        assert resp.status_code == 200, resp.text
+        [warning] = resp.json()["warnings"]
+    assert "permissions 'defaultMode' 'nonsense' is not one of the known values" in warning
+    stored = json.loads((projects_root / "alpha" / ".claude" / "settings.json").read_text())
+    assert stored["permissions"] == {"defaultMode": "nonsense"}
 
 
 def test_route_bypass_default_mode_is_422(write_config, tmp_path, projects_root) -> None:
@@ -982,9 +984,7 @@ def test_settings_default_modes_keep_the_bypass_and_inherit_gates() -> None:
         {"blockReadsOutsideWorkingDirectories": 1},
         {"blockWritesOutsideWorkingDirectories": None},
         {"disableBypassPermissionsMode": True},  # the documented value is "disable"
-        {"disableBypassPermissionsMode": "enable"},
-        {"disableAutoMode": "yes"},
-        {"disableAutoMode": False},
+        {"disableAutoMode": False},  # another string warns (TASK-524)
     ],
 )
 def test_validate_rejects_bad_new_key_shape(candidate: dict) -> None:
@@ -1089,7 +1089,10 @@ def test_validate_auto_mode_accepts_documented_shapes(candidate: dict) -> None:
     [
         ["$defaults"],  # not an object
         "$defaults",
-        {"deny": ["x"]},  # unknown key (the docs name soft_deny / hard_deny)
+        # An unknown key warns (TASK-524), but a mask the merge cannot restore is refused.
+        {"deny": {"x": "********"}},
+        {"deny": [["********"]]},
+        {"deny": "********"},
         {"allow": "$defaults"},  # must be a list
         {"allow": [""]},
         {"soft_deny": [1]},
@@ -1261,8 +1264,8 @@ def test_user_scope_accepts_default_mode_auto(tmp_path: Path) -> None:
 
 def test_user_scope_auto_mode_bad_shape_writes_nothing(tmp_path: Path) -> None:
     settings = tmp_path / ".claude" / "settings.json"
-    with pytest.raises(cw.InvalidCandidateError, match="unknown keys"):
-        perms.write_user_permissions(settings, {}, None, auto_mode={"deny": ["x"]})
+    with pytest.raises(cw.InvalidCandidateError, match="classifyAllShell"):
+        perms.write_user_permissions(settings, {}, None, auto_mode={"classifyAllShell": "x"})
     assert not settings.exists()
 
 

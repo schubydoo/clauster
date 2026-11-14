@@ -175,9 +175,12 @@ SCRIPT_CONFIRM_TOKEN = "I HAVE REVIEWED THESE SCRIPTS"  # noqa: S105 - public co
 #: The settings key holding the skill-visibility override map.
 SKILL_OVERRIDES_KEY = "skillOverrides"
 
-#: The only values Claude Code accepts for a ``skillOverrides`` entry (verified
-#: against https://code.claude.com/docs/en/skills and .../settings, v2.1.129+, and against
-#: the 2.1.318 settings schema, a record of skill name to exactly these four strings).
+#: The values Claude Code accepts for a ``skillOverrides`` entry (verified against
+#: https://code.claude.com/docs/en/skills and .../settings, v2.1.129+, and against the
+#: 2.1.318 settings schema, a record of skill name to exactly these four strings).
+#: SUGGESTIONS ONLY (TASK-524): another string saves with a warning, because a later
+#: Claude Code can add a value. Claude Code can reject a whole settings file over a value
+#: it does not know, and the warning at save time is the only guard against that.
 SKILL_OVERRIDE_VALUES = frozenset({"on", "name-only", "user-invocable-only", "off"})
 
 #: The longest skill name the CLI keeps, in UTF-16 code units (its ``ZO``). A longer
@@ -262,7 +265,8 @@ _CLI_FALSE_WORDS = frozenset({"0", "false", "no", "off"})
 _EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 _EFFORT_ALIASES = {"med": "medium"}
 
-#: The shells ``shell`` accepts (the CLI's ``Va``), compared trimmed and lowercased.
+#: The shells ``shell`` accepts (the CLI's ``Va``), compared trimmed and lowercased. Like the
+#: effort levels, suggestions (TASK-524): another string saves with a warning.
 _SHELLS = ("bash", "powershell")
 
 #: The hook events the CLI knows (its ``bc``, 2.1.318): the hooks surface's own set, so
@@ -646,10 +650,25 @@ def _read_arguments(value: Any) -> list[str]:
 
 
 def _read_effort(value: Any) -> str | int | None:
-    """Read ``effort``: a level, the alias ``med``, or an integer (the CLI's ``dq``)."""
+    """Read ``effort``: a level, the alias ``med``, or an integer (the CLI's ``dq``).
+
+    The levels are suggestions (TASK-524): another non-empty string that does not start
+    with an integer saves with a warning and reads as itself, lowercased. Any other value
+    the CLI reads nothing from is refused.
+    """
     if value is None:
         return None
     reading = _cli_effort(value)
+    # A string that starts with an integer is a number the CLI could not hold (Infinity):
+    # refused below, as before. Only a word outside the levels is a suggestion miss.
+    if (
+        reading is None
+        and isinstance(value, str)
+        and _js_trim(value)
+        and not _JS_PARSE_INT_RE.match(value.lower())
+    ):
+        cw.warn_unknown_value(_label("effort"), value, _EFFORT_LEVELS)
+        return value.lower()
     if reading is None:
         raise _IgnoredFieldError(
             "effort",
@@ -674,9 +693,15 @@ def _read_model(value: Any) -> str | None:
 
 
 def _read_context(value: Any) -> str | None:
-    """Read ``context``: only ``fork``, spelled exactly."""
+    """Read ``context``: ``fork``, spelled exactly, is the one known value.
+
+    Another non-empty string saves with a warning (TASK-524) and reads as itself.
+    """
     if value is None:
         return None
+    if isinstance(value, str) and value != "fork" and _js_trim(value):
+        cw.warn_unknown_value(_label("context"), value, ("fork",))
+        return value
     if value != "fork":
         raise _IgnoredFieldError(
             "context",
@@ -686,13 +711,21 @@ def _read_context(value: Any) -> str | None:
 
 
 def _read_shell(value: Any) -> str | None:
-    """Read ``shell``: ``bash`` or ``powershell``, in any case (the CLI's ``tdo``)."""
+    """Read ``shell``: ``bash`` or ``powershell``, in any case (the CLI's ``tdo``).
+
+    The two shells are suggestions (TASK-524): another non-empty string saves with a
+    warning and reads as itself, trimmed and lowercased. A value that is not a string and
+    names neither shell is refused.
+    """
     if value is None:
         return None
     try:
         word = _js_trim(_js_string(value)).lower()
     except TypeError:
         word = ""
+    if word not in _SHELLS and isinstance(value, str) and word:
+        cw.warn_unknown_value(_label("shell"), value, _SHELLS)
+        return word
     if word not in _SHELLS:
         raise _IgnoredFieldError(
             "shell",
@@ -2621,7 +2654,8 @@ def _validate_member(relative: str, content: str, *, sent: str, stored: str | No
             validate_script_body(text, relative)
 
     try:
-        _run(content)
+        with cw.collect_value_warnings() as kept:
+            _run(content)
     except cw.InvalidCandidateError as restored_exc:
         if stored is not None:
             try:
@@ -2641,6 +2675,17 @@ def _validate_member(relative: str, content: str, *, sent: str, stored: str | No
             "stored text behind a mask is not valid here. Type the real values, or fix the "
             "stored file on the host"
         ) from restored_exc
+    if content != sent:
+        # TASK-524: the check above ran over stored text put back behind masks. Keep only
+        # the warnings the operator's own (neutralized) text gives too, so a warning never
+        # quotes a stored value the read view masked.
+        with cw.collect_value_warnings() as own:
+            try:
+                _run(_neutralized(sent))
+            except cw.InvalidCandidateError:
+                own.clear()
+        kept = [message for message in kept if message in own]
+    cw.record_value_warnings(kept)
 
 
 def write_skill(
@@ -2932,9 +2977,10 @@ def delete_user_skill(claude_json: Path, name: str) -> bool:
 def validate_skill_overrides(candidate: Any) -> None:
     """Structural validator for the whole ``skillOverrides`` object.
 
-    ``candidate`` must be a ``dict`` mapping a skill name to one of
-    :data:`SKILL_OVERRIDE_VALUES`. An invalid name or an unrecognized value rejects
-    the whole write (→ 422), so a partial/garbled override map never lands.
+    ``candidate`` must be a ``dict`` mapping a skill name to a string. An invalid name or
+    a value that is not a string rejects the whole write (→ 422), so a partial/garbled
+    override map never lands. A string outside :data:`SKILL_OVERRIDE_VALUES` saves as typed
+    with a warning (TASK-524): the list is copied by hand and lags behind Claude Code.
 
     The CLI's schema takes any string key and matches it, exactly, against skill names. A
     folder skill's name is its directory name, never its frontmatter ``name``, which is a
@@ -2949,14 +2995,13 @@ def validate_skill_overrides(candidate: Any) -> None:
     for name, value in candidate.items():
         if not isinstance(name, str) or name == "__proto__" or not cli_shows_name(name):
             raise cw.InvalidCandidateError(f"skillOverrides has an invalid skill name: {name!r}")
-        # isinstance first: a list or object value is unhashable, so `in` raises TypeError,
-        # which validate_candidate reports as a bare "unhashable type" 422. This check keeps
-        # the message that names the key and the allowed values.
-        if not isinstance(value, str) or value not in SKILL_OVERRIDE_VALUES:
+        if not isinstance(value, str):
             raise cw.InvalidCandidateError(
-                f"skillOverrides[{name!r}] must be one of {sorted(SKILL_OVERRIDE_VALUES)} "
-                f"(got {value!r})"
+                f"skillOverrides[{name!r}] must be a string, such as one of "
+                f"{sorted(SKILL_OVERRIDE_VALUES)} (got {value!r})"
             )
+        if value not in SKILL_OVERRIDE_VALUES:
+            cw.warn_unknown_value(f"skillOverrides[{name!r}]", value, SKILL_OVERRIDE_VALUES)
 
 
 def _read_overrides(path: Path) -> tuple[dict[str, str], str]:

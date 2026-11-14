@@ -626,10 +626,10 @@ def test_a_header_over_the_file_cap_is_masked_whole_without_parsing(
 def test_the_edit_read_converts_skill_md_under_its_normalized_name(
     tmp_path: Path, relative: str
 ) -> None:
-    _place(tmp_path, "---\ndescription: d\neffort: banana\n---\nRun it.\n")
+    _place(tmp_path, "---\ndescription: d\nbackground: maybe\n---\nRun it.\n")
     content, _hash, _exists, note = sk.read_skill_file_for_edit(tmp_path, "s", relative)
-    assert note is not None and "'effort'" in note
-    assert "effort" not in content
+    assert note is not None and "'background'" in note
+    assert "background" not in content
 
 
 def test_a_comment_only_header_is_shown_as_stored(tmp_path: Path) -> None:

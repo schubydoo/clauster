@@ -87,6 +87,7 @@ async def api_config_write_permissions_read(
 
 
 @router.put("/api/config-write/permissions")
+@_base.reports_value_warnings
 async def api_config_write_permissions_write(
     config: ConfigDep, runner: RunnerOrNoneDep, body: dict
 ) -> dict:
