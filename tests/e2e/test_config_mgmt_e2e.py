@@ -1489,6 +1489,56 @@ def test_config_mgmt_new_skill_round_trip(
     assert "an e2e skill" in saved.read_text(encoding="utf-8")
 
 
+# Lets the skill PUT's headers through but holds its body until `__releaseBody()` runs: the
+# window between `res.ok` and `res.json()` in which the operator can start a new skill.
+_HOLD_SKILL_PUT_BODY = """(() => {
+  window.__holdBody = new Promise(r => { window.__releaseBody = r; });
+  const real = window.fetch;
+  window.fetch = function (url, opts) {
+    const p = real.apply(this, arguments);
+    const u = String(url);
+    const isPut = opts && opts.method === "PUT" && u.includes("/api/config-write/skills")
+      && !u.includes("/overrides");
+    if (!isPut) return p;
+    return p.then(res => {
+      const json = res.json.bind(res);
+      res.json = () => window.__holdBody.then(json);
+      return res;
+    });
+  };
+  return true;
+})()"""
+
+
+def test_config_mgmt_new_skill_opened_during_a_save_stays_open(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """A New skill editor opened while a save's body is read is not closed by its reload."""
+    alpha = _projects_root(config_mgmt_server) / "alpha"
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-skills"]')
+    browser.expect_visible('[data-test="cm-skill-new"]')
+    browser.click('[data-test="cm-skill-new"]')
+    browser.fill('[data-test="cm-skill-name"]', "first-skill")
+    browser.fill('[data-test="cm-skill-content"]', "---\nname: first-skill\n---\nBody.\n")
+    browser.fill('[data-test="cm-skill-confirm"]', "alpha")
+    assert browser.eval_json(_HOLD_SKILL_PUT_BODY) is True
+    browser.click('[data-test="cm-skill-save"]')
+    saved = alpha / ".claude" / "skills" / "first-skill" / "SKILL.md"
+    deadline = time.monotonic() + 10
+    while not saved.exists():
+        assert time.monotonic() < deadline, "the held save never reached the server"
+        time.sleep(0.1)
+    browser.expect_visible('[data-test="cm-skill-new"]')
+    browser.click('[data-test="cm-skill-new"]')  # a second, new editor during the wait
+    browser.fill('[data-test="cm-skill-name"]', "second-skill")
+    browser.eval_json("(() => { window.__releaseBody(); return true; })()")
+    time.sleep(1.0)  # let a reload, if one ran, finish
+    browser.expect_visible('[data-test="cm-skill-editor"]')
+    browser.expect_value('[data-test="cm-skill-name"]', "second-skill")
+
+
 def test_config_mgmt_skill_edit_and_delete_round_trip(
     browser: AgentBrowser, config_mgmt_server: Server
 ) -> None:
