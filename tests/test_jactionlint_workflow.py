@@ -10,6 +10,7 @@
 # scanning results.
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -140,8 +141,41 @@ def test_both_runs_are_strict_online_and_require_shellcheck():
         assert "--shellcheck shellcheck" in run
 
 
+INSTALL = "Install jactionlint (version, sha256 and attestation pinned)"
+
+
+def test_install_pins_version_sha256_and_attestation():
+    # The release archive is checked twice before it runs: its sha256 against the pin, and its
+    # build attestation against jdx/jactionlint's release workflow. A PyPI or an unverified
+    # install would run unpinned code under the App token.
+    install = _step(INSTALL)
+    env = install["env"]
+    assert re.fullmatch(r"\d+\.\d+\.\d+", env["JACTIONLINT_VERSION"])
+    assert re.fullmatch(r"[0-9a-f]{64}", env["JACTIONLINT_SHA256"])
+    assert env["GH_TOKEN"] == "${{ github.token }}", "the download needs no App token"
+    run = install["run"]
+    assert run.startswith("set -euo pipefail\n")
+    assert 'gh release download "v${JACTIONLINT_VERSION}" --repo jdx/jactionlint' in run
+    assert "sha256sum -c -" in run
+    assert 'gh attestation verify "$archive" --repo jdx/jactionlint' in run
+    # Each check must run before the archive is unpacked.
+    assert run.index("sha256sum -c -") < run.index("tar -xzf")
+    assert run.index("gh attestation verify") < run.index("tar -xzf")
+    uses = [s.get("uses", "") for s in _job()["steps"]]
+    assert not any(u.startswith("astral-sh/setup-uv@") for u in uses), "no PyPI install in CI"
+
+
+def test_renovate_annotation_sits_directly_above_the_version_and_sha_lines():
+    # The renovate-config preset reads the annotation, the VERSION line and the SHA256 line as
+    # one group, in this order, with nothing between them.
+    lines = [line.strip() for line in WORKFLOW.read_text(encoding="utf-8").splitlines()]
+    i = lines.index("# renovate: datasource=github-releases depName=jdx/jactionlint")
+    assert lines[i + 1].startswith('JACTIONLINT_VERSION: "')
+    assert lines[i + 2].startswith('JACTIONLINT_SHA256: "')
+
+
 def test_pre_commit_pin_matches_the_workflow_pin():
-    version = _step("Install jactionlint")["env"]["JACTIONLINT_VERSION"]
+    version = _step(INSTALL)["env"]["JACTIONLINT_VERSION"]
     hooks = yaml.safe_load((REPO / ".pre-commit-config.yaml").read_text(encoding="utf-8"))
     entries = [
         hook["entry"]

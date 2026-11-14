@@ -88,17 +88,36 @@ jobs:
           client-id: ${{ secrets.CLAUSTER_CI_APP_CLIENT_ID }}
           private-key: ${{ secrets.CLAUSTER_CI_APP_PRIVATE_KEY }}
           permission-security-events: write
-      - name: Set up uv
-        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
-        with:
-          version: "0.13.8" # pinned uv (Renovate-tracked); skip the flaky "latest" fetch
-      - name: Install jactionlint
+      # Install the release binary, pinned three ways: the version, the sha256 of the archive,
+      # and GitHub's build attestation, which proves that jdx/jactionlint's own release
+      # workflow built the archive. So a moved release asset or a binary built elsewhere
+      # fails here, before anything runs under the App token. The archive is unpacked in
+      # RUNNER_TEMP, outside the checkout that jactionlint lints.
+      - name: Install jactionlint (version, sha256 and attestation pinned)
         env:
-          # renovate: datasource=pypi depName=jactionlint
+          # Keep the annotation directly above the VERSION line and the SHA256 line right
+          # after it: the Renovate preset reads them as a group. Renovate cannot compute the
+          # SHA256 itself. Its postUpgradeTask runs scripts/check_binary_dep_pins.py --fix,
+          # which writes the digest that GitHub publishes for the release asset. Keep the
+          # `jactionlint==` pin in .pre-commit-config.yaml equal to this version.
+          # renovate: datasource=github-releases depName=jdx/jactionlint
           JACTIONLINT_VERSION: "2.6.0"
-        # Pinned so a bad PyPI release cannot change what runs under the App token. Keep the
-        # pin in .pre-commit-config.yaml in step with this one.
-        run: uv tool install "jactionlint==$JACTIONLINT_VERSION"
+          JACTIONLINT_SHA256: "d5400967b8f0d3a5ae9a4cee21f56400a50eb3f05d0cbb4ef17184f17f0760c8"
+          # The job token is enough for the release download and the attestation lookup:
+          # both read a public repository. Not the App token: this step needs no rate bucket.
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          archive="jactionlint_${JACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          dir="$RUNNER_TEMP/jactionlint"
+          mkdir -p "$dir"
+          cd "$dir"
+          gh release download "v${JACTIONLINT_VERSION}" --repo jdx/jactionlint --pattern "$archive"
+          echo "${JACTIONLINT_SHA256}  ${archive}" | sha256sum -c -
+          gh attestation verify "$archive" --repo jdx/jactionlint
+          tar -xzf "$archive" jactionlint
+          ./jactionlint --version
+          echo "$dir" >> "$GITHUB_PATH"
       # jactionlint writes one output format per run, so it runs twice: SARIF for code
       # scanning here, then the `github` format (annotations on the PR diff) as the gate. The
       # second run answers its online lookups from the cache of the first one (default TTL
