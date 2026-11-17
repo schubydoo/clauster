@@ -526,7 +526,7 @@ _SHAWL_VERSION = "v1.9.0"
 # are the release's checksums.txt asset digests (refreshed by scripts/check_binary_dep_pins.py and
 # fail-closed at install, exactly like Shawl above). Same `# renovate:` customManager pattern.
 # renovate: datasource=github-releases depName=schubydoo/claustrum
-_CLAUSTRUM_VERSION = "v1.20.0"
+_CLAUSTRUM_VERSION = "v1.21.0"
 _CLAUSTRUM_VER_BARE = _CLAUSTRUM_VERSION.removeprefix("v")  # tag "v1.7.1" -> asset infix "1.7.1"
 
 # (platform_marker, GoReleaser OS token, arch_marker, archive ext, sha256 of the archive)
@@ -536,42 +536,42 @@ _CLAUSTRUM_VARIANTS: tuple[tuple[str, str, str, str, str], ...] = (
         "Linux",
         "x86_64",
         "tar.gz",
-        "c081e1d20896bd2927594a06772fa877b91483e48a0ec5e69d9b8bfda4ab0f39",
+        "9ad30db7c5bc5a21106082cff83fcf64ff4326748591dfad05b63e4864793880",
     ),
     (
         "linux",
         "Linux",
         "arm64",
         "tar.gz",
-        "8820a2db78730392f1b6bc874bcc4b560e2e511db706365a2d4f76e5db99cdd1",
+        "a55693630249ab78522e39f4dc972aec11bad01e2c0025104f4e722386542a56",
     ),
     (
         "darwin",
         "Darwin",
         "x86_64",
         "tar.gz",
-        "e0598d9b155f57b53ff041296e190137cec4ac67ca25d4c1ee6a47cff788fa8e",
+        "b74f437b217014ee766bab2ee14868b7c63978f29cfd7adcbcbb6d5b22d5f410",
     ),
     (
         "darwin",
         "Darwin",
         "arm64",
         "tar.gz",
-        "8598c18d718f73fb9721fc973d6cd45f84a409c5e3d56d76043f472f5a35ea6e",
+        "e6b7218f8de83672ec7039facf6f57b84f2928c679a9de1a26919c03ed7dad53",
     ),
     (
         "win32",
         "Windows",
         "x86_64",
         "zip",
-        "441a6b93ffaa648b9052255b54d9b4b261bbaab5d82e382130956e2a1d86ec78",
+        "caeea930701dc0458b3eef9ee7b3ec6e38f35ccdea43e188159dafbe94d1270a",
     ),
     (
         "win32",
         "Windows",
         "arm64",
         "zip",
-        "4eeb71b5d8c14ba5ade582cf4d12d1486458cd5b3807037beb34037314b52e43",
+        "c3573fd22a861649e70af5a1ff20bbfdeced18e1850a9c3660357163ce64affc",
     ),
 )
 
