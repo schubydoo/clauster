@@ -6,7 +6,7 @@
   outputs =
     { self, nixpkgs }:
     let
-      version = "1.4.0";
+      version = "1.5.0";
 
       # The published standalone binaries, keyed by Nix system. Windows is not a Nix
       # target (use the Scoop bucket there). Checksums are auto-bumped per release by
@@ -14,19 +14,19 @@
       assets = {
         "x86_64-linux" = {
           file = "clauster-${version}-linux-x86_64";
-          sha256 = "040de0b97b63e07bc14a8d0dbaa8374a7b247cc56d1ffe88afc5e53bf595b55e";
+          sha256 = "a8d15e87a22e4472f87a6c5bbaddb0d1c14522605188deb4ea7c71d1d050152e";
         };
         "aarch64-linux" = {
           file = "clauster-${version}-linux-arm64";
-          sha256 = "6c568291533ad94fa2e5f52322611e40af9e289cbbd4a7a7df8cfe1d8ee160b2";
+          sha256 = "67ceae85a91940f5ef9274c3bd5c77275e9489de2dcbe6874d9c35c1919f6c8e";
         };
         "x86_64-darwin" = {
           file = "clauster-${version}-macos-x86_64";
-          sha256 = "4e3f403fc75dd696eea4c0a4f264c66b18b42e3caeb30ce3b8396fbc57fb98d1";
+          sha256 = "500290e4558664324a25a457917d54f0b0336876ea048fee6af96c08b70e729e";
         };
         "aarch64-darwin" = {
           file = "clauster-${version}-macos-arm64";
-          sha256 = "f07cbd1f85e1f0a251057cf5cefc92aca1994263bf98ac87c4a893adc016f80e";
+          sha256 = "3d30b4699080b8a6f4b7d9555f05376860e44b7e0a496c3573d6a1f0c95623ae";
         };
       };
 
