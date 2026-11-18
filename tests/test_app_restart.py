@@ -272,7 +272,7 @@ def test_force_restart_without_start_ticks_warns_instead_of_writing(runner_confi
 
 
 def test_force_restart_pointer_write_failure_is_a_warning(runner_config, monkeypatch):
-    app, _runner, _fake = _force_app(runner_config, monkeypatch)
+    app, runner, _fake = _force_app(runner_config, monkeypatch)
 
     def _boom(*_a, **_k):
         raise OSError("read-only file system")
@@ -283,7 +283,14 @@ def test_force_restart_pointer_write_failure_is_a_warning(runner_config, monkeyp
         r = client.post(f"/api/instances/{iid}/force-restart")
         assert r.status_code == 200, r.text  # the bridge runs; only the pointer is missing
         assert r.json()["status"] == "running"
-        assert any("could not write the bridge pointer" in w for w in r.json()["warnings"])
+        # A host without start ticks (Windows; macOS) never reaches the write: it gets the
+        # no-ticks warning instead, which test_..._without_start_ticks_... covers on Linux.
+        expected = (
+            "without a bridge pointer"
+            if runner.get_instance(iid).bridge_start_ticks is None
+            else "could not write the bridge pointer"
+        )
+        assert any(expected in w for w in r.json()["warnings"]), r.json()["warnings"]
         client.delete(f"/api/instances/{iid}")
 
 
