@@ -58,6 +58,58 @@ def test_restart_standard_bridge_starts_a_new_process(runner_config, monkeypatch
         client.delete(f"/api/instances/{iid}")
 
 
+def test_restart_creates_a_session_by_default(runner_config, monkeypatch):
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    app, _runner = _bridge_app(runner_config)
+    with TestClient(app) as client:
+        iid = client.post("/api/instances", json={"project": "alpha"}).json()["instance_id"]
+        r = client.post(f"/api/instances/{iid}/restart")
+        assert r.status_code == 200, r.text
+        assert "--no-create-session-in-dir" not in _argv(r.json())
+        client.delete(f"/api/instances/{iid}")
+
+
+def test_restart_without_session_passes_no_create_flag_on_restart_only(runner_config, monkeypatch):
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    config, _claude_json = runner_config
+    config.instance_defaults.create_session_on_restart = False
+    app, _runner = _bridge_app(runner_config)
+    with TestClient(app) as client:
+        first = client.post("/api/instances", json={"project": "alpha"})
+        assert first.status_code == 201, first.text
+        iid = first.json()["instance_id"]
+        assert "--no-create-session-in-dir" not in _argv(first.json())  # first launch
+
+        r = client.post(f"/api/instances/{iid}/restart")
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "running"
+        assert "--no-create-session-in-dir" in _argv(r.json())
+
+        # Stop + Resume is not a Restart: it keeps the pre-created session.
+        assert client.delete(f"/api/instances/{iid}").status_code == 200
+        resumed = client.post(f"/api/instances/{iid}/resume")
+        assert resumed.status_code == 200, resumed.text
+        assert "--no-create-session-in-dir" not in _argv(resumed.json())
+        client.delete(f"/api/instances/{iid}")
+
+
+@_POSIX_ONLY
+def test_restart_without_session_leaves_the_pty_argv_alone(runner_config):
+    config, _claude_json = runner_config
+    config.instance_defaults.create_session_on_restart = False
+    app, _runner = _bridge_app(runner_config)
+    with TestClient(app) as client:
+        first = client.post("/api/instances", json={"project": "alpha", "resume_mode": "pty"})
+        assert first.status_code == 201, first.text
+        iid = first.json()["instance_id"]
+        r = client.post(f"/api/instances/{iid}/restart")
+        assert r.status_code == 200, r.text
+        argv = _argv(r.json())
+        assert "--continue" in argv
+        assert "--no-create-session-in-dir" not in argv  # the flag form has no such option
+        client.delete(f"/api/instances/{iid}")
+
+
 @_POSIX_ONLY
 def test_restart_pty_bridge_continues_the_conversation(runner_config):
     app, _runner = _bridge_app(runner_config)
@@ -82,7 +134,7 @@ def test_restart_bridge_failing_start_leaves_a_true_stopped_row(runner_config, m
         first = client.post("/api/instances", json={"project": "alpha"})
         iid = first.json()["instance_id"]
 
-        async def _boom(_iid):
+        async def _boom(_iid, **_kw):
             raise SpawnError("bridge would not come back up")
 
         monkeypatch.setattr(runner, "resume_detailed", _boom)
@@ -336,7 +388,7 @@ def test_restart_bridge_precondition_failure_does_not_notify(runner_config, monk
     with TestClient(app) as client:
         iid = client.post("/api/instances", json={"project": "alpha"}).json()["instance_id"]
 
-        async def _denied(_iid: str):
+        async def _denied(_iid: str, **_kw):
             raise PermissionModeNotAllowed("bypassPermissions is not allowed")
 
         monkeypatch.setattr(runner, "resume_detailed", _denied)
@@ -354,7 +406,7 @@ def test_restart_bridge_spawn_failure_notifies(runner_config, monkeypatch):
     with TestClient(app) as client:
         iid = client.post("/api/instances", json={"project": "alpha"}).json()["instance_id"]
 
-        async def _boom(_iid: str):
+        async def _boom(_iid: str, **_kw):
             raise SpawnError("nope")
 
         monkeypatch.setattr(runner, "resume_detailed", _boom)

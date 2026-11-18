@@ -1811,7 +1811,9 @@ class SessionRunner:
         """
         return await self._spawner.resume(instance_id)
 
-    async def resume_detailed(self, instance_id: str) -> SpawnOutcome:
+    async def resume_detailed(
+        self, instance_id: str, *, create_session: bool = True
+    ) -> SpawnOutcome:
         """Re-spawn a stopped/crashed bridge (delegates to :class:`SpawnCoordinator`, #1157).
 
         Public façade member: returns the full :class:`SpawnOutcome` so a declined resume
@@ -1819,7 +1821,7 @@ class SessionRunner:
         a silent success. ``routes/*``, ``engine.py``, and ``mcp_server.py`` call
         ``runner.resume_detailed`` directly; this delegator preserves that signature.
         """
-        return await self._spawner.resume_detailed(instance_id)
+        return await self._spawner.resume_detailed(instance_id, create_session=create_session)
 
     def _validate_spawn_options(
         self,
@@ -2014,6 +2016,8 @@ class SessionRunner:
         name: str,
         spawn_mode: SpawnMode,
         permission_mode: PermissionMode,
+        *,
+        create_session: bool = True,
     ) -> list[str]:
         """Build the `claude remote-control` argv (delegates to :class:`BridgeLaunch`).
 
@@ -2021,7 +2025,9 @@ class SessionRunner:
         via ``_popen``, calls the collaborator's copy) — patching this façade method
         on ``SessionRunner`` does not intercept a spawn and would pass vacuously.
         """
-        return self._launch._build_cmd(log_path, name, spawn_mode, permission_mode)
+        return self._launch._build_cmd(
+            log_path, name, spawn_mode, permission_mode, create_session=create_session
+        )
 
     @staticmethod
     def _stderr_path_for(log_path: Path) -> Path:

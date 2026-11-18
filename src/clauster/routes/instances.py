@@ -885,7 +885,14 @@ async def _restart_bridge(
     except UnknownProject as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     try:
-        outcome = await _spawn_or_http(runner.resume_detailed(resolved))
+        # instance_defaults.create_session_on_restart=false: the standard bridge comes back
+        # with no pre-created session (--no-create-session-in-dir). Restart only, not Resume.
+        outcome = await _spawn_or_http(
+            runner.resume_detailed(
+                resolved,
+                create_session=config.instance_defaults.create_session_on_restart,
+            )
+        )
         if outcome.created and outcome.instance.status is InstanceStatus.ERROR:
             raise HTTPException(
                 status_code=409,
@@ -924,7 +931,8 @@ async def api_restart(
     binary until it is restarted. Each row type follows its own stop and resume path:
 
     - a **pty** bridge resumes the same conversation (``--continue``);
-    - a **standard** bridge reconnects in the same folder, and its live remote sessions end;
+    - a **standard** bridge reconnects in the same folder, and its live remote sessions end
+      (with ``instance_defaults.create_session_on_restart: false`` it pre-creates none);
     - a **hosted** session resumes its conversation as a new daemon process (a new id).
 
     The body is the resume body (the instance plus ``created`` / ``reason`` / ``warnings``).

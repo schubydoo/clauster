@@ -328,6 +328,15 @@ class InstanceDefaults(BaseModel):
         "for detailed connection/session logs — every spawn mode (same-dir/worktree/session). "
         "The pty (flag-form) bridge is never passed --verbose. Off by default.",
     )
+    create_session_on_restart: bool = Field(
+        default=True,
+        description="Whether the **Restart** action pre-creates a session in a standard "
+        "`claude remote-control` bridge. Set false to pass `--no-create-session-in-dir` on "
+        "restart: the new bridge registers and waits, and you start a session from "
+        "claude.ai/code. A session the bridge re-adopts from its pointer is still re-adopted. "
+        "Restart only: a first launch and Resume keep the pre-created session. The pty bridge "
+        "ignores it, because its restart continues the same conversation. On by default.",
+    )
     session_name_prefix: str | None = Field(
         default=None,
         description="Optional prefix for auto-generated Remote Control session names (maps to "

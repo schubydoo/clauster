@@ -251,6 +251,7 @@ class SpawnCoordinator:
         custom_name: str | None = None,
         resume_session_id: str | None = None,
         trust: bool = False,
+        create_session: bool = True,
     ) -> SpawnOutcome:
         """Spawn a new bridge for ``name`` (returning the existing one if already up).
 
@@ -328,6 +329,7 @@ class SpawnCoordinator:
                 custom_name=custom_name,
                 resume_session_id=resume_session_id,
                 trust=trust,
+                create_session=create_session,
             )
 
     # ----- _spawn_locked's pre-spawn gates, in the order the spawn runs them ---------
@@ -667,6 +669,7 @@ class SpawnCoordinator:
         custom_name: str | None = None,
         resume_session_id: str | None = None,
         trust: bool = False,
+        create_session: bool = True,
     ) -> SpawnOutcome:
         """Spawn (or hand back) a bridge for ``name`` with the per-project lock held.
 
@@ -855,6 +858,7 @@ class SpawnCoordinator:
                 spawn_mode,
                 permission_mode,
                 raw_path,
+                create_session=create_session,
             )
         except (OSError, ClaudeNotFound) as exc:
             # Binary unresolvable / not executable: fail the instance cleanly
@@ -908,7 +912,9 @@ class SpawnCoordinator:
         """
         return (await self.resume_detailed(instance_id)).instance
 
-    async def resume_detailed(self, instance_id: str) -> SpawnOutcome:
+    async def resume_detailed(
+        self, instance_id: str, *, create_session: bool = True
+    ) -> SpawnOutcome:
         """Re-spawn a stopped/crashed bridge, reconnecting to its prior session.
 
         Returns the full :class:`~clauster.runner.SpawnOutcome` because a resume can
@@ -963,6 +969,9 @@ class SpawnCoordinator:
             # live standard bridge in the same project (#777).
             resume_target=existing,
             custom_name=carried_name,
+            # False only from the Restart route (instance_defaults.create_session_on_restart):
+            # the standard bridge then skips its pre-created session. The pty path ignores it.
+            create_session=create_session,
         )
 
     # ----- pty / Interactive Session mode (true conversation resume) ------
