@@ -2167,6 +2167,12 @@ row in the table above.</p>
 <td>Pass <code>--verbose</code> to spawned standard <code>claude remote-control</code> bridges for detailed connection/session logs — every spawn mode (same-dir/worktree/session). The pty (flag-form) bridge is never passed --verbose. Off by default.</td>
 </tr>
 <tr>
+<td><code>allow_force_restart</code></td>
+<td>bool</td>
+<td><code>false</code></td>
+<td>Show a <strong>Force restart</strong> button on standard bridge cards. Force restart stops the bridge, <strong>archives its cloud environment</strong> (<code>env_…</code>), deletes its bridge pointer, and starts it again with <code>--no-create-session-in-dir</code>: a new environment and no session until you open one. Every session in the old environment ends and its claude.ai link stops working. Plain Restart, Resume and the pty (Interactive Session) bridge are unchanged. Off by default.</td>
+</tr>
+<tr>
 <td><code>session_name_prefix</code></td>
 <td>str | null</td>
 <td><code>null</code></td>
