@@ -27,8 +27,10 @@ defers to the single :meth:`ClausterConfig.bypass_denied` decision and shares it
 from __future__ import annotations
 
 import asyncio
+import http.client
 import io
 import logging
+import re
 import time
 from collections.abc import Awaitable
 from typing import TYPE_CHECKING, TypeVar, cast
@@ -72,6 +74,9 @@ if TYPE_CHECKING:
     from ..runner import SessionRunner
 
 logger = logging.getLogger(__name__)
+
+# The shape of a cloud environment id. Checked before one goes into an archive URL path.
+_ENV_ID_RE = re.compile(r"env_[A-Za-z0-9]+")
 
 router = APIRouter()
 
@@ -938,13 +943,21 @@ async def _force_restart_preflight(
 
     Force restart archives an environment, which only a standard bridge with a recorded
     ``environment_id`` has, and it needs the claude login to call the environments API.
+    The row must be RUNNING: a stopped row's recorded id can name an environment that a
+    later bridge in the same folder reused and still serves (a plain start revives the id
+    in the pointer), and archiving it would pull that live bridge's environment away.
     """
     if instance.resume_mode != "standard":
         raise HTTPException(
             status_code=409,
             detail="Force restart is for Server Mode (standard) bridges only; use Restart.",
         )
-    if not instance.environment_id:
+    if instance.status is not InstanceStatus.RUNNING:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Force restart needs a running bridge; this one is {instance.status.value}.",
+        )
+    if not instance.environment_id or not _ENV_ID_RE.fullmatch(instance.environment_id):
         raise HTTPException(
             status_code=409,
             detail="no cloud environment is recorded for this bridge; use Restart.",
@@ -974,18 +987,30 @@ async def _discard_bridge_environment(
     Any other failure raises with the "stopped, but it did not start again" detail, so the
     new bridge is never started against an environment that still holds the folder. The
     detail goes through ``redact_for_disk``: an ``env_`` id is a bearer credential.
+
+    A pointer that names a live bridge is refused BEFORE the archive: some other bridge
+    serves the folder, and its environment must not be archived from under it.
     """
+    pointer = await asyncio.to_thread(
+        pointers.pointer_for_project, path, runner.claude_projects_dir
+    )
+    if pointer is not None and await asyncio.to_thread(pointers.is_live, pointer):
+        raise _restart_failed(
+            "bridge",
+            HTTPException(
+                status_code=409,
+                detail="another live bridge owns this folder's bridge pointer; "
+                "its environment was not archived",
+            ),
+        )
     try:
         await asyncio.to_thread(client.archive_environment, env_id)
     except environments.EnvironmentsAPIError as exc:
         if exc.status != 404:
-            raise _restart_failed(
-                "bridge",
-                HTTPException(
-                    status_code=502,
-                    detail=redact_for_disk(f"could not archive its cloud environment: {exc}"),
-                ),
-            ) from exc
+            raise _archive_failed(exc) from exc
+    except (OSError, http.client.HTTPException) as exc:
+        # The transport raises these unwrapped (timeouts, TLS, a dropped connection).
+        raise _archive_failed(exc) from exc
     try:
         await asyncio.to_thread(
             pointers.remove_pointer, path, claude_projects_dir=runner.claude_projects_dir
@@ -998,6 +1023,17 @@ async def _discard_bridge_environment(
                 detail=redact_for_disk(f"could not remove its bridge pointer: {exc}"),
             ),
         ) from exc
+
+
+def _archive_failed(exc: Exception) -> HTTPException:
+    """Build the redacted 502 for a Force restart whose environment archive failed."""
+    return _restart_failed(
+        "bridge",
+        HTTPException(
+            status_code=502,
+            detail=redact_for_disk(f"could not archive its cloud environment: {exc}"),
+        ),
+    )
 
 
 async def _restart_row(

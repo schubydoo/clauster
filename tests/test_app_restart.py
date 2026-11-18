@@ -78,26 +78,32 @@ def test_restart_never_passes_the_no_create_flag(runner_config, monkeypatch):
 class _FakeEnvClient:
     """Stands in for environments.EnvironmentsClient: records archives, can fail."""
 
-    def __init__(self, fail_status: int | None = None) -> None:
+    def __init__(self, fail_status: int | None = None, raises: Exception | None = None) -> None:
         self.archived: list[str] = []
         self.fail_status = fail_status
+        self.raises = raises
 
     def archive_environment(self, env_id: str) -> None:
         self.archived.append(env_id)
+        if self.raises is not None:
+            raise self.raises
         if self.fail_status is not None:
             raise environments.EnvironmentsAPIError(
                 self.fail_status, f"Environment {env_id} not found."
             )
 
 
-def _force_app(runner_config, monkeypatch, *, fail_status=None, creds_error=False):
+def _force_app(runner_config, monkeypatch, *, fail_status=None, raises=None, creds_error=False):
     """A bridge app with Force restart on and the environments API stubbed out."""
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
-    config, _claude_json = runner_config
+    config, claude_json = runner_config
     config.instance_defaults.allow_force_restart = True
-    fake = _FakeEnvClient(fail_status)
+    fake = _FakeEnvClient(fail_status, raises)
 
-    def _load(*_a, **_k):
+    def _load(credentials_path, claude_json_path, **_k):
+        # The login beside the runner's own claude.json, never the real HOME's.
+        assert credentials_path == claude_json.parent / ".claude" / ".credentials.json"
+        assert claude_json_path == claude_json
         if creds_error:
             raise environments.CredentialsError("no credentials file")
         return object()
@@ -149,6 +155,7 @@ def test_dashboard_shows_force_restart_only_when_on(write_config):
     on = _page("instance_defaults:\n  allow_force_restart: true\n")
     assert 'data-test="force-restart-session"' in on
     assert "restart(i.rk, true)" in on
+    assert "i.resume_mode !== 'pty' && !!i.environment_id" in on  # only where it can work
     assert "This ARCHIVES the bridge's cloud environment" in on  # the confirm says so
 
 
@@ -211,20 +218,69 @@ def test_force_restart_failed_archive_stops_without_starting(runner_config, monk
         assert str(row.bridge_debug_log_path) == first["bridge_debug_log_path"]  # no new spawn
 
 
+def test_force_restart_network_error_stops_without_starting(runner_config, monkeypatch):
+    # The transport raises timeouts and TLS errors unwrapped; they must not become a bare 500.
+    app, runner, _fake = _force_app(runner_config, monkeypatch, raises=TimeoutError("timed out"))
+    with TestClient(app) as client:
+        iid = client.post("/api/instances", json={"project": "alpha"}).json()["instance_id"]
+        r = client.post(f"/api/instances/{iid}/force-restart")
+        assert r.status_code == 502
+        assert "stopped, but it did not start again" in r.json()["detail"]
+        assert runner.get_instance(iid).status is InstanceStatus.STOPPED
+
+
+def test_force_restart_live_pointer_refuses_before_the_archive(runner_config, monkeypatch):
+    # Another live bridge owns the folder's pointer: its environment is never archived.
+    app, runner, fake = _force_app(runner_config, monkeypatch)
+    with TestClient(app) as client:
+        iid = client.post("/api/instances", json={"project": "alpha"}).json()["instance_id"]
+        _seed_pointer(runner)
+        monkeypatch.setattr(pointers, "is_live", lambda _ptr: True)
+        r = client.post(f"/api/instances/{iid}/force-restart")
+        assert r.status_code == 409
+        assert "another live bridge" in r.json()["detail"]
+        assert fake.archived == []
+        assert runner.get_instance(iid).status is InstanceStatus.STOPPED
+
+
 def test_force_restart_pointer_that_cannot_go_stops_without_starting(runner_config, monkeypatch):
     app, runner, fake = _force_app(runner_config, monkeypatch)
 
-    def _live(*_a, **_k):
-        raise pointers.PointerStillLive("bridge-pointer refers to a live bridge (pid 1)")
+    def _boom(*_a, **_k):
+        raise OSError("read-only file system")
 
     with TestClient(app) as client:
         iid = client.post("/api/instances", json={"project": "alpha"}).json()["instance_id"]
-        monkeypatch.setattr(pointers, "remove_pointer", _live)
+        monkeypatch.setattr(pointers, "remove_pointer", _boom)
         r = client.post(f"/api/instances/{iid}/force-restart")
         assert r.status_code == 409
         assert "could not remove its bridge pointer" in r.json()["detail"]
         assert len(fake.archived) == 1
         assert runner.get_instance(iid).status is InstanceStatus.STOPPED
+
+
+def test_force_restart_refuses_a_stopped_row(runner_config, monkeypatch):
+    # A stopped row's recorded id may name an environment a later bridge reused and serves.
+    app, runner, fake = _force_app(runner_config, monkeypatch)
+    with TestClient(app) as client:
+        iid = client.post("/api/instances", json={"project": "alpha"}).json()["instance_id"]
+        assert client.delete(f"/api/instances/{iid}").status_code == 200
+        r = client.post(f"/api/instances/{iid}/force-restart")
+        assert r.status_code == 409
+        assert "needs a running bridge" in r.json()["detail"]
+        assert fake.archived == []
+
+
+def test_force_restart_refuses_a_malformed_env_id(runner_config, monkeypatch):
+    app, runner, fake = _force_app(runner_config, monkeypatch)
+    with TestClient(app) as client:
+        first = client.post("/api/instances", json={"project": "alpha"}).json()
+        runner.get_instance(first["instance_id"]).environment_id = "env_x/../../v1/other"
+        r = client.post(f"/api/instances/{first['instance_id']}/force-restart")
+        assert r.status_code == 409
+        assert fake.archived == []
+        assert runner.get_instance(first["instance_id"]).bridge_pid == first["bridge_pid"]
+        client.delete(f"/api/instances/{first['instance_id']}")
 
 
 def test_force_restart_without_login_refuses_before_the_stop(runner_config, monkeypatch):
