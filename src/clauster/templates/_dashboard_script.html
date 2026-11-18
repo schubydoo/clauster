@@ -5666,8 +5666,13 @@
       // always an https claude.ai URL, never user input. It's bound to `:href` in the Active list,
       // so ENFORCE the scheme here rather than merely trust it: a non-http(s) value can never
       // become a `javascript:`/`data:` href sink. `rel="noopener" target="_blank"` covers the rest.
+      // Falls back to `url` (the environment link) like the QR route and the MCP engine do
+      // (`session_url or url`): a bridge with no starter session (Force restart's
+      // --no-create-session-in-dir) never gets a session_url, and without the fallback its
+      // row spun on "Preparing connect link…" forever.
       sessionUrlOf(key) {
-        const u = (this.rowOf(key) || {}).session_url;
+        const row = this.rowOf(key) || {};
+        const u = row.session_url || row.url;
         return u && /^https?:\/\//i.test(u) ? u : null;
       },
       // A running bridge whose connect URL hasn't arrived yet. session_url is captured

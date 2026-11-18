@@ -157,6 +157,9 @@ def test_dashboard_shows_force_restart_only_when_on(write_config):
     assert "restart(i.rk, true)" in on
     assert "i.resume_mode !== 'pty' && !!i.environment_id" in on  # only where it can work
     assert "This ARCHIVES the bridge's cloud environment" in on  # the confirm says so
+    # A bridge with no starter session has no session_url: the Open link and QR fall back to
+    # the environment link, like the QR route, or the row spins on "Preparing connect link…".
+    assert "const u = row.session_url || row.url;" in on
 
 
 def test_force_restart_archives_env_drops_pointer_and_skips_session(runner_config, monkeypatch):
