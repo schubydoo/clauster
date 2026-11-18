@@ -80,12 +80,22 @@ class BridgeLaunch:
         name: str,
         spawn_mode: SpawnMode,
         permission_mode: PermissionMode,
+        *,
+        create_session: bool = True,
     ) -> list[str]:
         """Build the `claude remote-control` argv. Pure (no side effects) so it's unit-testable.
 
         ``name`` becomes ``--name`` verbatim — the caller (:meth:`_spawn_locked`) has
         already resolved it to either the operator's custom bridge name or the
         project name (#780, via :func:`_normalize_custom_name`).
+
+        ``create_session=False`` adds ``--no-create-session-in-dir``, so the bridge does not
+        pre-create a session in its folder (Force restart, gated on
+        ``instance_defaults.allow_force_restart``). The CLI accepts it in every spawn
+        mode; it refuses it only with ``--session-id`` / ``--continue``, which this
+        subcommand argv never carries. On claude 2.1.327 the same switch also stops the
+        bridge reading or writing ``bridge-pointer.json``, so it never reuses the folder's
+        old environment: Force restart archives that environment first.
 
         It never emits ``--sandbox`` / ``--no-sandbox``: Claude Code 2.1.300 removed both
         from ``claude remote-control`` and exits on either (see
@@ -122,6 +132,8 @@ class BridgeLaunch:
         # unconditional; off by default. The pty bridge is never passed --verbose.
         if defaults.verbose:
             cmd += ["--verbose"]
+        if not create_session:
+            cmd += ["--no-create-session-in-dir"]
         return cmd
 
     def _bridge_env_overlay(self, extra: dict[str, str] | None = None) -> dict[str, str]:
@@ -163,12 +175,20 @@ class BridgeLaunch:
         spawn_mode: SpawnMode,
         permission_mode: PermissionMode,
         debug_path: Path | None = None,
+        *,
+        create_session: bool = True,
     ) -> subprocess.Popen:
         """Launch the detached bridge subprocess with a resolved binary and scrubbed env."""
         # The bridge writes its --debug-file to `debug_path` (the private raw parse-
         # source when on-disk redaction is on); the captured-stderr sibling stays keyed
         # off the public `log_path`. They coincide when redaction is off.
-        cmd = self._build_cmd(debug_path or log_path, name, spawn_mode, permission_mode)
+        cmd = self._build_cmd(
+            debug_path or log_path,
+            name,
+            spawn_mode,
+            permission_mode,
+            create_session=create_session,
+        )
         # Exec the RESOLVED absolute path, not the bare configured name: Windows
         # CreateProcess only auto-appends .exe (never the .cmd/.ps1 shim npm installs
         # for `claude`), so a bare name that the version probe resolves via

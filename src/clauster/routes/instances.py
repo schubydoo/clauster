@@ -27,8 +27,11 @@ defers to the single :meth:`ClausterConfig.bypass_denied` decision and shares it
 from __future__ import annotations
 
 import asyncio
+import http.client
 import io
 import logging
+import re
+import time
 from collections.abc import Awaitable
 from typing import TYPE_CHECKING, TypeVar, cast
 
@@ -36,7 +39,7 @@ import segno
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response
 
-from .. import __version__, claude_cli
+from .. import __version__, claude_cli, environments, pointers
 from ..claustrum_client import ClaustrumError
 from ..config import PERMISSION_MODES, removed_sandbox_note
 from ..dependencies import (
@@ -71,6 +74,9 @@ if TYPE_CHECKING:
     from ..runner import SessionRunner
 
 logger = logging.getLogger(__name__)
+
+# The shape of a cloud environment id. Checked before one goes into an archive URL path.
+_ENV_ID_RE = re.compile(r"env_[A-Za-z0-9]+")
 
 router = APIRouter()
 
@@ -846,7 +852,12 @@ async def _await_hosted_start(hosted: HostedManager, fresh: RemoteControlInstanc
 
 
 async def _restart_bridge(
-    instance_id: str, *, runner: SessionRunner, config: ClausterConfig, engine: ClausterEngine
+    instance_id: str,
+    *,
+    runner: SessionRunner,
+    config: ClausterConfig,
+    engine: ClausterEngine,
+    force: bool = False,
 ) -> dict:
     """Stop a managed bridge, then resume it through its own mode's path.
 
@@ -856,6 +867,17 @@ async def _restart_bridge(
     resume resolves the ``claude`` binary again, so the new process runs the release now on
     disk. The project, its trust, the bypass ceiling and the binary are checked BEFORE the
     stop, so the predictable failures refuse with the bridge still running.
+
+    ``force`` is Force restart (standard bridges only, gated on
+    ``instance_defaults.allow_force_restart``). After the stop it archives the bridge's own
+    cloud environment, deletes its bridge pointer, and starts the bridge with
+    ``--no-create-session-in-dir``, so it registers a new environment and starts no session.
+    The archive is needed because a SIGINT'd same-dir bridge stays registered and the server
+    refuses a second registration for the folder; the pointer goes too, or the next plain
+    start reuses and revives the archived environment (both seen live on claude 2.1.327).
+    The row type, the recorded environment id and the credentials are checked before the
+    stop. A failed archive (other than 404, already gone) stops there: the row stays STOPPED
+    and the new bridge is not started.
 
     A new process that fails at start does not raise from the resume: it comes back as an
     ERROR row. That is turned into an error here, so a crash of the new ``claude`` release is
@@ -880,12 +902,18 @@ async def _restart_bridge(
         await asyncio.to_thread(claude_cli.resolve_binary, config.claude.binary)
     except claude_cli.ClaudeNotFound as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    env_client: environments.EnvironmentsClient | None = None
+    env_id = instance.environment_id
+    if force:
+        env_client = await _force_restart_preflight(instance, runner)
     try:
         await runner.stop(resolved)
     except UnknownProject as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if env_client is not None and env_id is not None:
+        await _discard_bridge_environment(env_client, env_id, path, runner)
     try:
-        outcome = await _spawn_or_http(runner.resume_detailed(resolved))
+        outcome = await _spawn_or_http(runner.resume_detailed(resolved, create_session=not force))
         if outcome.created and outcome.instance.status is InstanceStatus.ERROR:
             raise HTTPException(
                 status_code=409,
@@ -900,12 +928,200 @@ async def _restart_bridge(
                 f"Restarting the bridge for {instance_id!r} failed.",
             )
         raise _restart_failed("bridge", exc) from exc
+    warnings = list(outcome.warnings)
+    if force and outcome.created:
+        warning = await _write_reuse_pointer(outcome.instance, path, runner)
+        if warning is not None:
+            warnings.append(warning)
     return _spawn_body(
         outcome.instance,
         created=outcome.created,
         reason=outcome.reason,
-        warnings=outcome.warnings,
+        warnings=warnings,
     )
+
+
+async def _write_reuse_pointer(
+    instance: RemoteControlInstance, path: Path, runner: SessionRunner
+) -> str | None:
+    """Write the pointer a Force-restarted bridge never writes itself; return a warning.
+
+    Without it a clauster restart reattaches the live bridge as STARTING forever (connect
+    facts come from a live pointer), and a later plain start cannot reuse the environment.
+    Needs the environment id and the boot-relative start ticks, which the CLI writes as
+    ``procStart``; a host without ticks (macOS, Windows) gets the warning instead. A failed
+    write never fails the restart: the bridge is already running.
+    """
+    env_id = instance.environment_id
+    if not env_id or instance.bridge_pid is None or instance.bridge_start_ticks is None:
+        return (
+            "the bridge runs without a bridge pointer; after a Clauster restart its row "
+            "shows Starting until you stop it"
+        )
+    try:
+        await asyncio.to_thread(
+            pointers.write_reuse_pointer,
+            path,
+            environment_id=env_id,
+            pid=instance.bridge_pid,
+            proc_start=str(instance.bridge_start_ticks),
+            claude_projects_dir=runner.claude_projects_dir,
+        )
+    except OSError as exc:
+        logger.warning("could not write the bridge pointer for %s: %s", instance.project, exc)
+        return (
+            "could not write the bridge pointer; after a Clauster restart the row shows Starting"
+        )
+    return None
+
+
+async def _force_restart_preflight(
+    instance: RemoteControlInstance, runner: SessionRunner
+) -> environments.EnvironmentsClient:
+    """Refuse a Force restart that cannot finish, before anything is stopped.
+
+    Force restart archives an environment, which only a standard bridge with a recorded
+    ``environment_id`` has, and it needs the claude login to call the environments API.
+    The row must be RUNNING: a stopped row's recorded id can name an environment that a
+    later bridge in the same folder reused and still serves (a plain start revives the id
+    in the pointer), and archiving it would pull that live bridge's environment away.
+    """
+    if instance.resume_mode != "standard":
+        raise HTTPException(
+            status_code=409,
+            detail="Force restart is for Server Mode (standard) bridges only; use Restart.",
+        )
+    if instance.status is not InstanceStatus.RUNNING:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Force restart needs a running bridge; this one is {instance.status.value}.",
+        )
+    if not instance.environment_id or not _ENV_ID_RE.fullmatch(instance.environment_id):
+        raise HTTPException(
+            status_code=409,
+            detail="no cloud environment is recorded for this bridge; use Restart.",
+        )
+    credentials_path = runner.claude_json.parent / ".claude" / ".credentials.json"
+    try:
+        creds = await asyncio.to_thread(
+            environments.load_credentials,
+            credentials_path,
+            runner.claude_json,
+            now_ms=int(time.time() * 1000),
+        )
+    except environments.CredentialsError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=redact_for_disk(f"Force restart needs the claude login: {exc}"),
+        ) from exc
+    return environments.EnvironmentsClient(creds)
+
+
+async def _discard_bridge_environment(
+    client: environments.EnvironmentsClient, env_id: str, path: Path, runner: SessionRunner
+) -> None:
+    """Archive a stopped bridge's environment and delete its pointer (Force restart).
+
+    Runs after the stop. A 404 means the environment is already gone, which is the goal.
+    Any other failure raises with the "stopped, but it did not start again" detail, so the
+    new bridge is never started against an environment that still holds the folder. The
+    detail goes through ``redact_for_disk``: an ``env_`` id is a bearer credential.
+
+    A pointer that names a live bridge is refused BEFORE the archive: some other bridge
+    serves the folder, and its environment must not be archived from under it.
+    """
+    pointer = await asyncio.to_thread(
+        pointers.pointer_for_project, path, runner.claude_projects_dir
+    )
+    if pointer is not None and await asyncio.to_thread(pointers.is_live, pointer):
+        raise _restart_failed(
+            "bridge",
+            HTTPException(
+                status_code=409,
+                detail="another live bridge owns this folder's bridge pointer; "
+                "its environment was not archived",
+            ),
+        )
+    try:
+        await asyncio.to_thread(client.archive_environment, env_id)
+    except environments.EnvironmentsAPIError as exc:
+        if exc.status != 404:
+            raise _archive_failed(exc) from exc
+    except (OSError, http.client.HTTPException) as exc:
+        # The transport raises these unwrapped (timeouts, TLS, a dropped connection).
+        raise _archive_failed(exc) from exc
+    try:
+        await asyncio.to_thread(
+            pointers.remove_pointer, path, claude_projects_dir=runner.claude_projects_dir
+        )
+    except (pointers.PointerStillLive, OSError) as exc:
+        raise _restart_failed(
+            "bridge",
+            HTTPException(
+                status_code=409,
+                detail=redact_for_disk(f"could not remove its bridge pointer: {exc}"),
+            ),
+        ) from exc
+
+
+def _archive_failed(exc: Exception) -> HTTPException:
+    """Build the redacted 502 for a Force restart whose environment archive failed."""
+    return _restart_failed(
+        "bridge",
+        HTTPException(
+            status_code=502,
+            detail=redact_for_disk(f"could not archive its cloud environment: {exc}"),
+        ),
+    )
+
+
+async def _restart_row(
+    instance_id: str,
+    request: Request,
+    *,
+    runner: SessionRunner,
+    hosted: HostedManager,
+    daemon: ClaustrumDaemon | None,
+    config: ClausterConfig,
+    engine: ClausterEngine,
+    force: bool,
+) -> dict:
+    """Run one restart of a row under the per-row single-flight slot (Restart and Force)."""
+    in_flight: set[str] = request.app.state.restarts_in_flight
+    hosted_instance = hosted.get_instance(instance_id)
+    if force and hosted_instance is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="Force restart is for Server Mode (standard) bridges only; use Restart.",
+        )
+    # The hosted key is the process id, not the path id: the manager also accepts the
+    # instance_id, and two aliases of one row must share one slot.
+    key = (
+        hosted_instance.claustrum_process_id or instance_id
+        if hosted_instance is not None
+        else runner.resolve_bridge_id(instance_id)
+    )
+    if key is not None and key in in_flight:
+        raise HTTPException(status_code=409, detail="a restart of this row is already running")
+    if key is not None:
+        in_flight.add(key)
+    try:
+        if hosted_instance is not None:
+            return await _restart_hosted(
+                instance_id,
+                hosted_instance,
+                hosted=hosted,
+                daemon=daemon,
+                runner=runner,
+                config=config,
+                engine=engine,
+            )
+        return await _restart_bridge(
+            instance_id, runner=runner, config=config, engine=engine, force=force
+        )
+    finally:
+        if key is not None:
+            in_flight.discard(key)
 
 
 @router.post("/api/instances/{instance_id}/restart")
@@ -932,34 +1148,49 @@ async def api_restart(
     error detail. Single-flight per row: a second restart of the same row while one runs
     is refused with 409.
     """
-    in_flight: set[str] = request.app.state.restarts_in_flight
-    hosted_instance = hosted.get_instance(instance_id)
-    # The hosted key is the process id, not the path id: the manager also accepts the
-    # instance_id, and two aliases of one row must share one slot.
-    key = (
-        hosted_instance.claustrum_process_id or instance_id
-        if hosted_instance is not None
-        else runner.resolve_bridge_id(instance_id)
+    return await _restart_row(
+        instance_id,
+        request,
+        runner=runner,
+        hosted=hosted,
+        daemon=daemon,
+        config=config,
+        engine=engine,
+        force=False,
     )
-    if key is not None and key in in_flight:
-        raise HTTPException(status_code=409, detail="a restart of this row is already running")
-    if key is not None:
-        in_flight.add(key)
-    try:
-        if hosted_instance is not None:
-            return await _restart_hosted(
-                instance_id,
-                hosted_instance,
-                hosted=hosted,
-                daemon=daemon,
-                runner=runner,
-                config=config,
-                engine=engine,
-            )
-        return await _restart_bridge(instance_id, runner=runner, config=config, engine=engine)
-    finally:
-        if key is not None:
-            in_flight.discard(key)
+
+
+@router.post("/api/instances/{instance_id}/force-restart")
+async def api_force_restart(
+    instance_id: str,
+    request: Request,
+    runner: RunnerDep,
+    hosted: HostedDep,
+    daemon: ClaustrumDaemonDep,
+    config: ConfigDep,
+    engine: EngineDep,
+) -> dict:
+    """Restart a standard bridge in a new cloud environment, with no pre-created session.
+
+    Off unless ``instance_defaults.allow_force_restart`` is true (403 otherwise). It shares
+    the Restart single-flight slot. See :func:`_restart_bridge` for the archive and pointer
+    steps, and why each one is needed.
+    """
+    if not config.instance_defaults.allow_force_restart:
+        raise HTTPException(
+            status_code=403,
+            detail="Force restart is off. Set instance_defaults.allow_force_restart: true.",
+        )
+    return await _restart_row(
+        instance_id,
+        request,
+        runner=runner,
+        hosted=hosted,
+        daemon=daemon,
+        config=config,
+        engine=engine,
+        force=True,
+    )
 
 
 @router.post("/api/instances/{instance_id}/forget")

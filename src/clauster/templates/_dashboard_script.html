@@ -5666,8 +5666,13 @@
       // always an https claude.ai URL, never user input. It's bound to `:href` in the Active list,
       // so ENFORCE the scheme here rather than merely trust it: a non-http(s) value can never
       // become a `javascript:`/`data:` href sink. `rel="noopener" target="_blank"` covers the rest.
+      // Falls back to `url` (the environment link) like the QR route and the MCP engine do
+      // (`session_url or url`): a bridge with no starter session (Force restart's
+      // --no-create-session-in-dir) never gets a session_url, and without the fallback its
+      // row spun on "Preparing connect link…" forever.
       sessionUrlOf(key) {
-        const u = (this.rowOf(key) || {}).session_url;
+        const row = this.rowOf(key) || {};
+        const u = row.session_url || row.url;
         return u && /^https?:\/\//i.test(u) ? u : null;
       },
       // A running bridge whose connect URL hasn't arrived yet. session_url is captured
@@ -6943,23 +6948,27 @@
       // Restart (TASK-459): one POST that stops the row and resumes it through its own
       // mode path, so the bridge runs the claude binary now on disk. Single-flight per
       // row (restarting[key]); the server refuses a concurrent second restart too.
-      async restart(key) {
+      // force=true is Force restart (instance_defaults.allow_force_restart, standard bridges
+      // only): the server archives the bridge's cloud environment, so the confirm says so.
+      async restart(key, force = false) {
         if (this.restarting[key]) return;
         const row = this.rowOf(key);
         const label = this.labelOf(key);
         const id = this._requireBridgeId(key);
         if (!id) return;
         const pty = row && row.resume_mode === "pty";
-        const loses = pty
+        const loses = force
+          ? "This ARCHIVES the bridge's cloud environment (env_…). Every session in it ends, and its claude.ai link stops working. The bridge then starts in a new environment with no session; open one from claude.ai."
+          : pty
           ? "The interactive session stops, which interrupts a turn in progress, and comes back in the same conversation (--continue)."
           : "Every live remote session on this bridge ends. The bridge then reconnects in the same folder.";
-        if (!window.confirm("Restart the session in \"" + label + "\"?\n\n" + loses
-            + "\n\nThe new process runs the claude version installed now.")) return;
+        if (!window.confirm((force ? "Force restart" : "Restart") + " the session in \"" + label
+            + "\"?\n\n" + loses + "\n\nThe new process runs the claude version installed now.")) return;
         this.restarting[key] = true;
         this.restartError[key] = null;
         try {
           const res = await fetch(ROOT + "/api/instances/" + encodeURIComponent(id)
-                                  + "/restart", { method: "POST" });
+                                  + (force ? "/force-restart" : "/restart"), { method: "POST" });
           if (this._authExpired(res)) return;
           const body = await res.json().catch(() => ({}));
           if (!res.ok) {

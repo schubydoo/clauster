@@ -306,3 +306,77 @@ def test_clear_pointer_backup_failure_still_clears(
     assert pointers.clear_pointer(proj, claude_projects_dir=tmp_path) is True
     assert _kept_env_only(path)
     assert not path.with_name(path.name + ".bak").exists()
+
+
+# ----- remove_pointer (Force restart) --------------------------------------------
+
+
+def test_remove_pointer_absent_returns_false(tmp_path: Path):
+    assert pointers.remove_pointer(Path("/no/such/project"), claude_projects_dir=tmp_path) is False
+
+
+def test_remove_pointer_deletes_env_id_too_and_backs_up(tmp_path: Path):
+    # Unlike clear_pointer, nothing is kept: a kept environment id would let the next plain
+    # start reuse, and so revive, the environment Force restart just archived.
+    proj = Path("/mnt/nas/projects/alpha")
+    path = _write_pointer(tmp_path, proj)
+    original = path.read_bytes()
+    assert pointers.remove_pointer(proj, claude_projects_dir=tmp_path) is True
+    assert not path.exists()
+    assert path.with_name(path.name + ".bak").read_bytes() == original
+
+
+def test_remove_pointer_refuses_live(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    proj = Path("/mnt/nas/projects/alpha")
+    path = _write_pointer(tmp_path, proj)
+    monkeypatch.setattr(pointers, "is_live", lambda ptr: True)
+    with pytest.raises(pointers.PointerStillLive):
+        pointers.remove_pointer(proj, claude_projects_dir=tmp_path)
+    assert path.exists()
+
+
+def test_remove_pointer_backup_failure_still_deletes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    proj = Path("/mnt/nas/projects/alpha")
+    path = _write_pointer(tmp_path, proj)
+
+    def _boom(self, data):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(Path, "write_bytes", _boom)
+    assert pointers.remove_pointer(proj, claude_projects_dir=tmp_path) is True
+    assert not path.exists()
+
+
+# ----- write_reuse_pointer (Force restart) ---------------------------------------
+
+
+def test_write_reuse_pointer_writes_the_stripped_shape(tmp_path: Path):
+    proj = Path("/mnt/nas/projects/alpha")
+    assert pointers.write_reuse_pointer(
+        proj,
+        environment_id="env_01NEWENVAAAAAAAAAAAAAAAAA",
+        pid=4242,
+        proc_start="83353327",
+        claude_projects_dir=tmp_path,
+    )
+    path = pointers.pointer_path_for(proj, tmp_path)
+    assert json.loads(path.read_text()) == {
+        "sessionId": "",
+        "environmentId": "env_01NEWENVAAAAAAAAAAAAAAAAA",
+        "source": "standalone",
+        "pid": 4242,
+        "procStart": "83353327",
+    }
+    assert pointers.load_pointer(path) is not None  # our reader accepts what we write
+
+
+def test_write_reuse_pointer_never_overwrites(tmp_path: Path):
+    proj = Path("/mnt/nas/projects/alpha")
+    path = _write_pointer(tmp_path, proj)
+    original = path.read_bytes()
+    assert not pointers.write_reuse_pointer(
+        proj, environment_id="env_01X", pid=1, proc_start="1", claude_projects_dir=tmp_path
+    )
+    assert path.read_bytes() == original

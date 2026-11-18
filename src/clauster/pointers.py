@@ -176,3 +176,72 @@ def clear_pointer(
     # so the write must not tighten its mode the way clauster's own state dirs are.
     atomicio.atomic_write_text(path, json.dumps(kept), own_dir=False)
     return True
+
+
+def remove_pointer(
+    project_path: Path,
+    *,
+    claude_projects_dir: Path = CLAUDE_PROJECTS_DIR,
+) -> bool:
+    """Back up and delete a project's ``bridge-pointer.json``, environment id included.
+
+    Only the Force restart path calls this, right after it archived the environment the
+    pointer names. :func:`clear_pointer` keeps the environment id on purpose (#1580), but a
+    kept id would let the next plain start reuse, and so revive, the archived environment and
+    its old session (seen live on claude 2.1.327). A bridge started with
+    ``--no-create-session-in-dir`` neither reads nor writes the pointer, so nothing else
+    removes it; :func:`write_reuse_pointer` then writes one for the new bridge. Refuses
+    with :class:`PointerStillLive` when the pointer names a live bridge.
+    Returns ``True`` when a file was deleted, ``False`` when there was none.
+    """
+    path = pointer_path_for(project_path, claude_projects_dir)
+    if not path.exists():
+        return False
+    pointer = load_pointer(path)
+    if pointer is not None and is_live(pointer):
+        raise PointerStillLive(
+            f"bridge-pointer for {project_path} refers to a live bridge (pid {pointer.pid})"
+        )
+    try:
+        path.with_name(path.name + ".bak").write_bytes(path.read_bytes())
+    except OSError as exc:  # backup is best-effort — never let it block the delete
+        _log.warning("could not back up %s before removing: %s", path, exc)
+    path.unlink()
+    return True
+
+
+def write_reuse_pointer(
+    project_path: Path,
+    *,
+    environment_id: str,
+    pid: int,
+    proc_start: str,
+    claude_projects_dir: Path = CLAUDE_PROJECTS_DIR,
+) -> bool:
+    """Write the stripped pointer for a bridge that runs without one (Force restart).
+
+    A bridge started with ``--no-create-session-in-dir`` neither reads nor writes
+    ``bridge-pointer.json`` (claude 2.1.327). With no pointer, a clauster restart cannot
+    reattach it as RUNNING (the connect facts come from a live pointer), and a later plain
+    start cannot reuse its environment, so the server refuses the new registration as
+    "already served" when the CLI kept the environment. This writes the same shape
+    :func:`clear_pointer` leaves: the environment fields only, with an empty ``sessionId``.
+    ``proc_start`` is the bridge's boot-relative start ticks, the value the CLI writes.
+
+    Never overwrites: an existing pointer, live or not, is left alone and ``False`` is
+    returned. ``True`` means the pointer was written.
+    """
+    path = pointer_path_for(project_path, claude_projects_dir)
+    if path.exists():
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    body = {
+        "sessionId": "",
+        "environmentId": environment_id,
+        "source": "standalone",
+        "pid": pid,
+        "procStart": proc_start,
+    }
+    # own_dir=False: the directory belongs to the CLI (it also holds the transcripts).
+    atomicio.atomic_write_text(path, json.dumps(body), own_dir=False)
+    return True

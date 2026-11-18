@@ -1320,10 +1320,13 @@ class Rediscovery:
             return {}
         # No presence guards: `BridgePointer` declares both as required `str`, so a parsed
         # pointer always carries them — a guard here would be unreachable, not defensive.
+        # An EMPTY sessionId is a real shape, though: the stripped pointer (#1580, and the one
+        # Force restart writes for a bridge with no session). "" is not None, so passing it
+        # through would build the broken deep link `https://claude.ai/code/?from=cli`.
         return {
             "environment_id": ptr.environment_id,
             "url": f"https://claude.ai/code?environment={ptr.environment_id}",
-            "starter_session_id": ptr.session_id,
+            "starter_session_id": ptr.session_id or None,
         }
 
     def _stopped_from_row(self, instance_id: str, saved: dict) -> RemoteControlInstance:
@@ -1806,7 +1809,8 @@ class Rediscovery:
             bridge_debug_log_path=bridge_debug_log_path,
             bridge_raw_log_path=bridge_raw_log_path,
             environment_id=ptr.environment_id,
-            starter_session_id=ptr.session_id,
+            # A stripped pointer's "" is no session, not an id (see `_connect_facts_for`).
+            starter_session_id=ptr.session_id or None,
             url=f"https://claude.ai/code?environment={ptr.environment_id}",
         )
 

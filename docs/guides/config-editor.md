@@ -52,7 +52,7 @@ Only the **Tier-A allowlist** of day-to-day operational fields appears here:
 | `(top-level)` | `log_format` |
 | `api` | `openapi_enabled` |
 | `claude` | `min_version`, `agents_json_poll_interval_seconds`, `startup_grace_seconds`, `auto_enable_remote_control`, `resume_recap`, `resume_recap_max_chars`, `launch_mode`, `pty_screen_enabled` |
-| `instance_defaults` | `spawn_mode`, `permission_mode`, `verbose`, `session_name_prefix`, `capacity`, `max_bridges` |
+| `instance_defaults` | `spawn_mode`, `permission_mode`, `verbose`, `allow_force_restart`, `session_name_prefix`, `capacity`, `max_bridges` |
 | `claustrum` | `enabled`, `socket_path`, `spawn_timeout_seconds`, `keep_children`, `request_timeout_seconds` |
 | `logs` | `bridge_log_max_size_mb`, `keep_rotated`, `redact_session_url`, `strip_ansi_in_stream`, `retention_max_age_days`, `retention_max_files`, `retention_max_total_mb` |
 | `reaper` | `ui_enabled` |

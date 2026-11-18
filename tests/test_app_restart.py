@@ -8,6 +8,7 @@ and daemon from ``test_app_hosted`` so the focus is the route's ordering and err
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import threading
 import time
@@ -16,7 +17,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import clauster.routes.instances as instances_module
-from clauster import claude_cli
+from clauster import claude_cli, environments, pointers
 from clauster.app import create_app
 from clauster.claustrum_client import ClaustrumError
 from clauster.hosted import HostedAgentMayBeRunning, HostedSessionError
@@ -58,6 +59,390 @@ def test_restart_standard_bridge_starts_a_new_process(runner_config, monkeypatch
         client.delete(f"/api/instances/{iid}")
 
 
+def test_restart_never_passes_the_no_create_flag(runner_config, monkeypatch):
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    config, _claude_json = runner_config
+    config.instance_defaults.allow_force_restart = True  # even with Force restart on
+    app, _runner = _bridge_app(runner_config)
+    with TestClient(app) as client:
+        iid = client.post("/api/instances", json={"project": "alpha"}).json()["instance_id"]
+        r = client.post(f"/api/instances/{iid}/restart")
+        assert r.status_code == 200, r.text
+        assert "--no-create-session-in-dir" not in _argv(r.json())
+        # Only Force restart writes a pointer: a plain bridge writes its own.
+        assert (
+            pointers.pointer_for_project(
+                _runner._project_path("alpha"), _runner.claude_projects_dir
+            )
+            is None
+        )
+        client.delete(f"/api/instances/{iid}")
+
+
+# -- Force restart -----------------------------------------------------------
+
+
+class _FakeEnvClient:
+    """Stands in for environments.EnvironmentsClient: records archives, can fail."""
+
+    def __init__(self, fail_status: int | None = None, raises: Exception | None = None) -> None:
+        self.archived: list[str] = []
+        self.fail_status = fail_status
+        self.raises = raises
+
+    def archive_environment(self, env_id: str) -> None:
+        self.archived.append(env_id)
+        if self.raises is not None:
+            raise self.raises
+        if self.fail_status is not None:
+            raise environments.EnvironmentsAPIError(
+                self.fail_status, f"Environment {env_id} not found."
+            )
+
+
+def _force_app(runner_config, monkeypatch, *, fail_status=None, raises=None, creds_error=False):
+    """A bridge app with Force restart on and the environments API stubbed out."""
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    config, claude_json = runner_config
+    config.instance_defaults.allow_force_restart = True
+    fake = _FakeEnvClient(fail_status, raises)
+
+    def _load(credentials_path, claude_json_path, **_k):
+        # The login beside the runner's own claude.json, never the real HOME's.
+        assert credentials_path == claude_json.parent / ".claude" / ".credentials.json"
+        assert claude_json_path == claude_json
+        if creds_error:
+            raise environments.CredentialsError("no credentials file")
+        return object()
+
+    monkeypatch.setattr(environments, "load_credentials", _load)
+    monkeypatch.setattr(environments, "EnvironmentsClient", lambda _creds: fake)
+    app, runner = _bridge_app(runner_config)
+    return app, runner, fake
+
+
+def _seed_pointer(runner, project="alpha"):
+    """Write a non-live bridge pointer for ``project`` and return its path."""
+    path = pointers.pointer_path_for(runner._project_path(project), runner.claude_projects_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "sessionId": "",
+                "environmentId": "env_01RHE7cHW3DawXjGRp5Ae3va",
+                "source": "standalone",
+                "pid": 81750,  # long dead -> not live
+                "procStart": "2590192",
+            }
+        )
+    )
+    return path
+
+
+def test_force_restart_is_off_by_default(runner_config, monkeypatch):
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    app, runner = _bridge_app(runner_config)
+    with TestClient(app) as client:
+        first = client.post("/api/instances", json={"project": "alpha"}).json()
+        r = client.post(f"/api/instances/{first['instance_id']}/force-restart")
+        assert r.status_code == 403
+        assert "allow_force_restart" in r.json()["detail"]
+        assert runner.get_instance(first["instance_id"]).bridge_pid == first["bridge_pid"]
+        client.delete(f"/api/instances/{first['instance_id']}")
+
+
+def test_dashboard_shows_force_restart_only_when_on(write_config):
+    from clauster.config import load_config
+
+    def _page(extra: str) -> str:
+        with TestClient(create_app(load_config(write_config(extra)))) as client:
+            return client.get("/").text
+
+    assert 'data-test="force-restart-session"' not in _page("")
+    on = _page("instance_defaults:\n  allow_force_restart: true\n")
+    assert 'data-test="force-restart-session"' in on
+    assert "restart(i.rk, true)" in on
+    assert "i.resume_mode !== 'pty' && !!i.environment_id" in on  # only where it can work
+    assert "This ARCHIVES the bridge's cloud environment" in on  # the confirm says so
+    # A bridge with no starter session has no session_url: the Open link and QR fall back to
+    # the environment link, like the QR route, or the row spins on "Preparing connect link…".
+    assert "const u = row.session_url || row.url;" in on
+
+
+def test_force_restart_archives_env_drops_pointer_and_skips_session(runner_config, monkeypatch):
+    app, runner, fake = _force_app(runner_config, monkeypatch)
+    with TestClient(app) as client:
+        first = client.post("/api/instances", json={"project": "alpha"})
+        assert first.status_code == 201, first.text
+        iid = first.json()["instance_id"]
+        env_id = runner.get_instance(iid).environment_id
+        assert env_id  # the fake claude logs one, as the real bridge does
+        pointer = _seed_pointer(runner)
+
+        r = client.post(f"/api/instances/{iid}/force-restart")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["status"] == "running"
+        assert body["bridge_pid"] != first.json()["bridge_pid"]
+        assert fake.archived == [env_id]  # its own environment, nothing else
+        assert pointer.with_name(pointer.name + ".bak").exists()
+        # The old pointer is gone (or the next plain start revives the archived env). The new
+        # bridge writes none itself, so clauster writes one naming the NEW environment and pid;
+        # without it a clauster restart reattaches the live bridge as STARTING forever.
+        new = runner.get_instance(iid)
+        if new.bridge_start_ticks is None:  # macOS/Windows: no CLI-format procStart
+            assert not pointer.exists()
+            assert any("without a bridge pointer" in w for w in body["warnings"])
+        else:
+            written = pointers.load_pointer(pointer)
+            assert written is not None
+            assert written.environment_id == new.environment_id
+            assert written.environment_id != "env_01RHE7cHW3DawXjGRp5Ae3va"  # not the old one
+            assert written.session_id == ""
+            assert written.pid == body["bridge_pid"]
+            # The CLI's procStart format: boot-relative ticks, not our epoch float. A wrong
+            # format still parses as "no comparable start" and is accepted, so pin it.
+            assert written.proc_start == str(new.bridge_start_ticks)
+            assert pointers.is_live(written)  # what the reattach reads to say RUNNING
+            assert body["warnings"] == []
+        argv = _argv(body)
+        assert "--no-create-session-in-dir" in argv
+        assert "remote-control" in argv
+        assert iid not in app.state.restarts_in_flight
+
+        # A later plain Resume is a normal start again: it keeps the pre-created session.
+        assert client.delete(f"/api/instances/{iid}").status_code == 200
+        resumed = client.post(f"/api/instances/{iid}/resume")
+        assert resumed.status_code == 200, resumed.text
+        assert "--no-create-session-in-dir" not in _argv(resumed.json())
+        client.delete(f"/api/instances/{iid}")
+
+
+def test_force_restarted_bridge_reattaches_running_after_a_clauster_restart(
+    runner_config, monkeypatch
+):
+    # Seen live: after a clauster restart the force-restarted podspine row sat on "Starting"
+    # forever, because the bridge writes no pointer and a reattach says RUNNING only from a
+    # live one. A second runner on the same state is that restart.
+    app, runner, _fake = _force_app(runner_config, monkeypatch)
+    config, claude_json = runner_config
+    with TestClient(app) as client:
+        iid = client.post("/api/instances", json={"project": "alpha"}).json()["instance_id"]
+        r = client.post(f"/api/instances/{iid}/force-restart")
+        assert r.status_code == 200, r.text
+        if runner.get_instance(iid).bridge_start_ticks is None:
+            pytest.skip("no CLI-format procStart on this OS, so no pointer is written")
+
+        restarted = SessionRunner(config, claude_json=claude_json)
+        # The reattach reads the pointer from the default ~/.claude/projects, which in prod is
+        # the runner's own dir; here claude.json sits in a tmp dir, so point it there.
+        real_lookup = pointers.pointer_for_project
+        monkeypatch.setattr(
+            "clauster.rediscovery.pointers.pointer_for_project",
+            lambda path, *_a: real_lookup(path, restarted.claude_projects_dir),
+        )
+        asyncio.run(restarted.rediscover(persist=False))
+        again = restarted.get_instance(iid)
+        assert again is not None
+        assert again.status is InstanceStatus.RUNNING
+        assert again.environment_id == r.json()["environment_id"]
+        assert again.url == f"https://claude.ai/code?environment={again.environment_id}"
+        assert again.starter_session_id is None  # the stripped pointer's "" is no session
+        assert again.session_url is None  # never the broken https://claude.ai/code/?from=cli
+        client.delete(f"/api/instances/{iid}")
+
+
+def test_force_restart_without_start_ticks_warns_instead_of_writing(runner_config, monkeypatch):
+    # macOS/Windows have no CLI-format procStart: no pointer, and the response says why.
+    from clauster import procutil
+
+    app, runner, _fake = _force_app(runner_config, monkeypatch)
+    with TestClient(app) as client:
+        iid = client.post("/api/instances", json={"project": "alpha"}).json()["instance_id"]
+        real = procutil.proc_start_pair
+        monkeypatch.setattr(procutil, "proc_start_pair", lambda pid: (real(pid)[0], None))
+        r = client.post(f"/api/instances/{iid}/force-restart")
+        assert r.status_code == 200, r.text
+        assert any("without a bridge pointer" in w for w in r.json()["warnings"])
+        assert (
+            pointers.pointer_for_project(runner._project_path("alpha"), runner.claude_projects_dir)
+            is None
+        )
+        client.delete(f"/api/instances/{iid}")
+
+
+def test_force_restart_pointer_write_failure_is_a_warning(runner_config, monkeypatch):
+    app, runner, _fake = _force_app(runner_config, monkeypatch)
+
+    def _boom(*_a, **_k):
+        raise OSError("read-only file system")
+
+    with TestClient(app) as client:
+        iid = client.post("/api/instances", json={"project": "alpha"}).json()["instance_id"]
+        monkeypatch.setattr(pointers, "write_reuse_pointer", _boom)
+        r = client.post(f"/api/instances/{iid}/force-restart")
+        assert r.status_code == 200, r.text  # the bridge runs; only the pointer is missing
+        assert r.json()["status"] == "running"
+        # A host without start ticks (Windows; macOS) never reaches the write: it gets the
+        # no-ticks warning instead, which test_..._without_start_ticks_... covers on Linux.
+        expected = (
+            "without a bridge pointer"
+            if runner.get_instance(iid).bridge_start_ticks is None
+            else "could not write the bridge pointer"
+        )
+        assert any(expected in w for w in r.json()["warnings"]), r.json()["warnings"]
+        client.delete(f"/api/instances/{iid}")
+
+
+def test_force_restart_treats_a_gone_environment_as_clear(runner_config, monkeypatch):
+    app, _runner, fake = _force_app(runner_config, monkeypatch, fail_status=404)
+    with TestClient(app) as client:
+        iid = client.post("/api/instances", json={"project": "alpha"}).json()["instance_id"]
+        r = client.post(f"/api/instances/{iid}/force-restart")
+        assert r.status_code == 200, r.text
+        assert len(fake.archived) == 1
+        assert "--no-create-session-in-dir" in _argv(r.json())
+        client.delete(f"/api/instances/{iid}")
+
+
+def test_force_restart_failed_archive_stops_without_starting(runner_config, monkeypatch):
+    app, runner, _fake = _force_app(runner_config, monkeypatch, fail_status=500)
+    with TestClient(app) as client:
+        first = client.post("/api/instances", json={"project": "alpha"}).json()
+        iid = first["instance_id"]
+        env_id = runner.get_instance(iid).environment_id
+        r = client.post(f"/api/instances/{iid}/force-restart")
+        assert r.status_code == 502
+        detail = r.json()["detail"]
+        assert "stopped, but it did not start again" in detail
+        assert "archive" in detail
+        assert env_id not in detail  # an env_ id is a bearer credential: redacted
+        row = runner.get_instance(iid)
+        assert row.status is InstanceStatus.STOPPED
+        assert str(row.bridge_debug_log_path) == first["bridge_debug_log_path"]  # no new spawn
+
+
+def test_force_restart_network_error_stops_without_starting(runner_config, monkeypatch):
+    # The transport raises timeouts and TLS errors unwrapped; they must not become a bare 500.
+    app, runner, _fake = _force_app(runner_config, monkeypatch, raises=TimeoutError("timed out"))
+    with TestClient(app) as client:
+        iid = client.post("/api/instances", json={"project": "alpha"}).json()["instance_id"]
+        r = client.post(f"/api/instances/{iid}/force-restart")
+        assert r.status_code == 502
+        assert "stopped, but it did not start again" in r.json()["detail"]
+        assert runner.get_instance(iid).status is InstanceStatus.STOPPED
+
+
+def test_force_restart_live_pointer_refuses_before_the_archive(runner_config, monkeypatch):
+    # Another live bridge owns the folder's pointer: its environment is never archived.
+    app, runner, fake = _force_app(runner_config, monkeypatch)
+    with TestClient(app) as client:
+        iid = client.post("/api/instances", json={"project": "alpha"}).json()["instance_id"]
+        _seed_pointer(runner)
+        monkeypatch.setattr(pointers, "is_live", lambda _ptr: True)
+        r = client.post(f"/api/instances/{iid}/force-restart")
+        assert r.status_code == 409
+        assert "another live bridge" in r.json()["detail"]
+        assert fake.archived == []
+        assert runner.get_instance(iid).status is InstanceStatus.STOPPED
+
+
+def test_force_restart_pointer_that_cannot_go_stops_without_starting(runner_config, monkeypatch):
+    app, runner, fake = _force_app(runner_config, monkeypatch)
+
+    def _boom(*_a, **_k):
+        raise OSError("read-only file system")
+
+    with TestClient(app) as client:
+        iid = client.post("/api/instances", json={"project": "alpha"}).json()["instance_id"]
+        monkeypatch.setattr(pointers, "remove_pointer", _boom)
+        r = client.post(f"/api/instances/{iid}/force-restart")
+        assert r.status_code == 409
+        assert "could not remove its bridge pointer" in r.json()["detail"]
+        assert len(fake.archived) == 1
+        assert runner.get_instance(iid).status is InstanceStatus.STOPPED
+
+
+def test_force_restart_refuses_a_stopped_row(runner_config, monkeypatch):
+    # A stopped row's recorded id may name an environment a later bridge reused and serves.
+    app, runner, fake = _force_app(runner_config, monkeypatch)
+    with TestClient(app) as client:
+        iid = client.post("/api/instances", json={"project": "alpha"}).json()["instance_id"]
+        assert client.delete(f"/api/instances/{iid}").status_code == 200
+        r = client.post(f"/api/instances/{iid}/force-restart")
+        assert r.status_code == 409
+        assert "needs a running bridge" in r.json()["detail"]
+        assert fake.archived == []
+
+
+def test_force_restart_refuses_a_malformed_env_id(runner_config, monkeypatch):
+    app, runner, fake = _force_app(runner_config, monkeypatch)
+    with TestClient(app) as client:
+        first = client.post("/api/instances", json={"project": "alpha"}).json()
+        runner.get_instance(first["instance_id"]).environment_id = "env_x/../../v1/other"
+        r = client.post(f"/api/instances/{first['instance_id']}/force-restart")
+        assert r.status_code == 409
+        assert fake.archived == []
+        assert runner.get_instance(first["instance_id"]).bridge_pid == first["bridge_pid"]
+        client.delete(f"/api/instances/{first['instance_id']}")
+
+
+def test_force_restart_without_login_refuses_before_the_stop(runner_config, monkeypatch):
+    app, runner, fake = _force_app(runner_config, monkeypatch, creds_error=True)
+    with TestClient(app) as client:
+        first = client.post("/api/instances", json={"project": "alpha"}).json()
+        r = client.post(f"/api/instances/{first['instance_id']}/force-restart")
+        assert r.status_code == 503
+        assert "claude login" in r.json()["detail"]
+        assert fake.archived == []
+        assert runner.get_instance(first["instance_id"]).bridge_pid == first["bridge_pid"]
+        client.delete(f"/api/instances/{first['instance_id']}")
+
+
+def test_force_restart_without_env_id_refuses_before_the_stop(runner_config, monkeypatch):
+    app, runner, fake = _force_app(runner_config, monkeypatch)
+    with TestClient(app) as client:
+        first = client.post("/api/instances", json={"project": "alpha"}).json()
+        runner.get_instance(first["instance_id"]).environment_id = None
+        r = client.post(f"/api/instances/{first['instance_id']}/force-restart")
+        assert r.status_code == 409
+        assert "no cloud environment" in r.json()["detail"]
+        assert fake.archived == []
+        assert runner.get_instance(first["instance_id"]).bridge_pid == first["bridge_pid"]
+        client.delete(f"/api/instances/{first['instance_id']}")
+
+
+@_POSIX_ONLY
+def test_force_restart_refuses_a_pty_bridge_before_the_stop(runner_config, monkeypatch):
+    app, runner, fake = _force_app(runner_config, monkeypatch)
+    with TestClient(app) as client:
+        first = client.post("/api/instances", json={"project": "alpha", "resume_mode": "pty"})
+        assert first.status_code == 201, first.text
+        iid = first.json()["instance_id"]
+        r = client.post(f"/api/instances/{iid}/force-restart")
+        assert r.status_code == 409
+        assert "standard" in r.json()["detail"]
+        assert fake.archived == []
+        assert runner.get_instance(iid).status is InstanceStatus.RUNNING
+        client.delete(f"/api/instances/{iid}")
+
+
+def test_force_restart_refuses_a_hosted_row(write_config, projects_root):
+    manager = _StubManager()
+    manager.seed()
+    app = _app(
+        write_config,
+        manager=manager,
+        daemon=_StubDaemon(),
+        extra_config="instance_defaults:\n  allow_force_restart: true\n",
+    )
+    with TestClient(app) as client:
+        r = client.post(f"/api/instances/{_HID}/force-restart")
+    assert r.status_code == 409
+    assert "standard" in r.json()["detail"]
+    assert manager.stopped == []
+
+
 @_POSIX_ONLY
 def test_restart_pty_bridge_continues_the_conversation(runner_config):
     app, _runner = _bridge_app(runner_config)
@@ -82,7 +467,7 @@ def test_restart_bridge_failing_start_leaves_a_true_stopped_row(runner_config, m
         first = client.post("/api/instances", json={"project": "alpha"})
         iid = first.json()["instance_id"]
 
-        async def _boom(_iid):
+        async def _boom(_iid, **_kw):
             raise SpawnError("bridge would not come back up")
 
         monkeypatch.setattr(runner, "resume_detailed", _boom)
@@ -336,7 +721,7 @@ def test_restart_bridge_precondition_failure_does_not_notify(runner_config, monk
     with TestClient(app) as client:
         iid = client.post("/api/instances", json={"project": "alpha"}).json()["instance_id"]
 
-        async def _denied(_iid: str):
+        async def _denied(_iid: str, **_kw):
             raise PermissionModeNotAllowed("bypassPermissions is not allowed")
 
         monkeypatch.setattr(runner, "resume_detailed", _denied)
@@ -354,7 +739,7 @@ def test_restart_bridge_spawn_failure_notifies(runner_config, monkeypatch):
     with TestClient(app) as client:
         iid = client.post("/api/instances", json={"project": "alpha"}).json()["instance_id"]
 
-        async def _boom(_iid: str):
+        async def _boom(_iid: str, **_kw):
             raise SpawnError("nope")
 
         monkeypatch.setattr(runner, "resume_detailed", _boom)
