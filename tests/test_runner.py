@@ -1749,6 +1749,28 @@ async def test_adopt_promotes_external_standard_session(runner_config, monkeypat
     assert any(v.get("project_name") == "alpha" for v in fresh._persisted.values())
 
 
+async def test_adopt_of_a_stripped_pointer_has_no_broken_session_link(runner_config, monkeypatch):
+    # The stripped pointer (#1580, and the one Force restart writes) carries sessionId "".
+    # Passed through, the card's deep link became https://claude.ai/code/?from=cli.
+    ptr = _FakePtr()
+    ptr.session_id = ""
+    runner = _make_runner(runner_config)
+    monkeypatch.setattr(
+        "clauster.pointers.pointer_for_project",
+        lambda path: ptr if path.name == "alpha" else None,
+    )
+    monkeypatch.setattr("clauster.runner.procutil.is_live_standard_bridge", lambda *a, **k: True)
+    monkeypatch.setattr(
+        "clauster.runner.procutil.proc_cwd",
+        lambda pid: (runner_config[0].projects_root / "alpha").resolve(),
+    )
+
+    inst = await runner.adopt("alpha")
+    assert inst.starter_session_id is None
+    assert inst.session_url is None
+    assert inst.url == "https://claude.ai/code?environment=env_x"
+
+
 async def test_adopt_refuses_pty_or_dead_external(runner_config, monkeypatch):
     # is_live_standard_bridge is False for a pty (flag-form) bridge OR a pointer that
     # went stale between the poll and the click -> fail closed, never partially adopt.

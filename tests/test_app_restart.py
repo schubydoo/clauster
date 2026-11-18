@@ -69,6 +69,13 @@ def test_restart_never_passes_the_no_create_flag(runner_config, monkeypatch):
         r = client.post(f"/api/instances/{iid}/restart")
         assert r.status_code == 200, r.text
         assert "--no-create-session-in-dir" not in _argv(r.json())
+        # Only Force restart writes a pointer: a plain bridge writes its own.
+        assert (
+            pointers.pointer_for_project(
+                _runner._project_path("alpha"), _runner.claude_projects_dir
+            )
+            is None
+        )
         client.delete(f"/api/instances/{iid}")
 
 
@@ -178,8 +185,26 @@ def test_force_restart_archives_env_drops_pointer_and_skips_session(runner_confi
         assert body["status"] == "running"
         assert body["bridge_pid"] != first.json()["bridge_pid"]
         assert fake.archived == [env_id]  # its own environment, nothing else
-        assert not pointer.exists()  # or the next plain start revives the archived env
         assert pointer.with_name(pointer.name + ".bak").exists()
+        # The old pointer is gone (or the next plain start revives the archived env). The new
+        # bridge writes none itself, so clauster writes one naming the NEW environment and pid;
+        # without it a clauster restart reattaches the live bridge as STARTING forever.
+        new = runner.get_instance(iid)
+        if new.bridge_start_ticks is None:  # macOS/Windows: no CLI-format procStart
+            assert not pointer.exists()
+            assert any("without a bridge pointer" in w for w in body["warnings"])
+        else:
+            written = pointers.load_pointer(pointer)
+            assert written is not None
+            assert written.environment_id == new.environment_id
+            assert written.environment_id != "env_01RHE7cHW3DawXjGRp5Ae3va"  # not the old one
+            assert written.session_id == ""
+            assert written.pid == body["bridge_pid"]
+            # The CLI's procStart format: boot-relative ticks, not our epoch float. A wrong
+            # format still parses as "no comparable start" and is accepted, so pin it.
+            assert written.proc_start == str(new.bridge_start_ticks)
+            assert pointers.is_live(written)  # what the reattach reads to say RUNNING
+            assert body["warnings"] == []
         argv = _argv(body)
         assert "--no-create-session-in-dir" in argv
         assert "remote-control" in argv
@@ -190,6 +215,75 @@ def test_force_restart_archives_env_drops_pointer_and_skips_session(runner_confi
         resumed = client.post(f"/api/instances/{iid}/resume")
         assert resumed.status_code == 200, resumed.text
         assert "--no-create-session-in-dir" not in _argv(resumed.json())
+        client.delete(f"/api/instances/{iid}")
+
+
+def test_force_restarted_bridge_reattaches_running_after_a_clauster_restart(
+    runner_config, monkeypatch
+):
+    # Seen live: after a clauster restart the force-restarted podspine row sat on "Starting"
+    # forever, because the bridge writes no pointer and a reattach says RUNNING only from a
+    # live one. A second runner on the same state is that restart.
+    app, runner, _fake = _force_app(runner_config, monkeypatch)
+    config, claude_json = runner_config
+    with TestClient(app) as client:
+        iid = client.post("/api/instances", json={"project": "alpha"}).json()["instance_id"]
+        r = client.post(f"/api/instances/{iid}/force-restart")
+        assert r.status_code == 200, r.text
+        if runner.get_instance(iid).bridge_start_ticks is None:
+            pytest.skip("no CLI-format procStart on this OS, so no pointer is written")
+
+        restarted = SessionRunner(config, claude_json=claude_json)
+        # The reattach reads the pointer from the default ~/.claude/projects, which in prod is
+        # the runner's own dir; here claude.json sits in a tmp dir, so point it there.
+        real_lookup = pointers.pointer_for_project
+        monkeypatch.setattr(
+            "clauster.rediscovery.pointers.pointer_for_project",
+            lambda path, *_a: real_lookup(path, restarted.claude_projects_dir),
+        )
+        asyncio.run(restarted.rediscover(persist=False))
+        again = restarted.get_instance(iid)
+        assert again is not None
+        assert again.status is InstanceStatus.RUNNING
+        assert again.environment_id == r.json()["environment_id"]
+        assert again.url == f"https://claude.ai/code?environment={again.environment_id}"
+        assert again.starter_session_id is None  # the stripped pointer's "" is no session
+        assert again.session_url is None  # never the broken https://claude.ai/code/?from=cli
+        client.delete(f"/api/instances/{iid}")
+
+
+def test_force_restart_without_start_ticks_warns_instead_of_writing(runner_config, monkeypatch):
+    # macOS/Windows have no CLI-format procStart: no pointer, and the response says why.
+    from clauster import procutil
+
+    app, runner, _fake = _force_app(runner_config, monkeypatch)
+    with TestClient(app) as client:
+        iid = client.post("/api/instances", json={"project": "alpha"}).json()["instance_id"]
+        real = procutil.proc_start_pair
+        monkeypatch.setattr(procutil, "proc_start_pair", lambda pid: (real(pid)[0], None))
+        r = client.post(f"/api/instances/{iid}/force-restart")
+        assert r.status_code == 200, r.text
+        assert any("without a bridge pointer" in w for w in r.json()["warnings"])
+        assert (
+            pointers.pointer_for_project(runner._project_path("alpha"), runner.claude_projects_dir)
+            is None
+        )
+        client.delete(f"/api/instances/{iid}")
+
+
+def test_force_restart_pointer_write_failure_is_a_warning(runner_config, monkeypatch):
+    app, _runner, _fake = _force_app(runner_config, monkeypatch)
+
+    def _boom(*_a, **_k):
+        raise OSError("read-only file system")
+
+    with TestClient(app) as client:
+        iid = client.post("/api/instances", json={"project": "alpha"}).json()["instance_id"]
+        monkeypatch.setattr(pointers, "write_reuse_pointer", _boom)
+        r = client.post(f"/api/instances/{iid}/force-restart")
+        assert r.status_code == 200, r.text  # the bridge runs; only the pointer is missing
+        assert r.json()["status"] == "running"
+        assert any("could not write the bridge pointer" in w for w in r.json()["warnings"])
         client.delete(f"/api/instances/{iid}")
 
 

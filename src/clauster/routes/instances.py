@@ -928,12 +928,51 @@ async def _restart_bridge(
                 f"Restarting the bridge for {instance_id!r} failed.",
             )
         raise _restart_failed("bridge", exc) from exc
+    warnings = list(outcome.warnings)
+    if force and outcome.created:
+        warning = await _write_reuse_pointer(outcome.instance, path, runner)
+        if warning is not None:
+            warnings.append(warning)
     return _spawn_body(
         outcome.instance,
         created=outcome.created,
         reason=outcome.reason,
-        warnings=outcome.warnings,
+        warnings=warnings,
     )
+
+
+async def _write_reuse_pointer(
+    instance: RemoteControlInstance, path: Path, runner: SessionRunner
+) -> str | None:
+    """Write the pointer a Force-restarted bridge never writes itself; return a warning.
+
+    Without it a clauster restart reattaches the live bridge as STARTING forever (connect
+    facts come from a live pointer), and a later plain start cannot reuse the environment.
+    Needs the environment id and the boot-relative start ticks, which the CLI writes as
+    ``procStart``; a host without ticks (macOS, Windows) gets the warning instead. A failed
+    write never fails the restart: the bridge is already running.
+    """
+    env_id = instance.environment_id
+    if not env_id or instance.bridge_pid is None or instance.bridge_start_ticks is None:
+        return (
+            "the bridge runs without a bridge pointer; after a Clauster restart its row "
+            "shows Starting until you stop it"
+        )
+    try:
+        await asyncio.to_thread(
+            pointers.write_reuse_pointer,
+            path,
+            environment_id=env_id,
+            pid=instance.bridge_pid,
+            proc_start=str(instance.bridge_start_ticks),
+            claude_projects_dir=runner.claude_projects_dir,
+        )
+    except OSError as exc:
+        logger.warning("could not write the bridge pointer for %s: %s", instance.project, exc)
+        return (
+            "could not write the bridge pointer; after a Clauster restart the row shows Starting"
+        )
+    return None
 
 
 async def _force_restart_preflight(
