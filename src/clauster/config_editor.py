@@ -56,7 +56,7 @@ EDITABLE_FIELDS: tuple[str, ...] = (
     "instance_defaults.spawn_mode",
     "instance_defaults.permission_mode",
     "instance_defaults.verbose",
-    "instance_defaults.create_session_on_restart",
+    "instance_defaults.allow_force_restart",
     "instance_defaults.session_name_prefix",
     "instance_defaults.capacity",
     "instance_defaults.max_bridges",
@@ -599,7 +599,7 @@ FIELD_LABELS: dict[str, str] = {
     "instance_defaults.spawn_mode": "Where new sessions run",
     "instance_defaults.permission_mode": "Default permission mode",
     "instance_defaults.verbose": "Verbose bridge logging",
-    "instance_defaults.create_session_on_restart": "Create a session on Restart",
+    "instance_defaults.allow_force_restart": "Force restart button",
     "instance_defaults.session_name_prefix": "Session name prefix",
     "instance_defaults.capacity": "Sessions per Server Mode bridge",
     "instance_defaults.max_bridges": "Max concurrent bridges",
@@ -749,11 +749,11 @@ FIELD_DESCRIPTIONS: dict[str, str] = {
         "Deprecated. Use “Usage badge mode” → Off to hide the badge; usage.mode now takes "
         "precedence and show_cost only applies when mode is unset."
     ),
-    "instance_defaults.create_session_on_restart": (
-        "Applies to the Restart action of Server Mode (standard) bridges only. Off passes "
-        "--no-create-session-in-dir, so the restarted bridge waits without a session until you "
-        "start one from claude.ai/code. First launch and Resume are unchanged, and an "
-        "Interactive Session (pty) restart always continues its conversation."
+    "instance_defaults.allow_force_restart": (
+        "Applies to Server Mode (standard) bridges only. Shows a Force restart button that "
+        "archives the bridge's cloud environment, deletes its bridge pointer and starts it "
+        "again with --no-create-session-in-dir. Every session in the old environment ends. "
+        "Plain Restart is unchanged. Takes effect after a Clauster restart."
     ),
     "instance_defaults.verbose": (
         "Applies to Server Mode (standard) `claude remote-control` bridges only (every spawn "

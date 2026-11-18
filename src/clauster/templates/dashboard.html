@@ -1013,6 +1013,18 @@
                           title="Restart: stop this bridge and start it again, so it runs the claude binary installed now.">
                     <span class="spinner-border spinner-border-sm me-1" x-show="!!restarting[i.rk]" x-cloak></span>
                     <span x-text="restarting[i.rk] ? 'Restarting…' : 'Restart'">Restart</span></button>
+                  {% if force_restart_enabled %}
+                  {# Force restart (instance_defaults.allow_force_restart): standard bridges only.
+                     It archives the bridge's cloud environment, so the confirm in restart() says
+                     that every session in it ends. Shares the Restart single-flight slot. #}
+                  <button type="button" class="btn btn-sm btn-outline-warning" data-test="force-restart-session"
+                          @click="restart(i.rk, true)"
+                          x-show="i.resume_mode !== 'pty'" x-cloak
+                          :disabled="!!restarting[i.rk] || isStopping(i.rk) || isBusy(i.rk)"
+                          :aria-label="'Force restart ' + i.project + ': archives its cloud environment'"
+                          title="Force restart: archive this bridge's cloud environment and start it in a new one, with no session.">
+                    Force restart</button>
+                  {% endif %}
                   <button type="button" class="btn btn-sm btn-outline-danger" data-test="stop-session" @click="stop(i.rk)"
                           :disabled="isStopping(i.rk) || !!restarting[i.rk]">
                     <span class="spinner-border spinner-border-sm me-1" x-show="isStopping(i.rk)" x-cloak></span>

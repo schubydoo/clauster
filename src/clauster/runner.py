@@ -621,6 +621,11 @@ class SessionRunner:
         return self._claude_json
 
     @property
+    def claude_projects_dir(self) -> Path:
+        """The ``~/.claude/projects`` dir beside :attr:`claude_json`, where pointers live."""
+        return self._claude_projects_dir
+
+    @property
     def persistence(self) -> Persistence:
         """The shared persistence container (engine + DB-backed stores)."""
         return self._persistence

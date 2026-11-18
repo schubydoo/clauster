@@ -211,9 +211,10 @@ list.
    **Restart** on a running card stops the bridge and starts it again with the same
    settings, so it runs the Claude Code version that is installed now. A standard
    bridge ends its live remote sessions; an *Interactive Session* continues the same
-   conversation. Set `instance_defaults.create_session_on_restart: false` and a
-   restarted standard bridge creates no new session until you open one. It still
-   re-adopts a recent session that its bridge pointer names.
+   conversation. Set `instance_defaults.allow_force_restart: true` for a
+   **Force restart** button on standard bridges. It archives the bridge's cloud
+   environment and starts the bridge in a new one with no session. Every session
+   in the old environment ends.
 
 > Exposing this beyond loopback (e.g. on your LAN)? Read
 > [Auth & networking](#auth--networking) first — a non-loopback bind requires

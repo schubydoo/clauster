@@ -46,6 +46,8 @@ async def _dashboard_context(config: ClausterConfig, engine: ClausterEngine) -> 
         # unlock form on this, not on auth_enabled.
         "auth_password_set": config.auth.password_hash is not None,
         "reaper_ui_enabled": config.reaper.ui_enabled,
+        # Force restart (archives a standard bridge's environment) renders only when on.
+        "force_restart_enabled": config.instance_defaults.allow_force_restart,
         "default_spawn_mode": config.instance_defaults.spawn_mode,
         "default_permission_mode": config.instance_defaults.permission_mode,
         "default_resume_mode": config.claude.launch_mode,

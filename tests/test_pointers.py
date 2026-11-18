@@ -306,3 +306,44 @@ def test_clear_pointer_backup_failure_still_clears(
     assert pointers.clear_pointer(proj, claude_projects_dir=tmp_path) is True
     assert _kept_env_only(path)
     assert not path.with_name(path.name + ".bak").exists()
+
+
+# ----- remove_pointer (Force restart) --------------------------------------------
+
+
+def test_remove_pointer_absent_returns_false(tmp_path: Path):
+    assert pointers.remove_pointer(Path("/no/such/project"), claude_projects_dir=tmp_path) is False
+
+
+def test_remove_pointer_deletes_env_id_too_and_backs_up(tmp_path: Path):
+    # Unlike clear_pointer, nothing is kept: a kept environment id would let the next plain
+    # start reuse, and so revive, the environment Force restart just archived.
+    proj = Path("/mnt/nas/projects/alpha")
+    path = _write_pointer(tmp_path, proj)
+    original = path.read_bytes()
+    assert pointers.remove_pointer(proj, claude_projects_dir=tmp_path) is True
+    assert not path.exists()
+    assert path.with_name(path.name + ".bak").read_bytes() == original
+
+
+def test_remove_pointer_refuses_live(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    proj = Path("/mnt/nas/projects/alpha")
+    path = _write_pointer(tmp_path, proj)
+    monkeypatch.setattr(pointers, "is_live", lambda ptr: True)
+    with pytest.raises(pointers.PointerStillLive):
+        pointers.remove_pointer(proj, claude_projects_dir=tmp_path)
+    assert path.exists()
+
+
+def test_remove_pointer_backup_failure_still_deletes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    proj = Path("/mnt/nas/projects/alpha")
+    path = _write_pointer(tmp_path, proj)
+
+    def _boom(self, data):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(Path, "write_bytes", _boom)
+    assert pointers.remove_pointer(proj, claude_projects_dir=tmp_path) is True
+    assert not path.exists()

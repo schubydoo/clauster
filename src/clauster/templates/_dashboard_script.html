@@ -6943,23 +6943,27 @@
       // Restart (TASK-459): one POST that stops the row and resumes it through its own
       // mode path, so the bridge runs the claude binary now on disk. Single-flight per
       // row (restarting[key]); the server refuses a concurrent second restart too.
-      async restart(key) {
+      // force=true is Force restart (instance_defaults.allow_force_restart, standard bridges
+      // only): the server archives the bridge's cloud environment, so the confirm says so.
+      async restart(key, force = false) {
         if (this.restarting[key]) return;
         const row = this.rowOf(key);
         const label = this.labelOf(key);
         const id = this._requireBridgeId(key);
         if (!id) return;
         const pty = row && row.resume_mode === "pty";
-        const loses = pty
+        const loses = force
+          ? "This ARCHIVES the bridge's cloud environment (env_…). Every session in it ends, and its claude.ai link stops working. The bridge then starts in a new environment with no session; open one from claude.ai."
+          : pty
           ? "The interactive session stops, which interrupts a turn in progress, and comes back in the same conversation (--continue)."
           : "Every live remote session on this bridge ends. The bridge then reconnects in the same folder.";
-        if (!window.confirm("Restart the session in \"" + label + "\"?\n\n" + loses
-            + "\n\nThe new process runs the claude version installed now.")) return;
+        if (!window.confirm((force ? "Force restart" : "Restart") + " the session in \"" + label
+            + "\"?\n\n" + loses + "\n\nThe new process runs the claude version installed now.")) return;
         this.restarting[key] = true;
         this.restartError[key] = null;
         try {
           const res = await fetch(ROOT + "/api/instances/" + encodeURIComponent(id)
-                                  + "/restart", { method: "POST" });
+                                  + (force ? "/force-restart" : "/restart"), { method: "POST" });
           if (this._authExpired(res)) return;
           const body = await res.json().catch(() => ({}));
           if (!res.ok) {

@@ -969,8 +969,8 @@ class SpawnCoordinator:
             # live standard bridge in the same project (#777).
             resume_target=existing,
             custom_name=carried_name,
-            # False only from the Restart route (instance_defaults.create_session_on_restart):
-            # the standard bridge then skips its pre-created session. The pty path ignores it.
+            # False only from Force restart (instance_defaults.allow_force_restart): the
+            # standard bridge then skips its pre-created session. The pty path ignores it.
             create_session=create_session,
         )
 

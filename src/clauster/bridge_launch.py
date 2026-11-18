@@ -90,10 +90,12 @@ class BridgeLaunch:
         project name (#780, via :func:`_normalize_custom_name`).
 
         ``create_session=False`` adds ``--no-create-session-in-dir``, so the bridge does not
-        pre-create a session in its folder (the Restart action, gated on
-        ``instance_defaults.create_session_on_restart``). The CLI accepts it in every spawn
+        pre-create a session in its folder (Force restart, gated on
+        ``instance_defaults.allow_force_restart``). The CLI accepts it in every spawn
         mode; it refuses it only with ``--session-id`` / ``--continue``, which this
-        subcommand argv never carries.
+        subcommand argv never carries. On claude 2.1.327 the same switch also stops the
+        bridge reading or writing ``bridge-pointer.json``, so it never reuses the folder's
+        old environment: Force restart archives that environment first.
 
         It never emits ``--sandbox`` / ``--no-sandbox``: Claude Code 2.1.300 removed both
         from ``claude remote-control`` and exits on either (see

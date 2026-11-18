@@ -41,7 +41,7 @@ instance_defaults:
   # Gated like bypassPermissions: refused (403) on a project without allow_bypass_permissions.
   permission_mode: default   # default | plan | acceptEdits | auto | dontAsk | bypassPermissions | inherit
   capacity: 32               # max sessions within one bridge (claude --capacity)
-  # create_session_on_restart: false   # Restart passes --no-create-session-in-dir (default: true)
+  # allow_force_restart: true   # Force restart button: archives the bridge's env, no session (default: false)
   # session_name_prefix: myteam   # prefix for auto-generated session names (default: hostname)
   # max_bridges: 8           # best-effort cap on remote-control bridges (unset = no limit)
 
