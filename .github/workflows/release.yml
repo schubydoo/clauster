@@ -266,7 +266,7 @@ jobs:
           #                   DIGEST; also keeps the pulled container image digest-pinned)
           # Bump both deliberately and re-validate the prediction; keep every buildx step on
           # the same versions.
-          version: v0.39.0
+          version: v0.39.1
           # renovate: datasource=docker depName=moby/buildkit versioning=docker
           driver-opts: image=moby/buildkit:v0.35.0@sha256:aa632b921ef07411d2cb77292cd34213d4f7b384001d6fceef1e1f25bf9752bb
           # No binary cache in a publish pipeline: nothing for a poisoned cache to swap in,
@@ -440,7 +440,7 @@ jobs:
           #                   DIGEST; also keeps the pulled container image digest-pinned)
           # Bump both deliberately and re-validate the prediction; keep every buildx step on
           # the same versions.
-          version: v0.39.0
+          version: v0.39.1
           # renovate: datasource=docker depName=moby/buildkit versioning=docker
           driver-opts: image=moby/buildkit:v0.35.0@sha256:aa632b921ef07411d2cb77292cd34213d4f7b384001d6fceef1e1f25bf9752bb
           # No binary cache in a publish pipeline: nothing for a poisoned cache to swap in,
