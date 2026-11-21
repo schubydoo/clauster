@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.6.0 (2026-11-21)
+
+[Compare with 1.5.0](https://github.com/schubydoo/clauster/compare/v1.5.0...v1.6.0)
+
+### Features
+
+- Add a Force restart button for standard bridges (`instance_defaults.allow_force_restart`, off by default): it archives the bridge's cloud environment and starts the bridge in a new one with no session. ([#1915](https://github.com/schubydoo/clauster/pull/1915))
+
 ## 1.5.0 (2026-11-17)
 
 [Compare with 1.4.0](https://github.com/schubydoo/clauster/compare/v1.4.0...v1.5.0)
