@@ -140,6 +140,8 @@ EXCLUDED_FIELDS: dict[str, str] = {
     "state_dir": "structural: DB/state path; a wrong value orphans state",
     "root_path": "structural: ASGI sub-path; a wrong value breaks routing/login",
     "instance_name": "structural: cosmetic process label, but structural/identity; left out v1",
+    "instance_defaults.bridge_task_limit": "host containment: moves bridges out of the service "
+    "cgroup and away from its resource limits, so a browser session must not change it",
     "log_level": "diagnostic: `debug` makes the host's server log record far more about what "
     "Clauster is doing, so a browser toggle changes what is retained at rest outside the "
     "dashboard — file/CLI/env-managed only (#993); its sibling log_format is Tier-A because it "

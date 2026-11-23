@@ -445,6 +445,9 @@ straight into `ExecStart`: a frozen standalone binary or a `clauster` console
 script (uv tool / pip / pipx) is invoked directly, as shown above. Only a bare dev
 interpreter falls back to the `python -m clauster run …` form.
 
+To stop one project from using the whole service task limit, see
+[Contain one project's task use](operations.md#contain-one-projects-task-use).
+
 !!! note "`KillMode=process` keeps bridges alive across a restart"
     The generated unit sets **`KillMode=process`** (not systemd's default
     `KillMode=control-group`), so a `systemctl restart` / `stop` signals only the
