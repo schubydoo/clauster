@@ -8,7 +8,7 @@
     "lint:md": "markdownlint-cli2"
   },
   "devDependencies": {
-    "markdownlint-cli2": "0.24.1"
+    "markdownlint-cli2": "0.24.2"
   },
   "overrides": {
     "markdown-it": "15.0.3",
