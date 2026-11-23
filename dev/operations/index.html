@@ -1228,6 +1228,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="The KillMode / systemctl restart caveat">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#contain-one-projects-task-use" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Contain one project's task use
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -1702,6 +1719,23 @@
       
     </span>
   </a>
+  
+    <nav class="md-nav" aria-label="The KillMode / systemctl restart caveat">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#contain-one-projects-task-use" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Contain one project's task use
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
   
 </li>
       
@@ -2352,12 +2386,45 @@ them) — intentional, so an upgrade restart doesn't drop live coding sessions.<
 <code>KillMode</code> concern is specifically about not killing live <code>pty</code> sessions. See
 <a href="../architecture/">Architecture → bridge lifecycle</a> and
 <a href="../installation/#run-as-a-systemd-service-linux">Installation → systemd</a>.</p>
+<h3 id="contain-one-projects-task-use">Contain one project's task use<a class="headerlink" href="#contain-one-projects-task-use" title="Permanent link">&para;</a></h3>
+<p>By default, all bridges share the task limit of <code>clauster.service</code>. Threads
+count as tasks. If one project uses the whole limit, forks fail for every other
+bridge and for Clauster.</p>
+<p>To give each bridge its own limit, enable linger for the service user and set
+<code>instance_defaults.bridge_task_limit</code>:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-14-1" name="__codelineno-14-1" href="#__codelineno-14-1"></a>sudo<span class="w"> </span>loginctl<span class="w"> </span>enable-linger<span class="w"> </span>&lt;service-user&gt;
+</code></pre></div>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-15-1" name="__codelineno-15-1" href="#__codelineno-15-1"></a><span class="nt">instance_defaults</span><span class="p">:</span>
+<a id="__codelineno-15-2" name="__codelineno-15-2" href="#__codelineno-15-2"></a><span class="w">  </span><span class="nt">bridge_task_limit</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">30000</span>
+</code></pre></div>
+<p>The value <code>30000</code> is an example. No heavy workload has confirmed it, so compare
+it with the peak task use of your own bridges.</p>
+<p>New bridges start through <code>systemd-run --user --scope</code> in
+<code>clauster_bridges.slice</code>. Running bridges keep their current cgroup until their
+next start.</p>
+<p>The limit has these caveats:</p>
+<ul>
+<li><strong>It needs Linux, systemd, a user bus, and linger.</strong> Clauster starts a short
+  test scope before each bridge. If a requirement is missing or the test fails,
+  the bridge starts with no limit. The spawn response and the log have a warning,
+  and <code>clauster doctor</code> shows the reason.</li>
+<li><strong>Set it in the config file.</strong> The dashboard config editor cannot change it.
+  The accepted range is 128 to 4194304.</li>
+<li><strong>It protects the other projects.</strong> A bridge at its limit can still fail or
+  die. Its session can survive, and <strong>Resume</strong> adopts it in a new scope.</li>
+<li><strong>A standard bridge has one limit</strong> for all of its sessions and subagents.</li>
+<li><strong>Only the bridge is in the scope.</strong> A pty keeper stays in the service cgroup.</li>
+<li><strong>Scoped bridges leave the service cgroup.</strong> The memory, CPU, and task limits
+  of <code>clauster.service</code> no longer apply to them. The user manager's limits apply.</li>
+<li><strong>A stopped user manager stops the scopes.</strong> Linger keeps the manager running
+  after logout.</li>
+</ul>
 <h2 id="backup-restore-and-corruption-recovery">Backup, restore, and corruption recovery<a class="headerlink" href="#backup-restore-and-corruption-recovery" title="Permanent link">&para;</a></h2>
 <h3 id="routine-backup">Routine backup<a class="headerlink" href="#routine-backup" title="Permanent link">&para;</a></h3>
 <p><code>clauster backup</code> tars the whole <code>state_dir</code> — the <code>clauster.db</code> persistence
 database (the live store for bridge and hosted-session records) plus everything
 else under it — together with the active config into a single archive:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-14-1" name="__codelineno-14-1" href="#__codelineno-14-1"></a>clauster<span class="w"> </span>backup<span class="w"> </span>-c<span class="w"> </span>/etc/clauster/clauster.yml<span class="w"> </span>-o<span class="w"> </span>/var/backups/
+<div class="highlight"><pre><span></span><code><a id="__codelineno-16-1" name="__codelineno-16-1" href="#__codelineno-16-1"></a>clauster<span class="w"> </span>backup<span class="w"> </span>-c<span class="w"> </span>/etc/clauster/clauster.yml<span class="w"> </span>-o<span class="w"> </span>/var/backups/
 </code></pre></div>
 <p>Restore it with <code>clauster restore &lt;archive&gt; --state-dir ~/.clauster</code> (the
 <code>--state-dir</code> target is required — point it at your configured <code>state_dir</code>,
@@ -2436,7 +2503,7 @@ to start):</p>
    overwrite a non-empty target). If you have no backup, <strong>move the bad database
    aside</strong> and let Clauster start with empty state:</li>
 </ol>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-15-1" name="__codelineno-15-1" href="#__codelineno-15-1"></a>mv<span class="w"> </span>~/.clauster/clauster.db<span class="w"> </span>~/.clauster/clauster.db.corrupt
+<div class="highlight"><pre><span></span><code><a id="__codelineno-17-1" name="__codelineno-17-1" href="#__codelineno-17-1"></a>mv<span class="w"> </span>~/.clauster/clauster.db<span class="w"> </span>~/.clauster/clauster.db.corrupt
 </code></pre></div>
 <p>Clauster starts fresh and <strong>rediscovers</strong> still-running bridges on startup
    (it matches live processes), so a lost database is not a lost session —
@@ -2455,8 +2522,8 @@ to start):</p>
    database is empty again.</p>
 <p>Repair the copy first — it holds bytes Clauster could not read. Then move the
    retired original out of the way and put the copy back under the original name:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-16-1" name="__codelineno-16-1" href="#__codelineno-16-1"></a>mv<span class="w"> </span>~/.clauster/state.json.imported<span class="w"> </span>~/.clauster/state.json.imported.keep
-<a id="__codelineno-16-2" name="__codelineno-16-2" href="#__codelineno-16-2"></a>mv<span class="w"> </span>~/.clauster/state.json.corrupt.bak<span class="w"> </span>~/.clauster/state.json
+<div class="highlight"><pre><span></span><code><a id="__codelineno-18-1" name="__codelineno-18-1" href="#__codelineno-18-1"></a>mv<span class="w"> </span>~/.clauster/state.json.imported<span class="w"> </span>~/.clauster/state.json.imported.keep
+<a id="__codelineno-18-2" name="__codelineno-18-2" href="#__codelineno-18-2"></a>mv<span class="w"> </span>~/.clauster/state.json.corrupt.bak<span class="w"> </span>~/.clauster/state.json
 </code></pre></div>
 <p>The first <code>mv</code> is not optional. A re-import renames the new file to
    <code>state.json.imported</code> as well. On Linux and macOS that replaces whatever was

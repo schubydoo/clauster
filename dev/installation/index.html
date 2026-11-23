@@ -2219,6 +2219,8 @@ credentials:</p>
 straight into <code>ExecStart</code>: a frozen standalone binary or a <code>clauster</code> console
 script (uv tool / pip / pipx) is invoked directly, as shown above. Only a bare dev
 interpreter falls back to the <code>python -m clauster run …</code> form.</p>
+<p>To stop one project from using the whole service task limit, see
+<a href="../operations/#contain-one-projects-task-use">Contain one project's task use</a>.</p>
 <div class="admonition note">
 <p class="admonition-title"><code>KillMode=process</code> keeps bridges alive across a restart</p>
 <p>The generated unit sets <strong><code>KillMode=process</code></strong> (not systemd's default

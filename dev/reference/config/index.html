@@ -2173,6 +2173,12 @@ row in the table above.</p>
 <td>Show a <strong>Force restart</strong> button on standard bridge cards. Force restart stops the bridge, <strong>archives its cloud environment</strong> (<code>env_…</code>), deletes its bridge pointer, and starts it again with <code>--no-create-session-in-dir</code>: a new environment and no session until you open one. Every session in the old environment ends and its claude.ai link stops working. Plain Restart, Resume and the pty (Interactive Session) bridge are unchanged. Off by default.</td>
 </tr>
 <tr>
+<td><code>bridge_task_limit</code></td>
+<td>int | null</td>
+<td><code>null</code></td>
+<td>Start each bridge in its own systemd user scope with this task limit (<code>TasksMax</code>; threads count). One runaway project then cannot use up the service limit for the others. For example <code>30000</code>, which no heavy workload has confirmed yet. Off by default. <strong>Caveats:</strong> needs Linux, systemd and <code>loginctl enable-linger</code>; without them bridges start with no limit and <code>clauster doctor</code> warns. A standard bridge shares one limit across its sessions, and a bridge at its limit can still fail or die. Scoped bridges leave the service cgroup, so the unit's resource limits no longer apply to them. Accepts 128 to 4194304. Applies at the next bridge start. Set it in the config file: the dashboard config editor cannot change it.</td>
+</tr>
+<tr>
 <td><code>session_name_prefix</code></td>
 <td>str | null</td>
 <td><code>null</code></td>
