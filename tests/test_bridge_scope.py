@@ -10,7 +10,7 @@ import sys
 import pytest
 from pydantic import ValidationError
 
-from clauster import bridge_scope, ops
+from clauster import bridge_launch, bridge_scope, ops
 from clauster.config import ClausterConfig, InstanceDefaults
 from clauster.runner import SessionRunner
 
@@ -60,7 +60,7 @@ def test_probe_refuses_missing_binary(host, monkeypatch, missing):
     )
     support = bridge_scope.probe_scope_support()
     assert not support.available
-    assert "systemd-run" in support.detail
+    assert support.detail == f"{missing} is not on PATH"
 
 
 def test_probe_refuses_unknown_user(host, monkeypatch):
@@ -531,3 +531,93 @@ def test_doctor_leaves_a_missing_binary_to_the_claude_check(tmp_path, monkeypatc
     monkeypatch.setattr(bridge_scope, "probe_scope_support", lambda: SUPPORT)
     check = ops._check_bridge_task_limit(_config(tmp_path, 30000))
     assert check is not None and check.status == ops.OK
+
+
+@pytest.mark.parametrize(
+    "resume_mode",
+    [
+        "standard",
+        pytest.param(
+            "pty",
+            marks=pytest.mark.skipif(sys.platform == "win32", reason="pty is gated on Windows"),
+        ),
+    ],
+)
+async def test_real_launch_worker_reuses_the_spawn_probe(runner_config, monkeypatch, resume_mode):
+    runner = _runner(runner_config, 500)
+    probes = []
+    launched = []
+    real_popen = subprocess.Popen
+
+    def _probe():
+        probes.append(1)
+        return SUPPORT
+
+    def _popen(cmd, *args, **kwargs):
+        if any(a in ("remote-control", "--remote-control") for a in cmd):
+            launched.append(cmd)
+            raise OSError("stop after the launch argv is known")
+        return real_popen(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(bridge_scope, "probe_scope_support", _probe)
+    monkeypatch.setattr(subprocess, "Popen", _popen)
+    await runner.spawn("alpha", resume_mode=resume_mode)
+    assert len(probes) == 1
+    assert len(launched) == 1 and any("TasksMax=500" in a for a in launched[0])
+
+
+async def test_spawn_warns_when_the_bridge_gets_no_limit(runner_config, monkeypatch):
+    runner = _runner(runner_config, 500)
+    monkeypatch.setattr(
+        bridge_scope,
+        "probe_scope_support",
+        lambda: bridge_scope.ScopeSupport(False, "linger is off"),
+    )
+    assert (
+        await runner._spawner._prepare_bridge_scope()
+        == "This bridge has no task limit: linger is off"
+    )
+
+
+async def test_spawn_warns_for_a_binary_path_with_equals(runner_config, monkeypatch):
+    runner = _runner(runner_config, 500)
+    monkeypatch.setattr(bridge_scope, "probe_scope_support", lambda: SUPPORT)
+    monkeypatch.setattr(bridge_launch, "resolve_binary", lambda _b: "/opt/a=b/claude")
+    warning = await runner._spawner._prepare_bridge_scope()
+    assert warning is not None and "contains '='" in warning
+
+
+async def test_no_warning_when_the_bridge_gets_its_limit(runner_config, monkeypatch):
+    runner = _runner(runner_config, 500)
+    monkeypatch.setattr(bridge_scope, "probe_scope_support", lambda: SUPPORT)
+    monkeypatch.setattr(bridge_launch, "resolve_binary", lambda _b: "/opt/claude")
+    assert await runner._spawner._prepare_bridge_scope() is None
+
+
+def test_scope_problem_tolerates_a_missing_binary(runner_config, monkeypatch):
+    runner = _runner(runner_config, 500)
+
+    def _missing(_binary):
+        raise bridge_launch.ClaudeNotFound("missing")
+
+    monkeypatch.setattr(bridge_launch, "resolve_binary", _missing)
+    assert runner._launch.scope_problem(SUPPORT) is None
+
+
+async def test_spawn_outcome_carries_the_no_limit_warning(runner_config, monkeypatch):
+    runner = _runner(runner_config, 500)
+    real_popen = subprocess.Popen
+
+    def _popen(cmd, *args, **kwargs):
+        if "remote-control" in cmd:
+            raise OSError("stop at the launch")
+        return real_popen(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(
+        bridge_scope,
+        "probe_scope_support",
+        lambda: bridge_scope.ScopeSupport(False, "linger is off"),
+    )
+    monkeypatch.setattr(subprocess, "Popen", _popen)
+    outcome = await runner.spawn_detailed("alpha")
+    assert "This bridge has no task limit: linger is off" in outcome.warnings

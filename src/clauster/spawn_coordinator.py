@@ -636,9 +636,10 @@ class SpawnCoordinator:
         but the same project can legitimately hold a live bridge on the OTHER axis (a live
         pty session does not block a standard spawn, and vice versa), and skipping those made
         a project with an interactive session contribute 0 to the cap. Raised BEFORE the
-        log-file creation, the process spawn, and the deferred ``--trust`` write — the one
-        earlier side effect is the injected ``_clear_pointer_if_anchor_poisoned``, which is
-        best-effort pointer hygiene rather than per-spawn state.
+        log-file creation, the process spawn, and the deferred ``--trust`` write. The earlier
+        side effects are the injected ``_clear_pointer_if_anchor_poisoned``, which is
+        best-effort pointer hygiene, and the empty test scope of the task-limit probe, which
+        ends at once. Neither is per-spawn state.
         """
         from .runner import CapacityExceeded
 
@@ -751,7 +752,9 @@ class SpawnCoordinator:
         # Before the cap: the cap and the row registration must stay close together, because
         # another project can pass the cap during any await between them. Also before every
         # side effect, so a cancel during this probe leaves no row, log file, or trust grant.
-        await self._prepare_bridge_scope()
+        scope_warning = await self._prepare_bridge_scope()
+        if scope_warning is not None:
+            spawn_warnings.append(scope_warning)
 
         self._enforce_bridge_cap(defaults.max_bridges)
 
@@ -1194,10 +1197,17 @@ class SpawnCoordinator:
             return self._keeper_failure_detail(sidecar, info)
         return await asyncio.to_thread(self._keeper_failure_detail, sidecar, info)
 
-    async def _prepare_bridge_scope(self) -> None:
-        """Probe task-limit scopes before the launch, so a cancelled spawn starts nothing."""
-        if self._config.instance_defaults.bridge_task_limit is not None:
-            self._launch.use_scope_support(await asyncio.to_thread(self._launch.prepare_scope))
+    async def _prepare_bridge_scope(self) -> str | None:
+        """Probe task-limit scopes before the launch, so a cancelled spawn starts nothing.
+
+        Return a warning for the operator when a limit is set but this bridge will not get it.
+        """
+        if self._config.instance_defaults.bridge_task_limit is None:
+            return None
+        support = await asyncio.to_thread(self._launch.prepare_scope)
+        self._launch.use_scope_support(support)
+        problem = await asyncio.to_thread(self._launch.scope_problem, support)
+        return None if problem is None else f"This bridge has no task limit: {problem}"
 
     async def _spawn_pty(  # pragma: skip-on-win — pty mode is pywinpty-gated, off on Windows CI
         self,

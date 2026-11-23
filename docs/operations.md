@@ -499,6 +499,9 @@ instance_defaults:
   bridge_task_limit: 30000
 ```
 
+The value `30000` is an example. No heavy workload has confirmed it, so compare
+it with the peak task use of your own bridges.
+
 New bridges start through `systemd-run --user --scope` in
 `clauster_bridges.slice`. Running bridges keep their current cgroup until their
 next start.
@@ -507,8 +510,8 @@ The limit has these caveats:
 
 - **It needs Linux, systemd, a user bus, and linger.** Clauster starts a short
   test scope before each bridge. If a requirement is missing or the test fails,
-  the bridge starts with no limit, the log has a warning, and `clauster doctor`
-  shows the reason.
+  the bridge starts with no limit. The spawn response and the log have a warning,
+  and `clauster doctor` shows the reason.
 - **Set it in the config file.** The dashboard config editor cannot change it.
   The accepted range is 128 to 4194304.
 - **It protects the other projects.** A bridge at its limit can still fail or

@@ -343,7 +343,8 @@ class InstanceDefaults(BaseModel):
         le=4194304,
         description="Start each bridge in its own systemd user scope with this task limit "
         "(`TasksMax`; threads count). One runaway project then cannot use up the service "
-        "limit for the others. `30000` is a safe start. Off by default. **Caveats:** needs "
+        "limit for the others. For example `30000`, which no heavy workload has confirmed "
+        "yet. Off by default. **Caveats:** needs "
         "Linux, systemd and `loginctl enable-linger`; without them bridges start with no "
         "limit and `clauster doctor` warns. A standard bridge shares one limit across its "
         "sessions, and a bridge at its limit can still fail or die. Scoped bridges leave the "

@@ -116,7 +116,16 @@ def probe_scope_support() -> ScopeSupport:
     env_binary = shutil.which("env")
     true_binary = shutil.which("true")
     if systemd_run is None or env_binary is None or true_binary is None:
-        return ScopeSupport(False, "systemd-run is not on PATH")
+        missing = next(
+            name
+            for name, path in (
+                ("systemd-run", systemd_run),
+                ("env", env_binary),
+                ("true", true_binary),
+            )
+            if path is None
+        )
+        return ScopeSupport(False, f"{missing} is not on PATH")
     try:
         uid = _uid()
         user = _user_name(uid)

@@ -32,7 +32,7 @@ from contextvars import ContextVar
 from pathlib import Path
 
 from . import bridge_scope, procutil
-from .claude_cli import resolve_binary
+from .claude_cli import ClaudeNotFound, resolve_binary
 from .config import (
     INHERIT_PERMISSION_MODE,
     ClausterConfig,
@@ -183,6 +183,15 @@ class BridgeLaunch:
         probe inside it would let a cancelled spawn still start a bridge with no registry row.
         """
         return bridge_scope.probe_scope_support()
+
+    def scope_problem(self, support: bridge_scope.ScopeSupport) -> str | None:
+        """Return why this spawn will have no task limit, or ``None`` when it will have one."""
+        try:
+            binary = resolve_binary(self._binary)
+        except ClaudeNotFound:
+            binary = self._binary  # the launch reports this failure itself
+        problem = bridge_scope.binary_problem(binary)
+        return problem or (None if support.available else support.detail)
 
     @staticmethod
     def use_scope_support(support: bridge_scope.ScopeSupport) -> None:
