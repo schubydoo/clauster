@@ -42,6 +42,7 @@ from . import (
     environments,
     procutil,
     pty_screen,
+    task_limits,
     tls_provision,
 )
 from .config import ClausterConfig, FixedDetailYamlError, _missing_enforced_auth, load_config
@@ -361,6 +362,11 @@ def run_doctor(
     killmode = _check_systemd_killmode()
     if killmode is not None:
         checks.append(killmode)
+
+    # the service task limit, its use, and forks it refused (only for a loaded unit)
+    service_tasks = _check_service_tasks()
+    if service_tasks is not None:
+        checks.append(service_tasks)
 
     # per-bridge task limit (only when configured)
     task_limit = _check_bridge_task_limit(config)
@@ -895,6 +901,50 @@ def _check_systemd_killmode(unit: str = "clauster.service") -> Check | None:
     )
 
 
+def _check_service_tasks(unit: str = "clauster.service") -> Check | None:
+    """Report the service task limit, its current use, and the forks that it refused.
+
+    A WARN and never a FAIL, because a refused fork can be long past. The kernel keeps the
+    count until the cgroup is recreated, usually at a reboot, and the text says so. Returns
+    None when there is no loaded unit to report on.
+    """
+    systemctl = shutil.which("systemctl")
+    if systemctl is None:
+        return None
+    try:
+        out = subprocess.run(
+            [systemctl, "show", unit, "--property=LoadState,ControlGroup,TasksCurrent,TasksMax"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            env=procutil.child_env(),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    props = dict(line.split("=", 1) for line in out.stdout.splitlines() if "=" in line)
+    if props.get("LoadState") != "loaded":
+        return None
+    current = props.get("TasksCurrent", "")
+    used = current if current.isdigit() and int(current) < 2**63 else "unknown"
+    limit = props.get("TasksMax", "")
+    cap = limit if limit.isdigit() and int(limit) < 2**63 else "no limit"
+    usage = f"{unit}: {used} tasks, limit {cap}"
+    cgroup = task_limits.cgroup_path(props.get("ControlGroup", ""))
+    refused = task_limits.refused_forks(cgroup) if cgroup is not None else None
+    if refused:
+        return Check(
+            "service tasks",
+            WARN,
+            f"{usage}; the limit refused {refused} process or thread starts. The count stays "
+            "until the cgroup is recreated, usually at a reboot, so it can be old.",
+        )
+    if refused == 0:
+        return Check("service tasks", OK, f"{usage}; no refused process or thread starts")
+    return Check("service tasks", OK, usage)
+
+
 def _check_bridge_task_limit(config: ClausterConfig) -> Check | None:
     """Report whether a configured per-bridge task limit can take effect on this host.
 
@@ -916,6 +966,14 @@ def _check_bridge_task_limit(config: ClausterConfig) -> Check | None:
         )
     support = bridge_scope.probe_scope_support()
     if support.available:
+        refused = task_limits.bridge_slice_refused()
+        if refused:
+            return Check(
+                "bridge task limit",
+                WARN,
+                f"new bridges start in scopes, limit {limit} tasks; bridge scopes refused "
+                f"{refused} process or thread starts since {bridge_scope.BRIDGE_SLICE} started",
+            )
         return Check("bridge task limit", OK, f"new bridges start in scopes, limit {limit} tasks")
     return Check(
         "bridge task limit",

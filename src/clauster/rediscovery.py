@@ -1017,6 +1017,8 @@ class Rediscovery:
             # appear-then-vanish across the tick that re-owns the bridge. Absent from the
             # dict clears a stale note, matching `_apply_pty_info`'s unconditional assign.
             current.notice = connect.get("notice")
+            # This row now describes a new process, so the old crash reason no longer applies.
+            current.task_limit_note = None
             current.bridge_debug_log_path = log_path
             current.bridge_raw_log_path = (
                 self._raw_log_path_for(log_path) if log_path is not None else None

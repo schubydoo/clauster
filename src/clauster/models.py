@@ -183,6 +183,10 @@ class RemoteControlInstance(BaseModel):
     # same reason as `error_detail` — it describes this run of this bridge, and a reattach
     # re-reads the sidecar that is still on disk.
     notice: str | None = None
+    # Why a CRASHED bridge likely died: a task limit refused forks just before it exited.
+    # Separate from `error_detail`, which holds the bridge's own output. Not persisted, like
+    # `notice`: it describes this run of this bridge.
+    task_limit_note: str | None = None
     # The `claude` release the bridge PROCESS is running (#1275) — read off the live process
     # tree by `procutil.running_claude_version` on every liveness poll, and cleared the tick
     # a bridge stops. Deliberately NOT persisted (`SessionRunner._persist_subset` builds its
