@@ -23,19 +23,27 @@ flag form). They share no builder — do not unify them.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import time
 from collections.abc import Callable
+from contextvars import ContextVar
 from pathlib import Path
 
-from . import procutil
+from . import bridge_scope, procutil
 from .claude_cli import resolve_binary
 from .config import (
     INHERIT_PERMISSION_MODE,
     ClausterConfig,
     PermissionMode,
     SpawnMode,
+)
+
+#: The scope probe of the current spawn. A context variable because ``asyncio.to_thread`` copies
+#: it into the launch worker, so each spawn uses its own result and the worker never probes.
+_SCOPE_SUPPORT: ContextVar[bridge_scope.ScopeSupport | None] = ContextVar(
+    "clauster_scope_support", default=None
 )
 
 
@@ -167,6 +175,33 @@ class BridgeLaunch:
             path_append=path_append, path_prepend=path_prepend, env=claude.env, extra=extra
         )
 
+    @staticmethod
+    def prepare_scope() -> bridge_scope.ScopeSupport:
+        """Probe scope support before a launch, in its own cancellable step.
+
+        The probe can take seconds. The launch worker cannot be cancelled once it runs, so a
+        probe inside it would let a cancelled spawn still start a bridge with no registry row.
+        """
+        return bridge_scope.probe_scope_support()
+
+    @staticmethod
+    def use_scope_support(support: bridge_scope.ScopeSupport) -> None:
+        """Give the launch of the current spawn this probe result. Call it on the event loop."""
+        _SCOPE_SUPPORT.set(support)
+
+    def _scoped_argv(self, argv: list[str], cwd: Path) -> list[str]:
+        """Apply ``bridge_task_limit``, keeping the bridge's own ``XDG_RUNTIME_DIR``."""
+        runtime_dir = self._config.claude.env.get(
+            "XDG_RUNTIME_DIR", os.environ.get("XDG_RUNTIME_DIR")
+        )
+        return bridge_scope.scoped_argv(
+            argv,
+            limit=self._config.instance_defaults.bridge_task_limit,
+            project=cwd.name,
+            bridge_runtime_dir=runtime_dir,
+            support=_SCOPE_SUPPORT.get(),
+        )
+
     def _popen(
         self,
         cwd: Path,
@@ -194,6 +229,7 @@ class BridgeLaunch:
         # for `claude`), so a bare name that the version probe resolves via
         # shutil.which would fail to spawn here. Also pins the binary we validated.
         cmd[0] = resolve_binary(cmd[0])
+        cmd = self._scoped_argv(cmd, cwd)
         # Always build the child env from the SCRUBBED base (procutil.child_env)
         # so the bridge — which runs project-controlled code — can never read a
         # Clauster secret (session signing key, password hash) from its own
@@ -347,7 +383,10 @@ class BridgeLaunch:
         it survives independently and keeps the bridge alive.
 
         ``state_dir`` is threaded to the keeper so a side-installed ``pyte`` loads (#1486).
+        Only the bridge goes into a task-limit scope. The keeper stays outside it, so a
+        bridge at its limit cannot take the keeper's PTY down with it.
         """
+        bridge_argv = self._scoped_argv(bridge_argv, cwd)
         cmd = self._keeper_launch_cmd(
             sidecar, cwd, bridge_argv, screen_sidecar, state_dir=state_dir
         )

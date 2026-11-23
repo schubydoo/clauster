@@ -748,6 +748,11 @@ class SpawnCoordinator:
         # anchor is healthy/indeterminate.
         await self._clear_pointer_if_anchor_poisoned(proj.path)
 
+        # Before the cap: the cap and the row registration must stay close together, because
+        # another project can pass the cap during any await between them. Also before every
+        # side effect, so a cancel during this probe leaves no row, log file, or trust grant.
+        await self._prepare_bridge_scope()
+
         self._enforce_bridge_cap(defaults.max_bridges)
 
         # --trust (#775): every rejection — option validation, the idempotency
@@ -1188,6 +1193,11 @@ class SpawnCoordinator:
         if info:
             return self._keeper_failure_detail(sidecar, info)
         return await asyncio.to_thread(self._keeper_failure_detail, sidecar, info)
+
+    async def _prepare_bridge_scope(self) -> None:
+        """Probe task-limit scopes before the launch, so a cancelled spawn starts nothing."""
+        if self._config.instance_defaults.bridge_task_limit is not None:
+            self._launch.use_scope_support(await asyncio.to_thread(self._launch.prepare_scope))
 
     async def _spawn_pty(  # pragma: skip-on-win — pty mode is pywinpty-gated, off on Windows CI
         self,

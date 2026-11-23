@@ -42,6 +42,10 @@ instance_defaults:
   permission_mode: default   # default | plan | acceptEdits | auto | dontAsk | bypassPermissions | inherit
   capacity: 32               # max sessions within one bridge (claude --capacity)
   # allow_force_restart: true   # Force restart button: archives the bridge's env, no session (default: false)
+  # Own systemd user scope and task limit per bridge. Needs Linux + `loginctl enable-linger`;
+  # otherwise bridges start with no limit and `clauster doctor` warns. A bridge at its limit
+  # can still fail, and the service unit's resource limits no longer apply to scoped bridges.
+  # bridge_task_limit: 30000
   # session_name_prefix: myteam   # prefix for auto-generated session names (default: hostname)
   # max_bridges: 8           # best-effort cap on remote-control bridges (unset = no limit)
 

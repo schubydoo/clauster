@@ -337,6 +337,20 @@ class InstanceDefaults(BaseModel):
         "its claude.ai link stops working. Plain Restart, Resume and the pty (Interactive "
         "Session) bridge are unchanged. Off by default.",
     )
+    bridge_task_limit: int | None = Field(
+        default=None,
+        ge=128,
+        le=4194304,
+        description="Start each bridge in its own systemd user scope with this task limit "
+        "(`TasksMax`; threads count). One runaway project then cannot use up the service "
+        "limit for the others. `30000` is a safe start. Off by default. **Caveats:** needs "
+        "Linux, systemd and `loginctl enable-linger`; without them bridges start with no "
+        "limit and `clauster doctor` warns. A standard bridge shares one limit across its "
+        "sessions, and a bridge at its limit can still fail or die. Scoped bridges leave the "
+        "service cgroup, so the unit's resource limits no longer apply to them. Accepts 128 "
+        "to 4194304. Applies at the next bridge start. Set it in the config file: the "
+        "dashboard config editor cannot change it.",
+    )
     session_name_prefix: str | None = Field(
         default=None,
         description="Optional prefix for auto-generated Remote Control session names (maps to "

@@ -481,6 +481,45 @@ them) — intentional, so an upgrade restart doesn't drop live coding sessions.
 [Architecture → bridge lifecycle](architecture.md) and
 [Installation → systemd](installation.md#run-as-a-systemd-service-linux).
 
+### Contain one project's task use
+
+By default, all bridges share the task limit of `clauster.service`. Threads
+count as tasks. If one project uses the whole limit, forks fail for every other
+bridge and for Clauster.
+
+To give each bridge its own limit, enable linger for the service user and set
+`instance_defaults.bridge_task_limit`:
+
+```sh
+sudo loginctl enable-linger <service-user>
+```
+
+```yaml
+instance_defaults:
+  bridge_task_limit: 30000
+```
+
+New bridges start through `systemd-run --user --scope` in
+`clauster_bridges.slice`. Running bridges keep their current cgroup until their
+next start.
+
+The limit has these caveats:
+
+- **It needs Linux, systemd, a user bus, and linger.** Clauster starts a short
+  test scope before each bridge. If a requirement is missing or the test fails,
+  the bridge starts with no limit, the log has a warning, and `clauster doctor`
+  shows the reason.
+- **Set it in the config file.** The dashboard config editor cannot change it.
+  The accepted range is 128 to 4194304.
+- **It protects the other projects.** A bridge at its limit can still fail or
+  die. Its session can survive, and **Resume** adopts it in a new scope.
+- **A standard bridge has one limit** for all of its sessions and subagents.
+- **Only the bridge is in the scope.** A pty keeper stays in the service cgroup.
+- **Scoped bridges leave the service cgroup.** The memory, CPU, and task limits
+  of `clauster.service` no longer apply to them. The user manager's limits apply.
+- **A stopped user manager stops the scopes.** Linger keeps the manager running
+  after logout.
+
 ## Backup, restore, and corruption recovery
 
 ### Routine backup

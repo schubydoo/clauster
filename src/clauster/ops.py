@@ -35,6 +35,7 @@ from pydantic import ValidationError
 
 from . import (
     atomicio,
+    bridge_scope,
     claude_cli,
     config_write_mcp,
     deps,
@@ -360,6 +361,11 @@ def run_doctor(
     killmode = _check_systemd_killmode()
     if killmode is not None:
         checks.append(killmode)
+
+    # per-bridge task limit (only when configured)
+    task_limit = _check_bridge_task_limit(config)
+    if task_limit is not None:
+        checks.append(task_limit)
 
     # nvm toolchain reachability (only when an nvm install is present)
     node_tc = _check_node_toolchain(config)
@@ -886,6 +892,35 @@ def _check_systemd_killmode(unit: str = "clauster.service") -> Check | None:
         "KillMode=process unit and reload: `sudo clauster install-service systemd --write` then "
         f"`sudo systemctl daemon-reload && sudo systemctl restart {unit}` — that one restart "
         "still reaps the current pty bridges, but later restarts won't.",
+    )
+
+
+def _check_bridge_task_limit(config: ClausterConfig) -> Check | None:
+    """Report whether a configured per-bridge task limit can take effect on this host.
+
+    A WARN and never a FAIL: bridges still start, but without the containment the operator
+    asked for, and the check says so. Returns None when no limit is configured.
+    """
+    limit = config.instance_defaults.bridge_task_limit
+    if limit is None:
+        return None
+    try:
+        problem = bridge_scope.binary_problem(claude_cli.resolve_binary(config.claude.binary))
+    except claude_cli.ClaudeNotFound:
+        problem = None  # the `claude` check reports this; no bridge can start at all
+    if problem is not None:
+        return Check(
+            "bridge task limit",
+            WARN,
+            f"bridge_task_limit is {limit}, but bridges start with NO limit: {problem}",
+        )
+    support = bridge_scope.probe_scope_support()
+    if support.available:
+        return Check("bridge task limit", OK, f"new bridges start in scopes, limit {limit} tasks")
+    return Check(
+        "bridge task limit",
+        WARN,
+        f"bridge_task_limit is {limit}, but bridges start with NO limit: {support.detail}",
     )
 
 
