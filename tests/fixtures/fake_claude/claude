@@ -18,8 +18,9 @@ Behaviour is selected via env vars so tests can drive each branch:
                   FAKE_CLAUDE_AGENTS; missing/empty file -> []) — lets a test
                   stage/replace the agents list after the server started
   FAKE_CLAUDE_ENV_DUMP_DIR = directory; EVERY invocation first writes
-                  env-<pid>.json ({"argv", "env"}) there, so the binary smoke test
-                  can see the environment clauster hands a spawned claude (issue 1708)
+                  env-<pid>.json ({"argv", "env"}, plus "dll_directory" on
+                  Windows, TASK-505) there, so the binary smoke test can see the
+                  environment clauster hands a spawned claude (issue 1708)
 
 `remote-control` writes the real bridge-log marker sequence to --debug-file,
 then (mode=ready) idles until SIGINT, on which it logs the shutdown marker and
@@ -511,9 +512,18 @@ def _dump_env(args):
         return
     import json
 
+    record = {"argv": args, "env": dict(os.environ)}
+    if sys.platform == "win32":
+        # The DLL directory this process got from its parent, which is not in the
+        # environment (TASK-505): the binary smoke checks it is not the unpack dir.
+        import ctypes
+
+        buf = ctypes.create_unicode_buffer(32768)
+        ctypes.windll.kernel32.GetDllDirectoryW(len(buf), buf)
+        record["dll_directory"] = buf.value
     path = os.path.join(dump_dir, f"env-{os.getpid()}.json")
     with open(path + ".tmp", "w", encoding="utf-8") as fh:
-        json.dump({"argv": args, "env": dict(os.environ)}, fh)
+        json.dump(record, fh)
     os.replace(path + ".tmp", path)  # a reader never sees a half-written dump
 
 

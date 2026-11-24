@@ -1251,15 +1251,55 @@ def _bundle_library_path_var() -> str | None:
 
     macOS rewrites the bundled binaries' load paths instead, and Windows calls
     ``SetDllDirectoryW``, so neither touches an environment variable: an
-    ``LD_LIBRARY_PATH`` there is the user's own and must pass through. (Whether the
-    Windows DLL directory reaches a child is a separate, non-environment question this
-    module does not address.)
+    ``LD_LIBRARY_PATH`` there is the user's own and must pass through. The Windows DLL
+    directory does reach a child, but not through the environment: see
+    :func:`release_bundle_dll_directory`.
     """
     if sys.platform.startswith("aix"):
         return "LIBPATH"
     if sys.platform in ("darwin", "win32"):
         return None
     return "LD_LIBRARY_PATH"
+
+
+# The unpack dir, registered as this process's own DLL directory (TASK-505). Held so the
+# registration lives as long as the process; `close()` on it would remove the directory.
+_bundle_dll_directory: object | None = None
+
+
+def release_bundle_dll_directory() -> bool:
+    """Stop the standalone binary's children from searching its unpack dir for DLLs.
+
+    On Windows the one-file bootloader calls ``SetDllDirectoryW(<unpack dir>)`` in each
+    process of the bundle (``pyi_main.c`` in 6.22.3). Windows applies that directory to
+    every child the process starts, where it is searched before System32 (Microsoft's
+    ``SetDllDirectoryW`` remarks; the bootloader's own comment says the same). So a
+    spawned claude, node or git that finds a DLL in none of its own folders loads the
+    bundle's copy, and holds that file open (TASK-505).
+
+    This first registers the unpack dir with ``os.add_dll_directory``. That keeps it on
+    this process's own search path for extension modules and ``ctypes``, which load with
+    ``LOAD_LIBRARY_SEARCH_DEFAULT_DIRS``, and a child does not get it. Then it resets the
+    inherited directory with ``SetDllDirectoryW(NULL)``, the recipe PyInstaller documents
+    for launching an external program. Returns whether it reset. Does nothing unless this
+    is the standalone binary on Windows. A failed reset is logged, not raised: the server
+    then runs as it did before.
+    """
+    global _bundle_dll_directory
+    meipass = getattr(sys, "_MEIPASS", None)
+    if sys.platform != "win32" or not deps.is_frozen() or not meipass:
+        return False
+    import ctypes
+
+    _bundle_dll_directory = os.add_dll_directory(meipass)
+    if not ctypes.windll.kernel32.SetDllDirectoryW(None):
+        _log.warning(
+            "could not reset the DLL directory; children may search %s for DLLs (%s)",
+            meipass,
+            ctypes.WinError(),
+        )
+        return False
+    return True
 
 
 def _drop_frozen_runtime(env: dict[str, str]) -> None:

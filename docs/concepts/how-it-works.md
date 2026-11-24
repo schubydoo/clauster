@@ -212,7 +212,10 @@ card shows `claustrum connection lost; reattach failed`. If Clauster cannot
 reconnect at all, every running Direct Session shows `claustrum daemon
 connection lost and the reconnect failed`. In each case, a `claude` process that
 is still alive is shown as an orphan with **Kill**, the same as after a daemon
-restart, so that **Resume** never starts a second agent beside it.
+restart, so that **Resume** never starts a second agent beside it. The
+dashboard's refresh checks each orphan again. When its `claude` process exits,
+the card loses the `orphan` badge and shows
+`the agent exited after Clauster could not reattach it; session lost`.
 
 When the connection itself caused the failure, the next daemon connection
 reattaches the session again. If the daemon still has the process, the card

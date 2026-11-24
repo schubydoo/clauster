@@ -120,6 +120,8 @@ _REATTACH_FAILED_PREFIX = "claustrum connection lost; reattach failed"
 # dropped connection and a timeout all leave an agent that Clauster cannot reattach
 # (TASK-526). The dashboard's orphan tooltip uses the same words.
 _ORPHAN_DETAIL = "still running, but Clauster could not reattach it"
+# The detail of an orphan row whose agent exited after it was classified (TASK-556).
+_ORPHAN_EXITED_DETAIL = "the agent exited after Clauster could not reattach it; session lost"
 
 
 class HostedSessionError(ClaustrumError):
@@ -2500,6 +2502,49 @@ class HostedManager:
             instance.is_orphan = False
             instance.status = lost_status
             instance.error_detail = lost_detail
+
+    async def recheck_orphans(self) -> None:
+        """Re-classify each orphan row whose agent exited since it was judged (TASK-556).
+
+        An orphan row (CL-8) says its agent still runs, but nothing judged it again. An
+        agent that exits on its closed pipes seconds after a reconnect left the row
+        saying "still running" until the operator acted. The dashboard's hosted poll
+        calls this, so each orphan is judged again on the predicate that made it one.
+        A row whose agent is gone becomes a lost row: it stays CRASHED, Kill gives way
+        to Forget, and Resume stays offered where the row can be resumed.
+
+        A row whose per-id lock is held is skipped, not waited for: a Resume or Kill
+        owns it, and the next poll judges it again. The retry entry of a row lost to
+        the connection is kept, so a later connection still reattaches it if the daemon
+        has it. The prompts stored for the agent are named on the row and dropped, as
+        a reattach does for an agent that is gone (TASK-537). Persists on a change.
+        """
+        changed = False
+        for key in [k for k, i in self._instances.items() if i.is_orphan]:
+            lock = self._lock_for(key)
+            if self._closing or lock.locked():
+                continue
+            async with lock:
+                instance = self._instances.get(key)
+                if (
+                    instance is None
+                    or not instance.is_orphan
+                    or key in self._sessions
+                    or await self._is_orphan(instance)
+                ):
+                    continue
+                logger.info("hosted: orphan %s exited; marking it lost", key)
+                lost = self._reattach_retry.get(key)
+                requests = _merged_requests(
+                    lost.requests if lost else (), self._unrestored.pop(key, ())
+                )
+                instance.is_orphan = False
+                instance.status = InstanceStatus.CRASHED
+                instance.error_detail = _ORPHAN_EXITED_DETAIL
+                self._name_unrestored(instance, requests)
+                changed = True
+        if changed:
+            await self._persist()
 
     async def rebind_all(self, client: ClaustrumClient) -> None:
         """Reattach every running session over a new daemon connection (TASK-518).

@@ -108,6 +108,14 @@ def _make_handler(token: str, version: str):
                     "id": rid,
                     "result": {"version": version, "platform": sys.platform, "arch": "amd64"},
                 }
+            elif method == "process.reattach":
+                # This daemon runs no processes, so it never knows the one asked for: a
+                # restored hosted row is classified as lost or orphaned (TASK-556 E2E).
+                resp = {
+                    "jsonrpc": "2.0",
+                    "id": rid,
+                    "result": {"found": False, "running": False, "firstSeq": 0, "lastSeq": 0},
+                }
             elif method == "server.shutdown":
                 os._exit(0)
             else:

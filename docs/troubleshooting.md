@@ -792,7 +792,10 @@ directory under `state_dir` for the reason that the daemon gives.
 A card with the orange `orphan` badge instead means that the `claude` process
 still runs, but Clauster could not reattach it. Its text says
 `still running, but Clauster could not reattach it`. The cause can be a daemon
-restart, a dropped connection or a request that timed out.
+restart, a dropped connection or a request that timed out. While the dashboard
+is open, Clauster checks each orphan again on every refresh. If the `claude`
+process exits, the badge goes and the card says
+`the agent exited after Clauster could not reattach it; session lost`.
 
 If only the connection was lost, Clauster reattaches the session again over the
 next daemon connection. If the daemon still has the process, the card shows

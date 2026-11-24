@@ -3886,6 +3886,92 @@ async def test_manager_kill_orphan_without_pid_skips_kill(monkeypatch):
     assert result.is_orphan is False
 
 
+async def test_recheck_marks_an_orphan_lost_once_its_agent_exits(
+    fake_claustrum, tmp_path, monkeypatch
+):
+    """TASK-556: the agent exits after a reattach judged the row an orphan.
+
+    The row said "still running" for as long as nothing acted on it. The recheck judges it
+    again on the same predicate, so it turns into a lost row: no orphan badge, no "still
+    running" text, and Resume still on offer (the row keeps its project and uuid).
+    """
+    alive = True
+    monkeypatch.setattr("clauster.procutil.is_live_process", lambda *a, **k: alive)
+    mgr, inst = await _reattach_row(fake_claustrum, tmp_path, {})
+    assert inst.is_orphan is True
+    await mgr.recheck_orphans()  # still alive: nothing changes
+    assert inst.is_orphan is True and "still running" in (inst.error_detail or "")
+    alive = False
+    await mgr.recheck_orphans()
+    assert inst.is_orphan is False
+    assert inst.status is InstanceStatus.CRASHED
+    assert inst.error_detail == hosted._ORPHAN_EXITED_DETAIL
+    assert inst.project and inst.claude_session_uuid  # what the Resume gate reads
+
+
+async def test_recheck_names_and_drops_the_prompts_stored_for_an_exited_orphan(
+    tmp_path, monkeypatch
+):
+    """An exited agent waits on nothing, so its stored prompts go, named once (TASK-537)."""
+    monkeypatch.setattr(HostedManager, "_is_orphan", staticmethod(_never_orphan))
+    store = HostedStateStore(tmp_path)
+    mgr = HostedManager(store)
+    mgr._restored = True
+    inst = _orphan_instance()
+    key = inst.claustrum_process_id
+    mgr._instances[key] = inst
+    request = hosted._ControlRequest("perm-1", "can_use_tool", {"tool_name": "Bash"})
+    mgr._unrestored[key] = (request,)
+    await mgr.persist()
+    assert store.load()[key]["parked_requests"]  # kept while the agent may wait on it
+    await mgr.recheck_orphans()
+    assert key not in mgr._unrestored
+    assert inst.error_detail.startswith(hosted._ORPHAN_EXITED_DETAIL)
+    assert "Bash (request perm-1)" in inst.error_detail
+    assert store.load()[key]["parked_requests"] is None  # and the recheck persisted the drop
+
+
+async def test_recheck_keeps_the_retry_entry_of_an_orphan_lost_to_the_connection(monkeypatch):
+    """A later connection may still reattach the row, so its retry entry stays (TASK-526)."""
+    monkeypatch.setattr(HostedManager, "_is_orphan", staticmethod(_never_orphan))
+    mgr = HostedManager()
+    inst = _orphan_instance()
+    key = inst.claustrum_process_id
+    mgr._instances[key] = inst
+    request = hosted._ControlRequest("perm-2", "can_use_tool", {"tool_name": "Edit"})
+    lost = hosted._LostRow(object(), (request,))
+    mgr._reattach_retry[key] = lost
+    await mgr.recheck_orphans()
+    assert mgr._reattach_retry[key] is lost
+    assert inst.is_orphan is False
+    assert "Edit (request perm-2)" in (inst.error_detail or "")
+
+
+async def test_recheck_skips_an_orphan_whose_lock_is_held(monkeypatch):
+    """A Resume or Kill owns the row: the poll must not wait for it, nor judge under it."""
+    probed: list[str] = []
+
+    async def _probe(instance):
+        probed.append(instance.claustrum_process_id)
+        return False
+
+    monkeypatch.setattr(HostedManager, "_is_orphan", staticmethod(_probe))
+    mgr = HostedManager()
+    inst = _orphan_instance()
+    mgr._instances[inst.claustrum_process_id] = inst
+    async with mgr._lock_for(inst.claustrum_process_id):
+        # Bounded: a recheck that waited for the lock would hang the dashboard's poll.
+        await asyncio.wait_for(mgr.recheck_orphans(), timeout=5)
+    assert probed == [] and inst.is_orphan is True
+    mgr._closing = True  # and after aclose, nothing is judged either
+    await mgr.recheck_orphans()
+    assert probed == [] and inst.is_orphan is True
+
+
+async def _never_orphan(instance):
+    return False
+
+
 async def test_manager_kill_orphan_unknown_raises():
     mgr = HostedManager()
     with pytest.raises(HostedSessionError):

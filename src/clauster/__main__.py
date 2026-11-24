@@ -124,6 +124,9 @@ _CONFIG_DISCOVERY_EPILOG = (
 def main(argv: list[str] | None = None) -> int:
     """Parse ``argv``, dispatch to the requested subcommand, and return its exit code."""
     argv = list(sys.argv[1:] if argv is None else argv)
+    # First, so no form of the binary hands its unpack dir to a child as a DLL directory
+    # (TASK-505). Does nothing outside the standalone binary on Windows.
+    procutil.release_bundle_dll_directory()
     # Internal frozen-binary entry point, handled BEFORE argparse so it never appears in
     # --help. See _recap_hook / clauster.recap.
     if argv and argv[0] == RECAP_SUBCOMMAND:

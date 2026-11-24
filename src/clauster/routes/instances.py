@@ -340,7 +340,11 @@ async def api_hosted(hosted: HostedDep) -> list[RemoteControlInstance]:
     client-chosen id, and there may be several per project. The dashboard's
     hosted panel polls this; empty list when the channel is unused. Auth-gated
     by the guard middleware like every other ``/api/*`` route.
+
+    Each poll also judges the orphan rows again, so a row whose agent exited stops
+    saying "still running" (TASK-556).
     """
+    await hosted.recheck_orphans()
     instances = hosted.list_instances()
     # Debounced (no-op when unchanged): refresh the persisted reattach cursors on
     # the dashboard's poll cadence, so a restart replays from a recent daemon seq.
