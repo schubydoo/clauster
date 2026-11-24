@@ -2018,7 +2018,7 @@ def test_yaml12_view_maps_a_recursion_error_to_a_rejection(monkeypatch) -> None:
     monkeypatch.setattr(cw, "_yaml12_node", _deep)
     # The refusal names the document it was given (TASK-492).
     with pytest.raises(
-        cw.InvalidCandidateError, match="^SKILL.md frontmatter is nested too deeply to parse$"
+        cw.InvalidCandidateError, match=r"^SKILL\.md frontmatter is nested too deeply to parse$"
     ):
         cw.yaml12_view("a: 1", what="SKILL.md frontmatter")
 
@@ -2704,7 +2704,7 @@ def test_a_list_or_mapping_key_in_an_ordered_mapping_is_refused(extra: str) -> N
     # PyYAML builds `!!omap`/`!!pairs` without hashing a key; the YAML 1.2 view raised
     # TypeError on it (review on PR 1810). The refusal names the file like its neighbors do.
     with pytest.raises(
-        cw.InvalidCandidateError, match="^SKILL.md frontmatter has a list or a mapping as a key"
+        cw.InvalidCandidateError, match=r"^SKILL\.md frontmatter has a list or a mapping as a key"
     ):
         config_write_skills.validate_skill_md_content(
             f"---\nname: a\ndescription: d\n{extra}\n---\nb\n"

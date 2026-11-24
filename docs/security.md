@@ -277,11 +277,11 @@ The `claude` CLI writes the same file concurrently, so the trust writer
 A one-time `.bak` is taken before the first modification.
 
 The writer changes `~/.claude.json` only when the file is missing or parses as a JSON
-object that holds no `Infinity`, `NaN` or number past the range of a double (such as
-`1e400`). If the file exists but does not parse, or holds such a number, every write
-stops with an error and the file stays byte-identical. A write that would add such a
-number stops the same way, so Clauster never writes one. Clauster does not replace a file that it cannot read with
-only the keys it sets. See [Troubleshooting](troubleshooting.md#claudejson-exists-but-is-not-a-valid-json-object)
+object that holds no `Infinity`, `NaN` or number too large for a double-precision
+float (such as `1e400`). If the file exists but does not parse, or holds such a number,
+every write stops with an error and the file stays byte-identical. A write that would
+add such a number stops the same way, so Clauster never writes one.
+Clauster does not replace a file that it cannot read with only the keys it sets. See [Troubleshooting](troubleshooting.md#claudejson-exists-but-is-not-a-valid-json-object)
 for the repair.
 
 > **Upgrading from 1.0.2 or earlier?** Those versions wrote the sidecar beside the

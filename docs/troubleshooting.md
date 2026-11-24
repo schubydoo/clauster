@@ -400,9 +400,9 @@ it cannot parse as "nothing is trusted".
 **Cause:** the `~/.claude.json` of the user that runs Clauster exists but does not
 parse. For example, a crash in the middle of a write can truncate it. The text in
 parentheses names the failure. It gives a line and column for invalid JSON, or says
-`it is not UTF-8 text`, `it is nested too deeply to parse`, `it holds Infinity, NaN or
-a number too large for Clauster to write back`, or `the top level is not a JSON
-object`. A number such as `1e400` is valid JSON, but Clauster cannot write it back
+`it is not UTF-8 text`, `it is nested too deeply to parse`, `it holds a value that
+cannot be parsed` (an integer of more than 4300 digits), `it holds Infinity, NaN or a
+number too large for Clauster to write back`, or `the top level is not a JSON object`. A number such as `1e400` is valid JSON, but Clauster cannot write it back
 unchanged, so it refuses the file. An empty file also fails. The message never quotes
 the file content.
 
