@@ -1089,15 +1089,19 @@ def _two_plugin_market() -> dict:
 @pytest.mark.parametrize(
     "edit",
     [
-        pytest.param(lambda p: p[1:], id="delete-first"),
-        pytest.param(lambda p: list(reversed(p)), id="reorder"),
+        # A copy would put one stored credential in two entries.
         pytest.param(lambda p: [*p, p[0]], id="append-copy"),
+        # An edited masked entry is no longer the stored entry it came from.
         pytest.param(lambda p: [{**p[0], "description": "edited"}, p[1]], id="edit-masked-elem"),
+        pytest.param(lambda p: [{**p[0], "description": "edited"}], id="edit-and-delete"),
+        # `b`'s mask sent in an entry named `z` matches no stored entry.
+        pytest.param(lambda p: [p[0], {**p[1], "name": "z"}], id="mask-moved-to-another-entry"),
+        pytest.param(lambda p: [{**p[1], "name": "z"}], id="mask-moved-and-delete"),
     ],
 )
 def test_marketplace_list_edit_that_would_shift_a_mask_is_rejected(tmp_path: Path, edit) -> None:
-    # merge_redacted restores a list by POSITION: deleting `a` would give `b` the
-    # credential AAA, and a reorder would swap them. Refuse the write; change nothing.
+    # merge_redacted restores a list by POSITION. A masked entry that matches no single
+    # stored entry cannot be bound back, so the write is refused and nothing changes.
     stored = _two_plugin_market()
     h = _store(tmp_path, {"extraKnownMarketplaces": stored})
     view = cws.read_project_settings(tmp_path)[0]["extraKnownMarketplaces"]
@@ -1105,6 +1109,208 @@ def test_marketplace_list_edit_that_would_shift_a_mask_is_rejected(tmp_path: Pat
     with pytest.raises(cw.InvalidCandidateError, match="masked value"):
         cws.write_project_settings(tmp_path, {"extraKnownMarketplaces": view}, h)
     assert _on_disk(tmp_path)["extraKnownMarketplaces"] == stored
+
+
+def _plugins_on_disk(tmp_path: Path) -> list:
+    return _on_disk(tmp_path)["extraKnownMarketplaces"]["inline"]["source"]["plugins"]
+
+
+@pytest.mark.parametrize(
+    ("edit", "kept"),
+    [
+        pytest.param(lambda p: p[1:], ["b"], id="delete-first"),
+        pytest.param(lambda p: p[:1], ["a"], id="delete-last"),
+        pytest.param(lambda p: list(reversed(p)), ["b", "a"], id="reorder"),
+        pytest.param(lambda p: [p[1], {"name": "new"}, p[0]], ["b", "new", "a"], id="insert"),
+    ],
+)
+def test_marketplace_list_length_change_keeps_each_credential_with_its_entry(
+    tmp_path: Path, edit, kept: list[str]
+) -> None:
+    # TASK-473: each masked entry is bound to the one stored entry it reads as, not to
+    # its position, so a removal, a reorder or an insert keeps AAA with `a`, BBB with `b`.
+    stored = _two_plugin_market()
+    by_name = {p["name"]: p for p in stored["inline"]["source"]["plugins"]}
+    h = _store(tmp_path, {"extraKnownMarketplaces": stored})
+    view = cws.read_project_settings(tmp_path)[0]["extraKnownMarketplaces"]
+    assert "AAA" not in json.dumps(view) and "BBB" not in json.dumps(view)
+    view["inline"]["source"]["plugins"] = edit(view["inline"]["source"]["plugins"])
+    cws.write_project_settings(tmp_path, {"extraKnownMarketplaces": view}, h)
+    assert _plugins_on_disk(tmp_path) == [by_name.get(n, {"name": n}) for n in kept]
+    assert cw.REDACTION_SENTINEL not in (tmp_path / ".claude" / "settings.json").read_text("utf-8")
+
+
+def _three_plugin_market() -> dict:
+    """`a` and `b` hold credentials; `c` holds none and has a url of its own."""
+    market = _two_plugin_market()
+    market["inline"]["source"]["plugins"].append(
+        {"name": "c", "source": {"source": "url", "url": "https://r.example/c.git"}}
+    )
+    return market
+
+
+def test_removing_an_unrelated_entry_saves_and_round_trips(tmp_path: Path) -> None:
+    # The acceptance case of TASK-473: removing an entry with no secret from a list that
+    # holds masks saves, and the next read and save keep every credential.
+    stored = _three_plugin_market()
+    h = _store(tmp_path, {"extraKnownMarketplaces": stored})
+    view = cws.read_project_settings(tmp_path)[0]["extraKnownMarketplaces"]
+    view["inline"]["source"]["plugins"].pop(2)
+    cws.write_project_settings(tmp_path, {"extraKnownMarketplaces": view}, h)
+    assert _on_disk(tmp_path)["extraKnownMarketplaces"] == _two_plugin_market()
+    # A second save of the new view: the credentials survive, and no mask is written.
+    view, h = cws.read_project_settings(tmp_path)
+    cws.write_project_settings(tmp_path, view, h)
+    assert _on_disk(tmp_path)["extraKnownMarketplaces"] == _two_plugin_market()
+    assert cw.REDACTION_SENTINEL not in (tmp_path / ".claude" / "settings.json").read_text("utf-8")
+
+
+def test_new_entry_with_a_url_in_a_masked_marketplace_is_refused(tmp_path: Path) -> None:
+    # An added url is a new destination in an entry that keeps masked credentials.
+    stored = _two_plugin_market()
+    h = _store(tmp_path, {"extraKnownMarketplaces": stored})
+    view = cws.read_project_settings(tmp_path)[0]["extraKnownMarketplaces"]
+    view["inline"]["source"]["plugins"].append(
+        {"name": "n", "source": {"source": "url", "url": "https://evil.example/n.git"}}
+    )
+    with pytest.raises(cw.InvalidCandidateError, match="url changed"):
+        cws.write_project_settings(tmp_path, {"extraKnownMarketplaces": view}, h)
+    assert _on_disk(tmp_path)["extraKnownMarketplaces"] == stored
+
+
+def test_unmasked_neighbor_with_a_url_keeps_its_place_in_a_reorder(tmp_path: Path) -> None:
+    # Backend review: an element with no mask binds to the stored element it equals, so
+    # the url check sees its url unchanged. Bound to nothing, it would read as a new url
+    # and refuse a plain reorder.
+    stored = {
+        "inline": {
+            "source": {
+                "source": "settings",
+                "name": "inline",
+                "plugins": [
+                    {
+                        "name": "a",
+                        "source": {"source": "url", "url": "https://a.example/x"},
+                        "headers": {"Cookie": "AC"},
+                    },
+                    {"name": "b", "source": {"source": "url", "url": "https://b.example/y"}},
+                ],
+            }
+        }
+    }
+    h = _store(tmp_path, {"extraKnownMarketplaces": stored})
+    view = cws.read_project_settings(tmp_path)[0]["extraKnownMarketplaces"]
+    plugins = view["inline"]["source"]["plugins"]
+    view["inline"]["source"]["plugins"] = [plugins[1], plugins[0]]
+    cws.write_project_settings(tmp_path, {"extraKnownMarketplaces": view}, h)
+    a, b = stored["inline"]["source"]["plugins"]
+    assert _plugins_on_disk(tmp_path) == [b, a]
+    # Removing the url of the element with no mask sends no credential to a new host.
+    view, h = cws.read_project_settings(tmp_path)
+    del view["extraKnownMarketplaces"]["inline"]["source"]["plugins"][0]["source"]["url"]
+    cws.write_project_settings(tmp_path, view, h)
+    assert _plugins_on_disk(tmp_path) == [{"name": "b", "source": {"source": "url"}}, a]
+
+
+def test_identical_masked_entries_with_a_length_change_are_refused(tmp_path: Path) -> None:
+    # Two entries that read the same cannot be told apart: which credential to keep is
+    # unknown, so the position rule refuses the shorter list.
+    stored = {
+        "inline": {
+            "source": {
+                "source": "settings",
+                "name": "inline",
+                "plugins": [
+                    {"name": "a", "mcpServers": {"s": {"env": {"K": "AAA"}}}},
+                    {"name": "a", "mcpServers": {"s": {"env": {"K": "BBB"}}}},
+                ],
+            }
+        }
+    }
+    h = _store(tmp_path, {"extraKnownMarketplaces": stored})
+    view = cws.read_project_settings(tmp_path)[0]["extraKnownMarketplaces"]
+    view["inline"]["source"]["plugins"].pop(0)
+    with pytest.raises(cw.InvalidCandidateError, match="masked value"):
+        cws.write_project_settings(tmp_path, {"extraKnownMarketplaces": view}, h)
+    assert _on_disk(tmp_path)["extraKnownMarketplaces"] == stored
+
+
+def _url_masked_market() -> dict:
+    """`a` holds a token in its url query, which the read masks in place."""
+    return {
+        "inline": {
+            "source": {
+                "source": "settings",
+                "name": "inline",
+                "plugins": [
+                    {
+                        "name": "a",
+                        "source": {"source": "url", "url": "https://r.example/a?t=tokA4492x"},
+                    },
+                    {"name": "b", "source": "./b"},
+                ],
+            }
+        }
+    }
+
+
+def test_partly_masked_url_survives_a_removal_and_a_reorder(tmp_path: Path) -> None:
+    stored = _url_masked_market()
+    h = _store(tmp_path, {"extraKnownMarketplaces": stored})
+    view = cws.read_project_settings(tmp_path)[0]["extraKnownMarketplaces"]
+    plugins = view["inline"]["source"]["plugins"]
+    assert "tokA4492x" not in json.dumps(view)
+    assert cw.REDACTION_SENTINEL in plugins[0]["source"]["url"]
+    view["inline"]["source"]["plugins"] = [plugins[1], plugins[0], {"name": "c"}]
+    cws.write_project_settings(tmp_path, {"extraKnownMarketplaces": view}, h)
+    a, b = stored["inline"]["source"]["plugins"]
+    assert _plugins_on_disk(tmp_path) == [b, a, {"name": "c"}]
+    view, h = cws.read_project_settings(tmp_path)
+    view["extraKnownMarketplaces"]["inline"]["source"]["plugins"].pop(0)
+    cws.write_project_settings(tmp_path, view, h)
+    assert _plugins_on_disk(tmp_path) == [a, {"name": "c"}]
+
+
+def test_partly_masked_url_edited_with_a_removal_is_refused(tmp_path: Path) -> None:
+    # The visible part of the url changed: the element is no longer the stored one, so
+    # the stored token is never sent to the new host.
+    stored = _url_masked_market()
+    h = _store(tmp_path, {"extraKnownMarketplaces": stored})
+    view = cws.read_project_settings(tmp_path)[0]["extraKnownMarketplaces"]
+    a = view["inline"]["source"]["plugins"][0]
+    a["source"]["url"] = a["source"]["url"].replace("r.example", "evil.example")
+    view["inline"]["source"]["plugins"] = [a]
+    with pytest.raises(cw.InvalidCandidateError, match="masked part"):
+        cws.write_project_settings(tmp_path, {"extraKnownMarketplaces": view}, h)
+    assert _on_disk(tmp_path)["extraKnownMarketplaces"] == stored
+
+
+def test_identity_binding_is_linear(tmp_path: Path, monkeypatch) -> None:
+    # TASK-502: each element is serialized once per side, never once per other element.
+    plain = [{"name": f"p{i}"} for i in range(3000)]
+    stored = {
+        "inline": {
+            "source": {
+                "source": "settings",
+                "name": "inline",
+                "plugins": [{"name": "a", "mcpServers": {"s": {"env": {"K": "AAA"}}}}, *plain],
+            }
+        }
+    }
+    h = _store(tmp_path, {"extraKnownMarketplaces": stored})
+    view = cws.read_project_settings(tmp_path)[0]["extraKnownMarketplaces"]
+    view["inline"]["source"]["plugins"].pop(1)
+    calls = {"n": 0}
+    real = cws._canonical
+
+    def counting(value):
+        calls["n"] += 1
+        return real(value)
+
+    monkeypatch.setattr(cws, "_canonical", counting)
+    cws.write_project_settings(tmp_path, {"extraKnownMarketplaces": view}, h)
+    assert calls["n"] <= 2 * len(stored["inline"]["source"]["plugins"])
+    assert _plugins_on_disk(tmp_path)[0]["mcpServers"]["s"]["env"] == {"K": "AAA"}
 
 
 def test_marketplace_list_resend_unchanged_keeps_each_credential(tmp_path: Path) -> None:

@@ -14,6 +14,7 @@ Mirrors :mod:`test_config_write_mcp_cli`'s layering:
 from __future__ import annotations
 
 import json
+import re
 import shlex
 import subprocess
 import sys
@@ -348,6 +349,203 @@ def test_cli_marketplace_update_not_found_maps_to_marketplace_not_found_error(
     run, _calls = _fake_run(rc=1, stderr="Marketplace 'x' not found")
     with pytest.raises(plugins.MarketplaceNotFoundError):
         plugins.cli_marketplace_update(str(FAKE_CLAUDE), tmp_path, "x", run=run)
+
+
+# What claude 2.1.330 prints when git cannot find the repository of a git source (probed
+# under a throwaway HOME against a local server that answers 404, 2026-11-23), as ASCII.
+def _git_missing_stderr(action: str, url: str) -> str:
+    """Return the CLI's stderr for a clone whose repository git cannot find."""
+    return (
+        f"Failed to {action}: Failed to clone repository: Cloning into "
+        f"'/srv/cache/temp_git_1'...\nfatal: repository '{url}' not found\n"
+    )
+
+
+_GIT_MISSING_CALLS = [
+    pytest.param(
+        lambda run: plugins.cli_marketplace_update(str(FAKE_CLAUDE), Path("."), "gone", run=run),
+        "marketplace-update 'gone'",
+        id="marketplace-update",
+    ),
+    pytest.param(
+        lambda run: plugins.cli_marketplace_update(str(FAKE_CLAUDE), Path("."), None, run=run),
+        "marketplace-update could not",
+        id="marketplace-update-all",
+    ),
+    pytest.param(
+        lambda run: plugins.cli_install_plugin(
+            str(FAKE_CLAUDE), Path("."), "gitty@market", "user", run=run
+        ),
+        "install 'gitty@market'",
+        id="install",
+    ),
+    pytest.param(
+        lambda run: plugins.cli_update_plugin(
+            str(FAKE_CLAUDE), Path("."), "hello@market", "user", run=run
+        ),
+        "update 'hello@market'",
+        id="update",
+    ),
+    pytest.param(
+        lambda run: plugins.cli_marketplace_add(
+            str(FAKE_CLAUDE), Path("."), "team/gone", "user", run=run
+        ),
+        "marketplace-add 'team/gone'",
+        id="marketplace-add",
+    ),
+]
+
+
+@pytest.mark.parametrize(("call", "subject"), _GIT_MISSING_CALLS)
+def test_git_repository_not_found_is_a_400_that_names_the_source(call, subject: str) -> None:
+    # TASK-472: git's "repository not found" is an unreachable source, never an absent
+    # plugin or marketplace, so it is never the 404 that "not found" alone gives.
+    url = "https://git.example.com/team/gone.git/"
+    run, _calls = _fake_run(rc=1, stderr=_git_missing_stderr("refresh", url))
+    with pytest.raises(plugins.PluginCliError) as exc_info:
+        call(run)
+    assert not isinstance(
+        exc_info.value, (plugins.PluginNotFoundError, plugins.MarketplaceNotFoundError)
+    )
+    message = str(exc_info.value)
+    assert f"claude plugin {subject}" in message
+    assert f"could not fetch its git source {url!r}" in message
+    assert "does not exist, or that this host has no access to it" in message
+    assert "Exit 1: Failed to refresh" in message  # the CLI's own text stays for diagnosis
+
+
+def test_github_repository_not_found_line_alone_is_a_400() -> None:
+    run, _calls = _fake_run(rc=1, stderr="remote: Repository not found.\n")
+    with pytest.raises(plugins.PluginCliError) as exc_info:
+        plugins.cli_update_plugin(str(FAKE_CLAUDE), Path("."), "hello@market", "user", run=run)
+    assert not isinstance(exc_info.value, plugins.PluginNotFoundError)
+    assert "could not fetch its git source: git reports" in str(exc_info.value)
+
+
+def test_github_ssh_repository_not_found_is_a_400() -> None:
+    # GitHub's message over SSH; "not found" alone made this a 404 (backend review).
+    stderr = "ERROR: Repository not found.\nfatal: Could not read from remote repository.\n"
+    run, _calls = _fake_run(rc=1, stderr=stderr)
+    with pytest.raises(plugins.PluginCliError) as exc_info:
+        plugins.cli_install_plugin(str(FAKE_CLAUDE), Path("."), "gitty@market", "user", run=run)
+    assert not isinstance(exc_info.value, plugins.PluginNotFoundError)
+    assert "could not fetch its git source: git reports" in str(exc_info.value)
+
+
+def test_marketplace_add_names_its_own_source_once() -> None:
+    # git names the add's own source, which the message already names as the subject.
+    source = "https://git.example.com/team/gone.git"
+    run, _calls = _fake_run(rc=1, stderr=f"fatal: repository '{source}' not found\n")
+    with pytest.raises(plugins.PluginCliError) as exc_info:
+        plugins.cli_marketplace_add(str(FAKE_CLAUDE), Path("."), source, "user", run=run)
+    message = str(exc_info.value)
+    assert f"claude plugin marketplace-add {source!r} could not fetch its git source:" in message
+    assert message.count(source) == 2  # the subject and the CLI's own line
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://deploy:tok-4492-secret@git.example.com/team/gone.git/",
+        "https://git.example.com/team/gone.git?token=tok4492secretvalue",
+    ],
+)
+def test_git_repository_not_found_masks_the_named_source(url: str) -> None:
+    # The url comes from a marketplace file, not from the request, so it is masked like a
+    # source before it is shown: in the named source and in the CLI's own text.
+    run, _calls = _fake_run(rc=1, stderr=_git_missing_stderr("install", url))
+    with pytest.raises(plugins.PluginCliError) as exc_info:
+        plugins.cli_install_plugin(str(FAKE_CLAUDE), Path("."), "gitty@market", "user", run=run)
+    message = str(exc_info.value)
+    assert "4492" not in message
+    # The host stays visible to diagnose it. A regex with the scheme, not a bare host
+    # substring check, which CodeQL reads as url sanitization.
+    assert _SHOWS_EXAMPLE_HOST.search(message)
+    assert cw.REDACTION_SENTINEL in message
+
+
+_TOKEN_URL = "https://git.example.com/team/gone.git?token=tok4492secretvalue"
+#: A shown url on the test host: with its scheme, or with masked userinfo in front.
+_SHOWS_EXAMPLE_HOST = re.compile(r"(?:https://(?:[^\s/@]*@)?|\*+@)git\.example\.com/")
+
+
+@pytest.mark.parametrize(("call", "_subject"), _GIT_MISSING_CALLS)
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        # GitHub's own line comes first, above git's `fatal:` line (backend review).
+        pytest.param(
+            f"remote: Repository not found.\nfatal: repository '{_TOKEN_URL}/' not found\n",
+            id="github-remote-line-first",
+        ),
+        # Every url git names is masked, not only the first.
+        pytest.param(
+            "fatal: repository 'https://git.example.com/a.git/' not found\n"
+            f"fatal: repository '{_TOKEN_URL}' not found\n",
+            id="two-urls",
+        ),
+        # A `'` inside the url is captured whole, never cut where the token is.
+        pytest.param(
+            "fatal: repository 'https://git.example.com/r.git?token=tok4492sec'retvalue' "
+            "not found\n",
+            id="quote-in-url",
+        ),
+        # A url that starts with a shorter, masked one is masked whole: masking the shorter
+        # one first would change the longer one's text and leave its token in place.
+        pytest.param(
+            "fatal: repository 'https://bot:pw@git.example.com/r.git' not found\n"
+            "fatal: repository 'https://bot:pw@git.example.com/r.git?token=tok4492secret' "
+            "not found\n",
+            id="prefix-url",
+        ),
+    ],
+)
+def test_git_repository_not_found_masks_every_named_url(call, _subject: str, stderr: str) -> None:
+    run, _calls = _fake_run(rc=1, stderr=stderr)
+    with pytest.raises(plugins.PluginCliError) as exc_info:
+        call(run)
+    assert not isinstance(
+        exc_info.value, (plugins.PluginNotFoundError, plugins.MarketplaceNotFoundError)
+    )
+    message = str(exc_info.value)
+    assert "4492" not in message
+    assert "could not fetch its git source" in message
+    assert _SHOWS_EXAMPLE_HOST.search(message)
+
+
+@pytest.mark.parametrize(
+    ("call", "stderr", "error"),
+    [
+        # Probed on 2.1.330: these name an absent entity, and stay a 404.
+        (
+            lambda run: plugins.cli_marketplace_update(
+                str(FAKE_CLAUDE), Path("."), "nosuch", run=run
+            ),
+            "Failed to update marketplace(s): Marketplace 'nosuch' not found. Available "
+            "marketplaces: market",
+            plugins.MarketplaceNotFoundError,
+        ),
+        (
+            lambda run: plugins.cli_install_plugin(
+                str(FAKE_CLAUDE), Path("."), "absent@market", "user", run=run
+            ),
+            'Failed to install plugin "absent@market": Plugin "absent" not found in '
+            'marketplace "market".',
+            plugins.PluginNotFoundError,
+        ),
+        (
+            lambda run: plugins.cli_update_plugin(
+                str(FAKE_CLAUDE), Path("."), "other@market", "user", run=run
+            ),
+            'Failed to update plugin "other@market": Plugin "other" is not installed',
+            plugins.PluginNotFoundError,
+        ),
+    ],
+)
+def test_absent_entity_messages_stay_404(call, stderr: str, error: type) -> None:
+    run, _calls = _fake_run(rc=1, stderr=stderr)
+    with pytest.raises(error):
+        call(run)
 
 
 def test_cli_list_marketplaces_parses_json(tmp_path: Path) -> None:
@@ -1250,6 +1448,39 @@ def test_route_marketplaces_action_add_git_not_found_is_400_not_404(
             },
         )
         assert resp.status_code == 400
+
+
+@pytest.mark.parametrize(
+    ("path", "verb_key", "body"),
+    [
+        (
+            "/api/config-write/marketplaces/action",
+            "MARKETPLACE_UPDATE",
+            {"op": "update", "name": "gone"},
+        ),
+        (
+            "/api/config-write/plugins/action",
+            "INSTALL",
+            {"op": "install", "plugin": "gitty@market", "confirm_plugin": "gitty@market"},
+        ),
+        ("/api/config-write/plugins/action", "UPDATE", {"op": "update", "plugin": "hello@market"}),
+    ],
+)
+def test_route_git_repository_not_found_is_400_and_names_the_source(
+    write_config, tmp_path, projects_root, monkeypatch, path: str, verb_key: str, body: dict
+) -> None:
+    # TASK-472 end to end: the reads before the verb succeed, the verb fails as git does.
+    url = "https://git.example.com/team/gone.git/"
+    monkeypatch.setenv("FAKE_CLAUDE_PLUGIN_LIST_STDOUT", "[]")
+    monkeypatch.setenv("FAKE_CLAUDE_PLUGIN_MARKETPLACE_LIST_STDOUT", "[]")
+    monkeypatch.setenv(f"FAKE_CLAUDE_PLUGIN_EXIT_CODE_{verb_key}", "1")
+    monkeypatch.setenv("FAKE_CLAUDE_PLUGIN_STDERR", _git_missing_stderr("refresh", url))
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.post(
+            path, json={"scope": "project", "project": "alpha", "confirm": "alpha", **body}
+        )
+    assert resp.status_code == 400
+    assert f"could not fetch its git source {url!r}" in resp.json()["detail"]
 
 
 def test_route_marketplaces_action_add_missing_source_is_422(
@@ -3191,6 +3422,142 @@ def test_cli_list_offered_plugins_empty_available_is_a_real_answer(tmp_path: Pat
     assert out == [_offered("a@probe", "1", installed=True)]
 
 
+#: The shape claude 2.1.330 prints after `hello@market` is installed at user scope from a
+#: directory marketplace (probed under a throwaway HOME, 2026-11-23): the `installed` entry
+#: has no description, and the plugin is gone from `available`.
+_AVAILABLE_AFTER_INSTALL = {
+    "installed": [
+        {
+            "id": "hello@market",
+            "version": "1.1.0",
+            "scope": "user",
+            "enabled": True,
+            "installPath": "/srv/home/.claude/plugins/cache/market/hello/1.1.0",
+            "readFromFolder": "/srv/marketplaces/market/plugins/hello",
+            "folderVersion": "1.1.0",
+            "installedAt": "2026-11-24T05:49:13.495Z",
+            "lastUpdated": "2026-11-24T05:49:13.495Z",
+            "projectEnabled": False,
+        }
+    ],
+    "available": [
+        {
+            "pluginId": "other@market",
+            "name": "other",
+            "description": "Other plugin",
+            "marketplaceName": "market",
+            "version": "1.0.0",
+            "source": "./plugins/hello",
+        }
+    ],
+}
+
+
+def _offered_run(location: Path | None, *, marketplace_rc: int = 0):
+    """Build a fake runner for the offered read and the ``marketplace list`` behind it."""
+    calls: list[list[str]] = []
+    listed = (
+        []
+        if location is None
+        else [{"name": "market", "source": "directory", "installLocation": str(location)}]
+    )
+
+    def run(argv, **_kwargs):
+        calls.append(list(argv[1:]))
+        if argv[1:] == ["plugin", "marketplace", "list", "--json"]:
+            return subprocess.CompletedProcess(argv, marketplace_rc, json.dumps(listed), "boom")
+        return subprocess.CompletedProcess(argv, 0, json.dumps(_AVAILABLE_AFTER_INSTALL), "")
+
+    return run, calls
+
+
+def _market_file(location: Path, plugins_list: list) -> None:
+    """Write a marketplace file with ``plugins_list`` at ``location``."""
+    (location / ".claude-plugin").mkdir(parents=True)
+    payload = {"name": "market", "plugins": plugins_list}
+    (location / ".claude-plugin" / "marketplace.json").write_bytes(json.dumps(payload).encode())
+
+
+def test_offered_installed_plugin_keeps_its_marketplace_description(tmp_path: Path) -> None:
+    # TASK-560: the CLI's `installed` entry has no description; the marketplace file has.
+    _market_file(
+        tmp_path / "m",
+        [
+            "not an object",
+            {"description": "an entry with no name"},
+            {"name": "hello", "description": "Test plugin", "version": "1.1.0"},
+            {"name": "hello", "description": "A second entry of the same name"},
+            {"name": "other", "description": "Other plugin"},
+        ],
+    )
+    run, calls = _offered_run(tmp_path / "m")
+    out = plugins.cli_list_offered_plugins(str(FAKE_CLAUDE), tmp_path, "market", run=run)
+    assert out == [
+        _offered("hello@market", "1.1.0", installed=True, description="Test plugin"),
+        _offered("other@market", "1.0.0", installed=False, description="Other plugin"),
+    ]
+    assert calls == [
+        ["plugin", "list", "--available", "--json"],
+        ["plugin", "marketplace", "list", "--json"],
+    ]
+
+
+def test_offered_list_without_an_installed_row_reads_no_marketplace_file(tmp_path: Path) -> None:
+    run, calls = _fake_run(rc=0, stdout=json.dumps({"available": _AVAILABLE["available"]}))
+    plugins.cli_list_offered_plugins(str(FAKE_CLAUDE), tmp_path, "probe", run=run)
+    assert len(calls) == 1
+
+
+def test_offered_installed_description_is_masked_and_cut(tmp_path: Path) -> None:
+    text = "clone https://user:sk-live-777@host/repo.git\n" + "y" * 5000
+    _market_file(tmp_path / "m", [{"name": "hello", "description": text}])
+    run, _calls = _offered_run(tmp_path / "m")
+    [hello, _other] = plugins.cli_list_offered_plugins(
+        str(FAKE_CLAUDE), tmp_path, "market", run=run
+    )
+    assert "sk-live-777" not in json.dumps(hello)
+    assert cw.REDACTION_SENTINEL in hello["description"]
+    assert len(hello["description"]) == plugins.OFFERED_TEXT_MAX + 1
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["marketplace-list-fails", "not-listed", "no-file", "not-in-file", "not-a-string"],
+)
+def test_offered_installed_description_falls_back_to_empty(tmp_path: Path, case: str) -> None:
+    # Display only: when the description cannot be read, the row shows none, as before,
+    # and the list itself still loads.
+    location: Path | None = tmp_path / "m"
+    if case == "not-in-file":
+        _market_file(tmp_path / "m", [{"name": "other", "description": "Other plugin"}])
+    elif case == "not-a-string":
+        _market_file(tmp_path / "m", [{"name": "hello", "description": {"x": 1}}])
+    elif case == "not-listed":
+        location = None
+    run, _calls = _offered_run(location, marketplace_rc=1 if case.endswith("fails") else 0)
+    out = plugins.cli_list_offered_plugins(str(FAKE_CLAUDE), tmp_path, "market", run=run)
+    assert out[0] == _offered("hello@market", "1.1.0", installed=True)
+
+
+def test_route_offered_installed_plugin_keeps_its_description(
+    write_config, tmp_path, projects_root, monkeypatch
+) -> None:
+    location = tmp_path / "m"
+    _market_file(location, [{"name": "hello", "description": "Test plugin"}])
+    listed = [{"name": "market", "source": "directory", "installLocation": str(location)}]
+    monkeypatch.setenv("FAKE_CLAUDE_PLUGIN_AVAILABLE_STDOUT", json.dumps(_AVAILABLE_AFTER_INSTALL))
+    monkeypatch.setenv("FAKE_CLAUDE_PLUGIN_MARKETPLACE_LIST_STDOUT", json.dumps(listed))
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.get(
+            "/api/config-write/marketplaces/offered?scope=project&project=alpha&marketplace=market"
+        )
+    assert resp.status_code == 200
+    hello = resp.json()["plugins"][0]
+    assert hello["id"] == "hello@market"
+    assert hello["installed"] is True
+    assert hello["description"] == "Test plugin"
+
+
 @pytest.mark.parametrize(
     ("entries", "version"),
     [
@@ -3395,8 +3762,8 @@ def test_cli_list_offered_plugins_cli_failure_is_400_not_404(tmp_path: Path) -> 
 def test_route_marketplaces_offered_project_scope(
     write_config, tmp_path, projects_root, monkeypatch
 ) -> None:
-    argv_file = tmp_path / "argv.json"
-    monkeypatch.setenv("FAKE_CLAUDE_PLUGIN_ARGV_FILE", str(argv_file))
+    argv_log = tmp_path / "argv.jsonl"
+    monkeypatch.setenv("FAKE_CLAUDE_PLUGIN_ARGV_LOG", str(argv_log))
     monkeypatch.setenv("FAKE_CLAUDE_PLUGIN_AVAILABLE_STDOUT", json.dumps(_AVAILABLE))
     with _client(write_config, tmp_path, _ON) as c:
         resp = c.get(
@@ -3413,10 +3780,14 @@ def test_route_marketplaces_offered_project_scope(
         "gamma@probe",
         "zeta@probe",
     ]
-    record = json.loads(argv_file.read_text())
-    assert record["argv"] == ["list", "--available", "--json"]
+    records = [json.loads(line) for line in argv_log.read_text().splitlines()]
+    # The marketplace list follows only because this marketplace has installed rows.
+    assert [r["argv"] for r in records] == [
+        ["list", "--available", "--json"],
+        ["marketplace", "list", "--json"],
+    ]
     # Read from the project's own directory: the CLI's "installed" depends on the cwd.
-    assert Path(record["cwd"]).resolve() == (projects_root / "alpha").resolve()
+    assert Path(records[0]["cwd"]).resolve() == (projects_root / "alpha").resolve()
 
 
 def test_route_marketplaces_offered_user_scope_omits_project(

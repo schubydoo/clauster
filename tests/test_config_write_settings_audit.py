@@ -189,30 +189,78 @@ def test_env_rename_that_keeps_a_mask_is_refused(tmp_path: Path) -> None:
     assert on_disk == {"env": {"TOKEN": "s3cr3t"}}
 
 
-def test_reordered_list_holding_a_mask_is_refused(tmp_path: Path) -> None:
-    # A heuristically masked list entry is restored by position, so a reorder would move
-    # one entry's credential onto another.
+def test_reordered_list_holding_a_mask_keeps_the_credential_with_its_entry(
+    tmp_path: Path,
+) -> None:
+    # A masked list entry is bound to the one stored entry it reads as (TASK-473), so a
+    # reorder moves the credential with its own entry, never onto another.
     stored = [{"serverUrl": "https://u:p@a.example/x"}, {"serverName": "b"}]
-    h = _seed(cw.project_settings_path(tmp_path), {"allowedMcpServers": stored})
+    path = cw.project_settings_path(tmp_path)
+    h = _seed(path, {"allowedMcpServers": stored})
     view, _ = cws.read_project_settings(tmp_path)
-    assert S in json.dumps(view)
-    with pytest.raises(cw.InvalidCandidateError, match="allowedMcpServers"):
-        cws.write_project_settings(
-            tmp_path, {"allowedMcpServers": list(reversed(view["allowedMcpServers"]))}, h
-        )
+    assert S in json.dumps(view) and "u:p" not in json.dumps(view)
+    cws.write_project_settings(
+        tmp_path, {"allowedMcpServers": list(reversed(view["allowedMcpServers"]))}, h
+    )
+    on_disk = json.loads(path.read_text(encoding="utf-8"))
+    assert on_disk == {"allowedMcpServers": list(reversed(stored))}
 
 
-def test_mask_moved_onto_a_clear_list_entry_is_refused(tmp_path: Path) -> None:
-    # The list keeps its length and each masked element passes "unchanged apart from its
-    # mask", but the mask now sits where the read showed a clear value: the positional
-    # restore would copy "plain" twice and drop the credential.
+@pytest.mark.parametrize(
+    ("sent", "expected"),
+    [
+        # Each case was refused before TASK-473. The one masked entry is unique, so it
+        # binds to its stored value wherever it moves.
+        ([S, "plain"], ["https://user:tok@host/x", "plain"]),
+        ([S], ["https://user:tok@host/x"]),
+        (["plain", "new", S], ["plain", "new", "https://user:tok@host/x"]),
+    ],
+)
+def test_unique_mask_in_a_list_binds_by_entry_not_position(
+    tmp_path: Path, sent: list[Any], expected: list[Any]
+) -> None:
     settings = tmp_path / "settings.json"
     h = _seed(settings, {"mirrors": ["plain", "https://user:tok@host/x"]})
     view, _ = cws.read_user_settings(settings)
     assert view == {"mirrors": ["plain", S]}
-    with pytest.raises(cw.InvalidCandidateError, match="mirrors holds masked entries"):
-        cws.write_user_settings(settings, {"mirrors": [S, "plain"]}, h)
+    cws.write_user_settings(settings, {"mirrors": sent}, h)
+    assert json.loads(settings.read_text(encoding="utf-8")) == {"mirrors": expected}
+
+
+@pytest.mark.parametrize(
+    "sent",
+    [
+        # A copy would put the stored credential in two places.
+        [S, S],
+        ["plain", S, S],
+    ],
+)
+def test_unique_mask_sent_twice_is_refused(tmp_path: Path, sent: list[Any]) -> None:
+    settings = tmp_path / "settings.json"
+    h = _seed(settings, {"mirrors": ["plain", "https://user:tok@host/x"]})
+    with pytest.raises(cw.InvalidCandidateError, match="mirrors"):
+        cws.write_user_settings(settings, {"mirrors": sent}, h)
     assert json.loads(settings.read_text(encoding="utf-8"))["mirrors"][1].startswith("https://")
+
+
+@pytest.mark.parametrize(
+    "sent",
+    [
+        # Identical masks with a length change: which credential to keep is unknown.
+        [S],
+        [S, S, "plain"],
+        ["plain", S],
+    ],
+)
+def test_identical_masks_in_a_list_with_a_length_change_are_refused(
+    tmp_path: Path, sent: list[Any]
+) -> None:
+    settings = tmp_path / "settings.json"
+    stored = ["https://u:one@h/x", "https://u:two@h/y"]
+    h = _seed(settings, {"mirrors": stored})
+    with pytest.raises(cw.InvalidCandidateError, match="mirrors"):
+        cws.write_user_settings(settings, {"mirrors": sent}, h)
+    assert json.loads(settings.read_text(encoding="utf-8")) == {"mirrors": stored}
 
 
 @pytest.mark.parametrize(
@@ -249,6 +297,17 @@ def test_mask_under_a_value_masked_whole_is_refused(tmp_path: Path) -> None:
     h = _seed(settings, {"apiKeyHelper": {"cmd": "secret"}})
     with pytest.raises(cw.InvalidCandidateError, match=r"apiKeyHelper\.cmd holds a masked"):
         cws.write_user_settings(settings, {"apiKeyHelper": {"cmd": S}}, h)
+
+
+def test_mask_sent_in_another_shape_than_the_stored_value_is_refused(tmp_path: Path) -> None:
+    # The stored value is a string masked whole; a list or an object sent in its place has
+    # no stored element or key to bind a mask to.
+    settings = tmp_path / "settings.json"
+    h = _seed(settings, {"mirrors": "https://u:tok@h/x"})
+    for sent in ({"u": S}, [S]):
+        with pytest.raises(cw.InvalidCandidateError, match="mirrors"):
+            cws.write_user_settings(settings, {"mirrors": sent}, h)
+    assert json.loads(settings.read_text(encoding="utf-8")) == {"mirrors": "https://u:tok@h/x"}
 
 
 def test_mask_left_in_place_still_saves(tmp_path: Path) -> None:
