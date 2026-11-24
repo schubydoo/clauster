@@ -157,14 +157,25 @@ def test_inherit_requires_typed_confirmation_before_spawn(
     browser.expect_visible(confirm, timeout_ms=STATUS_TIMEOUT)
     browser.expect_visible(f'{confirm} [data-test="inherit-confirm-text"]')
     browser.expect_text(confirm, "If that is bypassPermissions, they run tools without asking.")
-    # The gate starts the mode Run took, so the picker is locked while the gate is open.
+    # The gate starts the mode Run took, so the picker and the launch-mode radios are
+    # locked while the gate is open.
     browser.expect_disabled("#perm-gamma")
+    detached = '[data-project="gamma"] input[name="lm-gamma"][value="detached"]'
+    browser.expect_disabled(detached)
     start_go = f'{confirm} [data-test="bypass-start-go"]'
     browser.expect_text(start_go, "Start with no forced mode")
     browser.fill(f'{confirm} input[type="text"]', "not-gamma")
     browser.expect_disabled(start_go)
     browser.fill(f'{confirm} input[type="text"]', "gamma")
     browser.expect_enabled(start_go)
+
+    # Cancel closes the gate and the popover; a fresh open has both controls unlocked.
+    browser.click(f'{confirm} button:not([data-test="bypass-start-go"])')
+    browser.expect_hidden('[data-project="gamma"] .launch-pop', timeout_ms=STATUS_TIMEOUT)
+    browser.click('[data-project="gamma"] [data-test="run-launch"]')
+    browser.expect_visible('[data-project="gamma"] .launch-pop')
+    browser.expect_enabled("#perm-gamma")
+    browser.expect_enabled(detached)
 
 
 def test_leaving_desktop_moves_a_bypass_default_to_ask(

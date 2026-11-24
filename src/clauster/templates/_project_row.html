@@ -97,7 +97,10 @@
                       <div class="form-label small mb-1">How do you want to drive it?</div>
                       <template x-for="m in launchModes()" :key="m.id">
                         <label class="launch-opt" :class="lmode === m.id ? 'is-sel' : ''">
+                          {# Locked while a trust or typed-confirm gate is open, like the
+                             permission picker below: the gate starts a Desktop launch. #}
                           <input type="radio" class="form-check-input mt-1 me-2" :name="'lm-{{ p.name }}'" :value="m.id" x-model="lmode"
+                                 :disabled="confirmTrust['{{ p.name }}'] || confirmBypass['{{ p.name }}']"
                                  @change="clampPermForMode()" {{ NO_AUTOFILL }}>
                           <span>
                             <span class="fw-medium d-block">
