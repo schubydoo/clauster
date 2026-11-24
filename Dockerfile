@@ -24,7 +24,7 @@ FROM alpine:3.24.4@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0
 # renovate: datasource=repology depName=alpine_3_24/uv versioning=loose
 ARG UV_VERSION=0.11.19
 # renovate: datasource=repology depName=alpine_3_24/python3 versioning=loose
-ARG PYTHON3_VERSION=3.14.10-r1
+ARG PYTHON3_VERSION=3.14.10-r2
 # System python3 is the interpreter uv builds the venv against; it must exist at
 # the same path in runtime (the copied venv points back at /usr/bin/python3). All
 # native deps ship musllinux wheels, so uv installs binaries — no compiler needed.
@@ -61,11 +61,11 @@ ARG OPENSSL_VERSION=3.5.9-r1
 # renovate: datasource=repology depName=alpine_3_24/zlib versioning=loose
 ARG ZLIB_VERSION=1.4-r0
 # renovate: datasource=repology depName=alpine_3_24/python3 versioning=loose
-ARG PYTHON3_VERSION=3.14.10-r1
+ARG PYTHON3_VERSION=3.14.10-r2
 # renovate: datasource=repology depName=alpine_3_24/git versioning=loose
 ARG GIT_VERSION=2.54.1-r0
 # renovate: datasource=repology depName=alpine_3_24/shadow versioning=loose
-ARG SHADOW_VERSION=4.18.0
+ARG SHADOW_VERSION=4.20.4-r0
 # renovate: datasource=repology depName=alpine_3_24/su-exec versioning=loose
 ARG SU_EXEC_VERSION=0.3
 RUN apk add --no-cache \
