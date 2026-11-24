@@ -14,6 +14,7 @@ Mirrors :mod:`test_config_write_mcp_cli`'s layering:
 from __future__ import annotations
 
 import json
+import re
 import shlex
 import subprocess
 import sys
@@ -457,11 +458,15 @@ def test_git_repository_not_found_masks_the_named_source(url: str) -> None:
         plugins.cli_install_plugin(str(FAKE_CLAUDE), Path("."), "gitty@market", "user", run=run)
     message = str(exc_info.value)
     assert "4492" not in message
-    assert "git.example.com" in message  # the host stays visible to diagnose it
+    # The host stays visible to diagnose it. A regex with the scheme, not a bare host
+    # substring check, which CodeQL reads as url sanitization.
+    assert _SHOWS_EXAMPLE_HOST.search(message)
     assert cw.REDACTION_SENTINEL in message
 
 
 _TOKEN_URL = "https://git.example.com/team/gone.git?token=tok4492secretvalue"
+#: A shown url on the test host: with its scheme, or with masked userinfo in front.
+_SHOWS_EXAMPLE_HOST = re.compile(r"(?:https://(?:[^\s/@]*@)?|\*+@)git\.example\.com/")
 
 
 @pytest.mark.parametrize(("call", "_subject"), _GIT_MISSING_CALLS)
@@ -505,7 +510,7 @@ def test_git_repository_not_found_masks_every_named_url(call, _subject: str, std
     message = str(exc_info.value)
     assert "4492" not in message
     assert "could not fetch its git source" in message
-    assert "git.example.com" in message
+    assert _SHOWS_EXAMPLE_HOST.search(message)
 
 
 @pytest.mark.parametrize(
