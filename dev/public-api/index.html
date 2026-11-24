@@ -1645,12 +1645,17 @@ changed.</p>
 <tr>
 <td>GET</td>
 <td><code>/sessions</code></td>
-<td>External (unmanaged) working sessions, by project</td>
+<td>External (unmanaged) working sessions, by project. Leaves out a session linked to a Crashed standard bridge.</td>
 </tr>
 <tr>
 <td>GET</td>
 <td><code>/sessions/tracked</code></td>
 <td>Live sessions owned by a managed bridge, by instance</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/sessions/orphaned</code></td>
+<td>Sessions still running after their standard bridge crashed, by instance</td>
 </tr>
 <tr>
 <td>GET</td>

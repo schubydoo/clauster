@@ -1659,7 +1659,7 @@ state directory and the same <code>~/.claude</code> data (trust file, background
 the service uses.</p>
 <h2 id="tools">Tools<a class="headerlink" href="#tools" title="Permanent link">&para;</a></h2>
 <h3 id="list_sessions"><code>list_sessions</code><a class="headerlink" href="#list_sessions" title="Permanent link">&para;</a></h3>
-<p>Lists every session Clauster can observe, as one flat array. It unions the four
+<p>Lists every session Clauster can observe, as one flat array. It unions the
 session sources the dashboard already surfaces:</p>
 <ul>
 <li><strong>bridges</strong> — managed <code>claude remote-control</code> bridges. A project may run
@@ -1673,7 +1673,11 @@ session sources the dashboard already surfaces:</p>
 <li><strong>external-session</strong> / <strong>bridge-session</strong> — live working sessions seen via the
   <code>claude agents --json</code> cross-check (unmanaged externals and the sessions under
   a managed bridge). A <code>bridge-session</code> is listed <strong>once</strong>, under the bridge that
-  owns it; its <code>parent_instance</code> is that bridge's <code>id</code>.</li>
+  owns it; its <code>parent_instance</code> is that bridge's <code>id</code>;</li>
+<li><strong>orphaned-session</strong> — a session that is still running after its standard bridge
+  crashed. Its <code>parent_instance</code> is the crashed bridge's <code>id</code>. Only the process that
+  saw the crash can link the two. <code>clauster mcp</code> is a new process for each call, so
+  it normally reports such a session as <code>external-session</code>.</li>
 </ul>
 <p>Takes no arguments. Returns <code>{"count": &lt;n&gt;, "sessions": [...]}</code>. Each session
 carries an <code>id</code>, a <code>kind</code>, a <code>status</code>/<code>state</code>, the owning <code>project</code> where known,

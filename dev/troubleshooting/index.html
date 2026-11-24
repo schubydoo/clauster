@@ -2977,7 +2977,9 @@ instead is cleaned up with:</p>
    alive and only the dashboard stream is stale; reload the page.</li>
 <li><strong>Card status</strong> — <code>crashed</code>/<code>error</code> mean the bridge is gone (the status
    table is in
-   <a href="../operations/#reading-the-bridge-debug-log">Reading the bridge debug log</a>).</li>
+   <a href="../operations/#reading-the-bridge-debug-log">Reading the bridge debug log</a>).
+   A session of a crashed standard bridge can still run. The same section says
+   what Resume does to it.</li>
 <li><strong>Process there?</strong> <code>pgrep -a -f 'claude.*remote-control'</code> — a live process
    with a dead card usually means an orphaned keeper (previous section).</li>
 </ol>
