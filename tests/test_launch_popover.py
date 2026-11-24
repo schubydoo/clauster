@@ -278,3 +278,13 @@ def test_leaving_desktop_never_snaps_back_to_bypass(write_config) -> None:
     clamp = page[page.index("clampPermForMode() {") :]
     clamp = clamp[: clamp.index("\n      },")]
     assert 'this.lperm = startPerm === "bypassPermissions" ? "default" : startPerm;' in clamp
+
+
+def test_typed_confirm_mismatch_names_the_gated_mode(write_config) -> None:
+    # TASK-480: the inherit gate reuses the bypass typed confirm, so its mismatch error must
+    # name No forced mode, as the gate's heading and button do (review nit on PR 1953).
+    page = _client(write_config).get("/").text
+    confirm = page[page.index("confirmBypassStart(name) {") :]
+    confirm = confirm[: confirm.index("\n      },")]
+    assert '(this.permMode[name] === "inherit" ? "No forced mode." : "bypass.")' in confirm
+    assert '"Type the project name exactly to confirm bypass."' not in confirm

@@ -6665,7 +6665,10 @@
       },
       confirmBypassStart(name) {
         if ((this.bypassTyped[name] || "") !== name) {
-          this.errors[name] = "Type the project name exactly to confirm bypass.";
+          // Name the gated mode, as the gate's heading and button do (TASK-480).
+          this.errors[name] =
+            "Type the project name exactly to confirm " +
+            (this.permMode[name] === "inherit" ? "No forced mode." : "bypass.");
           return;
         }
         this.confirmBypass[name] = false;
