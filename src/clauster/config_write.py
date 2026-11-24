@@ -1786,11 +1786,8 @@ class FrontmatterLoader(yaml.SafeLoader):
         return node
 
 
-class _FlowDepthLoader(FrontmatterLoader):
-    """:class:`FrontmatterLoader` whose scanner stops at a flow collection past the cap.
-
-    The cap is :data:`MAX_NESTING_DEPTH`. It reads tabs as the parse does, so the check
-    covers the same text the parse reads.
+class _FlowDepthCap:
+    """A scanner mixin that stops at a flow collection past :data:`MAX_NESTING_DEPTH`.
 
     The stop is in the scanner, so it reads quotes, comments and block scalars exactly as
     the parse does, and the cost of reaching it is linear. Raises
@@ -1798,11 +1795,26 @@ class _FlowDepthLoader(FrontmatterLoader):
     treats a YAML error as "does not parse" fails closed on it unchanged.
     """
 
+    flow_level: int
+
     def fetch_flow_collection_start(self, TokenClass: type[yaml.Token]) -> None:  # noqa: N803
         """Refuse the collection that would open past the cap, then scan as PyYAML does."""
         if self.flow_level >= MAX_NESTING_DEPTH:
-            raise FlowNestingTooDeepError(self.get_mark())
-        super().fetch_flow_collection_start(TokenClass)
+            raise FlowNestingTooDeepError(self.get_mark())  # type: ignore[attr-defined]
+        super().fetch_flow_collection_start(TokenClass)  # type: ignore[misc]
+
+
+class _FlowDepthLoader(_FlowDepthCap, FrontmatterLoader):
+    """:class:`FrontmatterLoader` with the depth cap: it reads tabs as the parse does."""
+
+
+class SafeFlowDepthLoader(_FlowDepthCap, yaml.SafeLoader):
+    """Plain ``SafeLoader`` with the depth cap, for a check that must read as before TASK-485.
+
+    The editor views decide whether a header loads as they did before
+    :class:`FrontmatterLoader`, so they build the retry text with this loader
+    (``list_loader`` of :func:`_cli_retry_text`).
+    """
 
 
 def refuse_deep_flow(header: str, *, what: str, line_offset: int) -> None:
@@ -2343,7 +2355,7 @@ def _is_tab_after_content(exc: ScannerError) -> bool:
     return mark.buffer[line_start : mark.pointer].strip(" \t") != ""
 
 
-def _is_yaml_list(text: str) -> bool:
+def _is_yaml_list(text: str, *, loader: type[yaml.SafeLoader]) -> bool:
     """Whether ``text`` alone parses as a YAML list (the CLI's ``Array.isArray(G0(w))``).
 
     Composes only, never constructs, so a merge-key pyramid in the value costs nothing here
@@ -2353,14 +2365,14 @@ def _is_yaml_list(text: str) -> bool:
     :data:`MAX_NESTING_DEPTH` raises :class:`FlowNestingTooDeepError`: no answer is safe.
     """
     try:
-        return isinstance(yaml.compose(text, Loader=_FlowDepthLoader), yaml.SequenceNode)
+        return isinstance(yaml.compose(text, Loader=loader), yaml.SequenceNode)
     except FlowNestingTooDeepError:
         raise
     except yaml.YAMLError as exc:
         return _is_yaml11_only_syntax_error(exc)
 
 
-def _cli_retry_text(header: str) -> str:
+def _cli_retry_text(header: str, *, list_loader: type[yaml.SafeLoader]) -> str:
     """Return the text the CLI parses when its first YAML parse fails (its ``SMn`` retry).
 
     A port of ``Bm`` plus the tab fix: each top-level ``key: value`` line whose value holds
@@ -2368,6 +2380,10 @@ def _cli_retry_text(header: str) -> str:
     quotes, unless the value is already quoted or is a flow list; then every run of leading
     tabs becomes two spaces per tab. So ``argument-hint: [filename] [format]``, which is not
     valid YAML, reads as the string ``[filename] [format]``.
+
+    ``list_loader`` decides whether a ``[...]`` value is a list. It is keyword-required with
+    no default: the seam passes ``_FlowDepthLoader``, and the editor views pass
+    :class:`SafeFlowDepthLoader`, so each builds the retry text its own reading needs.
     """
     lines = []
     for line in header.split("\n"):
@@ -2377,7 +2393,11 @@ def _cli_retry_text(header: str) -> str:
             quoted = (value.startswith('"') and value.endswith('"')) or (
                 value.startswith("'") and value.endswith("'")
             )
-            flow_list = value.startswith("[") and value.endswith("]") and _is_yaml_list(value)
+            flow_list = (
+                value.startswith("[")
+                and value.endswith("]")
+                and _is_yaml_list(value, loader=list_loader)
+            )
             if not quoted and not flow_list and _CLI_REQUOTE_SPECIAL_RE.search(value):
                 escaped = value.replace("\\", "\\\\").replace('"', '\\"')
                 line = f'{key}: "{escaped}"'
@@ -2581,7 +2601,7 @@ def cli_frontmatter_text(header: str) -> str:
         if _is_yaml11_only_syntax_error(exc):
             return header
     try:
-        retry = _cli_retry_text(header)
+        retry = _cli_retry_text(header, list_loader=_FlowDepthLoader)
         yaml.compose(retry, Loader=_FlowDepthLoader)
     except (yaml.YAMLError, RecursionError):
         return header

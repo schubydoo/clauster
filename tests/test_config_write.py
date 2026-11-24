@@ -2157,20 +2157,25 @@ def test_the_retry_keeps_an_already_quoted_value() -> None:
 def test_the_retry_replaces_tabs_after_a_lone_cr() -> None:
     # JavaScript's multiline `^` also matches after a lone CR. (`m:\r\tk: v` would not do: the
     # CLI's line pattern takes \r\t as the space after `m:` and quotes `k: v`, as this port does.)
-    assert cw._cli_retry_text("# c\r\tk: v\n\t\tj: w") == "# c\r  k: v\n    j: w"
-    assert cw._cli_retry_text("m:\r\tk: v") == 'm: "k: v"'
+    assert (
+        cw._cli_retry_text(list_loader=cw._FlowDepthLoader, header="# c\r\tk: v\n\t\tj: w")
+        == "# c\r  k: v\n    j: w"
+    )
+    assert cw._cli_retry_text(list_loader=cw._FlowDepthLoader, header="m:\r\tk: v") == 'm: "k: v"'
 
 
 def test_the_flow_list_check_refuses_to_answer_for_a_too_deep_value() -> None:
     # TASK-502: neither answer is safe (False would quote a list the CLI reads as a list),
     # so the depth error goes up to `cli_frontmatter_text`, which keeps the header.
     with pytest.raises(cw.FlowNestingTooDeepError):
-        cw._is_yaml_list("[" * 5000 + "]" * 5000)
+        cw._is_yaml_list(loader=cw._FlowDepthLoader, text="[" * 5000 + "]" * 5000)
     depth = cw.MAX_NESTING_DEPTH
-    assert cw._is_yaml_list("[" * depth + "]" * depth) is True
-    assert cw._is_yaml_list("[a, b]") is True
-    assert cw._is_yaml_list("[&x a, &x b]") is True  # a duplicate anchor: a list to YAML 1.2
-    assert cw._is_yaml_list("[a] [b]") is False
+    assert cw._is_yaml_list(loader=cw._FlowDepthLoader, text="[" * depth + "]" * depth) is True
+    assert cw._is_yaml_list(loader=cw._FlowDepthLoader, text="[a, b]") is True
+    assert (
+        cw._is_yaml_list(loader=cw._FlowDepthLoader, text="[&x a, &x b]") is True
+    )  # a duplicate anchor: a list to YAML 1.2
+    assert cw._is_yaml_list(loader=cw._FlowDepthLoader, text="[a] [b]") is False
 
 
 @pytest.mark.parametrize("parse", _both_parsers())

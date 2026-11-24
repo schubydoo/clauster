@@ -930,6 +930,8 @@ _YAML12_BOOLEANS = frozenset({"true", "True", "TRUE", "false", "False", "FALSE"}
 #: YAML 1.2 reads ``010`` as 10 and the others as strings.
 _YAML12_INT_RE = re.compile(r"[-+]?(?:0|[1-9][0-9]*)|0x[0-9a-fA-F]+")
 _YAML12_FLOAT_RE = re.compile(r"[-+]?(?:\.[0-9]+|[0-9]+(?:\.[0-9]*)?)(?:[eE][-+]?[0-9]+)?")
+#: A decimal integer whose text the CLI reads as the same number (``bbr`` and ``hZ``).
+_PLAIN_DECIMAL_RE = re.compile(r"[-+]?(?:0|[1-9][0-9]*)")
 _BOOL_TAG = "tag:yaml.org,2002:bool"
 _INT_TAG = "tag:yaml.org,2002:int"
 _FLOAT_TAG = "tag:yaml.org,2002:float"
@@ -940,6 +942,21 @@ def _check_spelling(label: str, node: yaml.Node, *, boolean: bool, number: bool)
     """Refuse a checked field whose value PyYAML and the CLI's YAML 1.2 read differently."""
     if not isinstance(node, yaml.ScalarNode):
         return
+    if getattr(node, cw._EXPLICIT_TAG_ATTR, None) == "!" and (
+        (boolean and node.tag == _BOOL_TAG)
+        or (
+            number
+            and node.tag in (_INT_TAG, _FLOAT_TAG)
+            and not _PLAIN_DECIMAL_RE.fullmatch(node.value)
+        )
+    ):
+        # The non-specific tag: text to YAML 1.2, so `background: ! true` is the string
+        # "true", which Claude Code ignores, and `maxTurns: ! 0x10` is the text 0x10, which
+        # it reads as 0. PyYAML resolves either as if plain (review on this branch).
+        raise cw.InvalidCandidateError(
+            f"{label} has the '!' tag, so Claude Code reads it as text, not as PyYAML "
+            "reads it. Remove the tag"
+        )
     if boolean and node.tag == _BOOL_TAG and node.value not in _YAML12_BOOLEANS:
         raise cw.InvalidCandidateError(
             f"{label}: Claude Code reads {node.value!r} as a string, not a "
@@ -1871,7 +1888,10 @@ def _safe_loader_composes(header: str) -> bool:
         if cw._is_yaml11_only_syntax_error(exc):
             return False
     try:
-        yaml.compose(cw._cli_retry_text(header), Loader=yaml.SafeLoader)
+        # The list check of the retry reads as before TASK-485 too: with the tab-aware
+        # loader, `[a<TAB>b]]` stops being a "list" and gets quoted (review on this branch).
+        retry = cw._cli_retry_text(header, list_loader=cw.SafeFlowDepthLoader)
+        yaml.compose(retry, Loader=yaml.SafeLoader)
     except (yaml.YAMLError, RecursionError):
         return False
     return True

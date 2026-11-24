@@ -3347,6 +3347,10 @@ def test_a_tab_inside_a_value_saves_and_reads_back(tmp_path: Path) -> None:
         "description: a\tb\n# see https://u:qv-tab-env@h.example.com/x\n",
         # A later error now sends the header to the retry, as the CLI reads it.
         "description: see https://u:qv-tab-env@h.example.com/x\t# c\nx: [\n",
+        # An earlier error, then a flow value that only the tab loader reads as no list:
+        # the view must build the retry text as before, too (review on this branch).
+        "description: see https://u:qv-tab-env@h.example.com/x: y\ntools: [a\tb]]\n",
+        "model: see https://u:qv-tab-env@h.example.com/x\ncolor: x: y\ntools: [a\tb] [c]\n",
     ],
 )
 def test_a_tab_header_is_shown_as_one_that_does_not_load(tmp_path: Path, header: str) -> None:
@@ -3463,3 +3467,18 @@ def test_the_view_check_fails_closed_on_a_too_deep_header(monkeypatch: pytest.Mo
 
     monkeypatch.setattr(sub.yaml, "compose", too_deep)
     assert sub._safe_loader_composes("a: b\n") is False
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [("background", "! true"), ("omitClaudeMd", "! false"), ("maxTurns", "! 0x10")],
+)
+def test_a_bang_tagged_checked_field_is_refused(key: str, value: str) -> None:
+    # `!` makes the value text to YAML 1.2: "true" is ignored, "0x10" reads as 0.
+    with pytest.raises(cw.InvalidCandidateError, match="has the '!' tag"):
+        sub.validate_agent_content(_content(**{key: value}))
+
+
+@pytest.mark.parametrize(("key", "value"), [("maxTurns", "! 5"), ("effort", "! 5")])
+def test_a_bang_tagged_plain_decimal_still_saves(key: str, value: str) -> None:
+    sub.validate_agent_content(_content(**{key: value}))  # no raise

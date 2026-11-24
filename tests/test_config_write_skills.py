@@ -3964,3 +3964,10 @@ def test_a_tab_header_that_may_hold_a_secret_is_masked_whole() -> None:
     sk.validate_skill_md_content(text)  # the save path reads it
     mask = cw.REDACTION_SENTINEL
     assert sk._member_view(text) == "---\n" + f"{mask}\n" * 3 + "---\nBody.\n"
+
+
+@pytest.mark.parametrize("point", sorted(sk._NAME_COMMON_MARKS))
+def test_a_common_script_mark_is_refused_in_a_name(point: int) -> None:
+    # After a mark of the Common script the CLI refuses a later script mark; the port
+    # refuses the Common mark itself, which only refuses more (review on this branch).
+    assert not sk.cli_shows_name("\u0915" + chr(point))
