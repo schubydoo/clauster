@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import os
 import subprocess
 import sys
@@ -719,7 +720,13 @@ def test_hosted_agent_gone_on_a_real_process():
     finally:
         proc.kill()
         proc.wait(timeout=10)
-    assert procutil.hosted_agent_gone(proc.pid, epoch, start_ticks=ticks) is True
+    pid = proc.pid
+    # On Windows the Popen object holds a handle to the child, and while a handle is open
+    # the exited process stays visible with its create time, so the probe rightly answers
+    # "not proven gone" (it failed so on Windows CI). Drop it to close the handle first.
+    del proc
+    gc.collect()
+    assert procutil.hosted_agent_gone(pid, epoch, start_ticks=ticks) is True
 
 
 class _GoneProc:
