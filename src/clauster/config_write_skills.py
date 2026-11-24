@@ -2366,9 +2366,9 @@ def _member_view(text: str) -> str:
     restore never disagree.
 
     The line masker carries state from line to line (a ``{token:`` masks the deeper lines
-    after it), and the header view can mask the text that set it off first. So a line that
-    the line masks alone would mask, but that this view leaves exactly as stored, takes the
-    line masks' view (TASK-558): the view never masks a line less than the line masks do.
+    after it), and the header view can mask the text that set it off first. So each line
+    goes through :func:`_no_less_masked` (TASK-558): the view never shows text on a line
+    that the line masks alone hid.
     """
     bom = "\ufeff" if text.startswith("\ufeff") else ""
     core = text[len(bom) :]
@@ -2389,7 +2389,46 @@ def _member_view(text: str) -> str:
     old, new = lines_only.splitlines(keepends=True), shown.splitlines(keepends=True)
     if not len(raw) == len(old) == len(new):  # pragma: no cover - both views keep lines
         return "".join(_masked_whole(line) for line in raw)
-    return "".join(o if o != r and n == r else n for r, o, n in zip(raw, old, new, strict=True))
+    return "".join(_no_less_masked(r, o, n) for r, o, n in zip(raw, old, new, strict=True))
+
+
+def _shows_only_what(old: str, new: str) -> bool:
+    """Whether each unmasked piece of ``new`` is text that ``old`` shows too, in order.
+
+    Both are views of one line: its text with spans replaced by the mask, left to right. So
+    when ``new`` hides at least what ``old`` hides, its pieces sit inside the pieces of
+    ``old`` in the same order. Greedy and forward only, so the cost stays linear.
+    """
+    shown = old.split(cw.REDACTION_SENTINEL)
+    index, pos = 0, 0
+    for piece in new.split(cw.REDACTION_SENTINEL):
+        if not piece:
+            continue
+        while index < len(shown):
+            at = shown[index].find(piece, pos)
+            if at >= 0:
+                pos = at + len(piece)
+                break
+            index, pos = index + 1, 0
+        else:
+            return False
+    return True
+
+
+def _no_less_masked(raw: str, old: str, new: str) -> str:
+    """Return the view of one line that never shows what the line masks alone hid.
+
+    ``old`` is the line masks' view of ``raw`` and ``new`` the full view (TASK-558). A line
+    that ``old`` leaves as it is, or that both views show alike, takes ``new``. Where
+    ``new`` left the line as stored, ``old`` is used. Where they differ otherwise, ``new``
+    is kept only while it shows nothing that ``old`` hid (:func:`_shows_only_what`, for
+    example a credential URL that ``new`` masks whole), and the line is masked whole if not.
+    """
+    if old == raw or new == old:
+        return new
+    if new == raw:
+        return old
+    return new if _shows_only_what(old, new) else _masked_whole(raw)
 
 
 def read_skill_file(

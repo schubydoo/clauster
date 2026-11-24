@@ -595,7 +595,48 @@ _READ_ANOTHER_WAY = [
     "    env: {DEBUG: yes}\n",
     f'mcpServers:\n  - args: [--token, "{{api_key:"]\n    command: run --password {HELD_B}\n'
     "    env: {DEBUG: yes}\n",
+    # The deeper line is masked by both views, differently: the new view alone would show
+    # the key `X`, which the old view hid with the rest of the line.
+    f'mcpServers:\n  - url: "https://h.example.com/?q={{token:"\n'
+    f"    env: {{X: {HELD_B}, D: yes}}\n",
 ]
+
+
+def _hides_at_least(raw: str, old: str, new: str) -> bool:
+    """Whether the line view ``new`` shows nothing that the line view ``old`` hid.
+
+    An oracle kept apart from the code: ``new`` is ``old``, the whole-line mask, or each of
+    its unmasked pieces is text that a piece of ``old`` shows too.
+    """
+    if old == raw or new == old or new == sk._masked_whole(raw):
+        return True
+    shown = old.split(MASK)
+    return all(any(piece in s for s in shown) for piece in new.split(MASK) if piece)
+
+
+@pytest.mark.parametrize(
+    ("raw", "old", "new", "view"),
+    [
+        # Both views agree, or the old view left the line alone.
+        ("a: b\n", "a: b\n", f"a: {MASK}\n", f"a: {MASK}\n"),
+        ("t: x\n", f"t: {MASK}\n", f"t: {MASK}\n", f"t: {MASK}\n"),
+        # The new view left the line as stored: the old view is kept.
+        ("    note: x\n", f"    {MASK}\n", "    note: x\n", f"    {MASK}\n"),
+        # The new view masks more (a credential URL masked whole): it is kept.
+        (
+            "url: https://u:p@h.example.com/p\n",
+            f"url: {MASK}@h.example.com/p\n",
+            f"url: {MASK}\n",
+            f"url: {MASK}\n",
+        ),
+        # The new view would show a key the old view hid: the whole line is masked.
+        ("    env: {X: v}\n", f"    {MASK}\n", f"    env: {{X: {MASK}}}\n", f"{MASK}\n"),
+        # Pieces that the old view shows, but out of order, are not trusted.
+        ("abXYcd\n", f"ab{MASK}cd\n", f"{MASK}cd{MASK}ab{MASK}\n", f"{MASK}\n"),
+    ],
+)
+def test_each_line_keeps_what_the_line_masks_hid(raw: str, old: str, new: str, view: str) -> None:
+    assert sk._no_less_masked(raw, old, new) == view
 
 
 @pytest.mark.parametrize("header", _READ_ANOTHER_WAY)
@@ -621,8 +662,7 @@ def test_a_skill_never_shows_a_line_the_line_masks_hide(tmp_path: Path, header: 
     before = cw.redact_secret_lines(stored)
     lines = zip(stored.splitlines(), before.splitlines(), content.splitlines(), strict=True)
     for raw, old, new in lines:
-        if old != raw:
-            assert new != raw
+        assert _hides_at_least(raw, old, new), new
 
 
 def _old_fallback(text: str) -> str:
@@ -656,8 +696,7 @@ def test_no_refused_header_is_masked_less_than_before(tmp_path: Path, stored: st
     lines = stored.splitlines()
     assert len(now.splitlines()) == len(lines) == len(before.splitlines())
     for raw, old, new in zip(lines, before.splitlines(), now.splitlines(), strict=True):
-        if old != raw:
-            assert new != raw
+        assert _hides_at_least(raw, old, new), new
     for value in (HELD_A, HELD_B):
         if value not in before:
             assert value not in now
