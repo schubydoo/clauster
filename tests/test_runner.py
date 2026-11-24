@@ -3676,6 +3676,66 @@ async def test_watch_reconciles_an_expected_startup_exit_without_a_crash(
     assert "crash" not in events
 
 
+async def test_watch_death_between_its_liveness_read_and_the_markers_is_the_next_ticks(
+    runner_config, monkeypatch
+):
+    # TASK-545: the watch reads the bridge alive, then reads the log. A death in that gap
+    # used to end the row ERROR on a second liveness read (seen on a slow macOS runner). The
+    # next tick now ends it by the poll loop's rule: STOPPED for a session-mode exit.
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "stall")
+    monkeypatch.setattr("clauster.spawn_coordinator._READY_TIMEOUT", 0.2)
+    monkeypatch.setattr("clauster.spawn_coordinator._STARTUP_WATCH_INTERVAL", 0.05)
+    config, claude_json = runner_config
+    config.claude.startup_grace_seconds = 30
+    runner = SessionRunner(config, claude_json=claude_json)
+    events = _lifecycle_events(runner, monkeypatch)
+    inst = await runner.spawn("alpha", spawn_mode="session")
+    assert inst.status is InstanceStatus.STARTING
+    await runner.poll_once()  # this runner is the one that announces crashes
+    proc = runner._procs[inst.instance_id]
+    real_read = runner._spawner._read_markers
+
+    def read_then_die(path):
+        markers = real_read(path)
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(10)  # dead before the watch looks at liveness again
+        return markers
+
+    monkeypatch.setattr(runner._spawner, "_read_markers", read_then_die)
+    await runner._startup_watches[inst.instance_id]
+    assert inst.status is InstanceStatus.STOPPED
+    assert runner._crash_counts.get("alpha", 0) == 0
+    assert "crash" not in events
+
+
+async def test_apply_markers_with_detail_takes_the_callers_liveness_reading(
+    runner_config, monkeypatch
+):
+    # TASK-545: the watch hands down its own reading, so a later death is not read here.
+    runner = _make_runner(runner_config)
+    inst = RemoteControlInstance(project="alpha", label="alpha", status=InstanceStatus.STARTING)
+    await runner._spawner._apply_markers_with_detail(
+        inst, bridge_log.BridgeMarkers(), _Proc(1), proc_dead=False
+    )
+    assert inst.status is InstanceStatus.STARTING
+    assert inst.error_detail is None
+
+
+async def test_apply_pty_info_with_detail_takes_the_callers_liveness_reading(
+    runner_config, tmp_path
+):
+    # TASK-545: the pty half of the same rule. A keeper death after the watch's reading is
+    # the next tick's, which reads the sidecar error or reconciles the death.
+    runner = _make_runner(runner_config)
+    inst = RemoteControlInstance(project="alpha", label="alpha", status=InstanceStatus.STARTING)
+    await runner._spawner._apply_pty_info_with_detail(
+        inst, {}, _Proc(1), tmp_path / "keeper.json", keeper_dead=False
+    )
+    assert inst.status is InstanceStatus.STARTING
+    assert inst.error_detail is None
+
+
 async def test_peer_process_watch_reconciles_a_startup_crash_without_announcing(
     runner_config, monkeypatch
 ):

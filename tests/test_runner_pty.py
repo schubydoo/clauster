@@ -1586,17 +1586,33 @@ async def test_startup_watch_sets_a_dead_keepers_reason_with_its_status(
         await runner.stop(inst.instance_id)
 
 
-def _late_keeper(monkeypatch, sidecar_json: str) -> None:
-    """Launch a keeper that writes ``sidecar_json`` after the readiness wait, then exits."""
-    keeper = f"import sys, time; time.sleep(0.3); open(sys.argv[1], 'w').write({sidecar_json!r})"
-    monkeypatch.setattr(
-        BridgeLaunch,
-        "_keeper_launch_cmd",
-        staticmethod(lambda sidecar, *a, **k: [sys.executable, "-c", keeper, str(sidecar)]),
+def _late_keeper(monkeypatch, sidecar_json: str) -> list[Path]:
+    """Launch a keeper that writes ``sidecar_json`` after the readiness wait, then exits.
+
+    The keeper waits for a ``.go`` file next to its sidecar, which
+    :func:`_poll_after_keeper_exit` creates once the spawn returned. A fixed sleep raced the
+    readiness wait on a slow runner (macOS CI), and the spawn then read the error itself.
+    The returned list receives the sidecar path when the keeper launches.
+    """
+    keeper = (
+        "import os, sys, time\n"
+        "go = sys.argv[1] + '.go'\n"
+        "end = time.monotonic() + 30\n"
+        "while not os.path.exists(go) and time.monotonic() < end:\n"
+        "    time.sleep(0.01)\n"
+        f"open(sys.argv[1], 'w').write({sidecar_json!r})\n"
     )
+    sidecars: list[Path] = []
+
+    def launch(sidecar, *a, **k):
+        sidecars.append(Path(sidecar))
+        return [sys.executable, "-c", keeper, str(sidecar)]
+
+    monkeypatch.setattr(BridgeLaunch, "_keeper_launch_cmd", staticmethod(launch))
     monkeypatch.setattr("clauster.spawn_coordinator._READY_TIMEOUT", 0.1)
     # Wide enough that the poll below runs after the keeper exits and before the first tick.
     monkeypatch.setattr("clauster.spawn_coordinator._STARTUP_WATCH_INTERVAL", 1.5)
+    return sidecars
 
 
 def _lifecycle_events(runner, monkeypatch) -> list[str]:
@@ -1612,10 +1628,12 @@ def _lifecycle_events(runner, monkeypatch) -> list[str]:
     return seen
 
 
-async def _poll_after_keeper_exit(runner, inst) -> subprocess.Popen:
-    """Give the row a dead bridge pid, as an earlier sidecar read would, and poll once."""
+async def _poll_after_keeper_exit(runner, inst, sidecars: list[Path]) -> subprocess.Popen:
+    """Let the keeper write and exit, give the row its dead bridge pid, and poll once."""
     proc = runner._registry._procs[inst.instance_id]
     inst.bridge_pid = proc.pid  # the keeper here is also the bridge, and dies with it
+    (sidecar,) = sidecars
+    Path(f"{sidecar}.go").touch()  # the spawn returned: the keeper may write now
     await asyncio.to_thread(proc.wait, 10)
     await runner.poll_once()  # between the keeper's exit and the watch's first tick
     return proc
@@ -1631,13 +1649,13 @@ async def test_poll_between_keeper_error_and_watch_tick_is_not_a_crash(
     before the next watch tick used to read the dead STARTING row as CRASHED, count it, and
     announce it, and the watch then found the row resolved and left it so.
     """
-    _late_keeper(monkeypatch, '{"error": "keeper said no"}')
+    sidecars = _late_keeper(monkeypatch, '{"error": "keeper said no"}')
     runner, _ = _pty_runner(runner_config)
     events = _lifecycle_events(runner, monkeypatch)
     inst = await runner.spawn("alpha")
     try:
         assert inst.status is InstanceStatus.STARTING
-        await _poll_after_keeper_exit(runner, inst)
+        await _poll_after_keeper_exit(runner, inst, sidecars)
         assert inst.status is InstanceStatus.STARTING, "the poll loop decided a watched start"
         await runner._startup_watches[inst.instance_id]
         assert inst.status is InstanceStatus.ERROR
@@ -1657,7 +1675,7 @@ async def test_pty_startup_crash_with_a_poll_in_the_gap_is_counted_once(
 
     The watch owns it now, so it also records the task-limit reason the poll loop would.
     """
-    _late_keeper(monkeypatch, '{"state": "exited", "bridge_exit": 1}')
+    sidecars = _late_keeper(monkeypatch, '{"state": "exited", "bridge_exit": 1}')
     monkeypatch.setattr(
         "clauster.poll_loop.task_limits.crash_note", lambda base: f"limit hit by {base.pid}"
     )
@@ -1670,7 +1688,7 @@ async def test_pty_startup_crash_with_a_poll_in_the_gap_is_counted_once(
         runner._poll_loop._task_counts[inst.instance_id] = task_limits.TaskEventCount(
             pid=pid, cgroup=Path("/nonexistent"), own=0, parent=None
         )
-        await _poll_after_keeper_exit(runner, inst)
+        await _poll_after_keeper_exit(runner, inst, sidecars)
         assert inst.status is InstanceStatus.STARTING, "the poll loop decided a watched start"
         await runner._startup_watches[inst.instance_id]
         assert inst.status is InstanceStatus.CRASHED

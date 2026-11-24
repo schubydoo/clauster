@@ -1237,7 +1237,13 @@ class SpawnCoordinator:
             self._record._emit_lifecycle("ready", instance)  # only on the transition
 
     async def _apply_pty_info_with_detail(
-        self, instance: RemoteControlInstance, info: dict, proc: subprocess.Popen, sidecar: Path
+        self,
+        instance: RemoteControlInstance,
+        info: dict,
+        proc: subprocess.Popen,
+        sidecar: Path,
+        *,
+        keeper_dead: bool | None = None,
     ) -> None:
         """Fold the sidecar in, and give an ERROR row its ``error_detail`` in the same step.
 
@@ -1246,8 +1252,10 @@ class SpawnCoordinator:
         loop, an API read, or another task's persist saw ERROR with no reason. The keeper's
         liveness is read once and handed down, so the row cannot end ERROR on a death this
         step did not fetch a detail for; a death after the read is the next tick's to see.
+        The startup watch passes its own reading as ``keeper_dead``, for the same reason.
         """
-        keeper_dead = proc.poll() is not None
+        if keeper_dead is None:
+            keeper_dead = proc.poll() is not None
         detail = None
         if instance.error_detail is None and (keeper_dead or info.get("state") == "error"):
             detail = await self._failure_detail_soon(sidecar, info)
@@ -1449,6 +1457,8 @@ class SpawnCoordinator:
         instance: RemoteControlInstance,
         markers: bridge_log.BridgeMarkers,
         proc: subprocess.Popen,
+        *,
+        proc_dead: bool | None = None,
     ) -> None:
         """Fold the markers in, and give a failed start its ``error_detail`` in the same step.
 
@@ -1459,8 +1469,13 @@ class SpawnCoordinator:
         The read covers every ERROR outcome of :meth:`_apply_markers`. For a poisoned
         reattach the spawn's heal step then writes its own reason over the tail. The watch
         does not heal, so there the tail is the reason.
+
+        The startup watch passes its own reading as ``proc_dead``. Its tick already found the
+        bridge alive, and a death after that reading is the next tick's, which ends it as the
+        poll loop would (CRASHED or STOPPED), not as a failed start here.
         """
-        proc_dead = proc.poll() is not None
+        if proc_dead is None:
+            proc_dead = proc.poll() is not None
         fails = (
             markers.poison_reason is not None
             or proc_dead
@@ -1555,7 +1570,11 @@ class SpawnCoordinator:
                 # still runs, deleting its unpack dir, or claude's login screen, TASK-533):
                 # keep the reason, as `_spawn_pty` does, because this watch never looks at
                 # the row again.
-                await self._apply_pty_info_with_detail(instance, info or {}, proc, sidecar)
+                # This tick read the keeper alive above: a death since then is the next
+                # tick's startup death, which reads the sidecar's error or reconciles it.
+                await self._apply_pty_info_with_detail(
+                    instance, info or {}, proc, sidecar, keeper_dead=False
+                )
                 # Keep the at-rest mirror current during pty startup too: poll_once
                 # can't yet (bridge_pid is still unknown until the sidecar reveals it),
                 # so without this the public log would stale out after _spawn_pty's
@@ -1567,7 +1586,9 @@ class SpawnCoordinator:
             else:
                 raw = instance.bridge_raw_log_path or log_path
                 markers = await asyncio.to_thread(self._read_markers, raw)
-                await self._apply_markers_with_detail(instance, markers, proc)
+                # This tick read the bridge alive above: hand that reading down, so a death
+                # in the marker read is the next tick's startup death, not a failed start.
+                await self._apply_markers_with_detail(instance, markers, proc, proc_dead=False)
                 await asyncio.to_thread(self._flush_redacted_mirror, instance)  # at-rest log
                 if instance.status is not InstanceStatus.STARTING:  # promoted, or trust ERROR
                     await self._post_spawn_enrich(
