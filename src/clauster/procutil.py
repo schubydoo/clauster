@@ -852,11 +852,13 @@ def session_child_debug_file(pid: int) -> tuple[str, Path] | None:
 
     The argv of a session child also holds its session URL, so this returns the two values
     and nothing else, and a caller must never log the argv. Fails closed on a gone, denied
-    or zombie process and on a missing flag.
+    or zombie process and on a missing flag. A plain ``OSError`` (no file descriptors left)
+    propagates: it says nothing about this process, and "not a child" would let the
+    phantom-prune delete the crashed row of a session that is still running.
     """
     try:
         argv = psutil.Process(pid).cmdline()
-    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, ValueError, OSError):
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, ValueError):
         return None
     if not _is_session_worker(argv):
         return None

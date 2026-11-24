@@ -76,7 +76,7 @@ def test_session_child_debug_file_reads_only_a_complete_child_argv(monkeypatch, 
 
 
 @pytest.mark.parametrize(
-    "error", [psutil.NoSuchProcess(1), psutil.AccessDenied(1), psutil.ZombieProcess(1), OSError()]
+    "error", [psutil.NoSuchProcess(1), psutil.AccessDenied(1), psutil.ZombieProcess(1)]
 )
 def test_session_child_debug_file_fails_closed_on_an_unreadable_process(monkeypatch, error):
     def _raise(pid):
@@ -84,6 +84,19 @@ def test_session_child_debug_file_fails_closed_on_an_unreadable_process(monkeypa
 
     monkeypatch.setattr(procutil.psutil, "Process", _raise)
     assert procutil.session_child_debug_file(500) is None
+
+
+def test_session_child_debug_file_does_not_hide_a_host_error(monkeypatch):
+    class _NoDescriptors:
+        def __init__(self, pid):
+            pass
+
+        def cmdline(self):
+            raise OSError(24, "Too many open files")
+
+    monkeypatch.setattr(procutil.psutil, "Process", _NoDescriptors)
+    with pytest.raises(OSError, match="Too many open files"):
+        procutil.session_child_debug_file(500)
 
 
 # ----- the link: the debug-file name, nothing else ------------------------------------------
@@ -468,6 +481,30 @@ async def test_failed_link_step_does_not_prune_the_crashed_row(
 
     assert inst.instance_id in runner._instances
     assert runner._sessions == holder["s"]
+
+
+async def test_host_error_on_the_survivor_read_does_not_prune_its_row(runner_config, monkeypatch):
+    holder = {}
+    runner, inst = _runner(runner_config, monkeypatch, lambda *a, **k: holder["s"])
+    alpha = runner._discovered()["alpha"].path
+    holder["s"] = [_session(cwd=str(alpha)), _session(pid=600, cwd=str(alpha))]
+
+    class _NoDescriptors:
+        def __init__(self, pid):
+            pass
+
+        def cmdline(self):
+            raise OSError(24, "Too many open files")
+
+    # The real argv reader runs (no `children` fixture). The later owner walk still works.
+    monkeypatch.setattr(procutil, "bridge_ancestor", lambda pid: 77 if pid == 600 else None)
+    monkeypatch.setattr(procutil, "owned_pids", lambda roots: set(roots))
+    monkeypatch.setattr(procutil.psutil, "Process", _NoDescriptors)
+
+    await runner.poll_once()
+
+    assert inst.instance_id in runner._instances
+    assert holder["s"][0].attribution is Attribution.EXTERNAL
 
 
 async def test_tick_that_dies_after_publishing_keeps_its_fresh_links(runner_config, monkeypatch):
