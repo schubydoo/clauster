@@ -613,6 +613,8 @@ def test_marketplace_remove_renders_only_where_the_scope_declares_it(write_confi
     assert "uninstalls its plugins in every scope and project" in html
     # Both save paths that can carry warnings reveal them through one selector helper.
     assert html.count("this.revealFeedback(this._configMgmtResultSelector());") == 2
+    assert """if (c.error) return '[data-test="cm-error"]';""" in html
+    assert "return c.saved && c.warnings.length" in html
     assert """? '[data-test="cm-save-warnings"]' : '[data-test="cm-saved"]'""" in html
     assert """revealFeedback(c.error ? '[data-test="cm-error"]'""" not in html
     assert 'Local scope." + manual;' in html and "return none + tail + manual;" in html

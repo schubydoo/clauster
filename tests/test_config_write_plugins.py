@@ -1413,6 +1413,29 @@ def test_route_marketplace_remove_names_the_plugins_the_cli_uninstalled(
             "1 plugin from this marketplace.",
             False,
         ),
+        # Shell text that carries the right suffix must still fail the id validator.
+        (
+            "Also uninstalled 1 plugin from this marketplace:\n  x; rm -rf ~@m\n",
+            "1 plugin from this marketplace.",
+            False,
+        ),
+        # The suffix is the whole marketplace segment.
+        (
+            "Also uninstalled 1 plugin from this marketplace:\n  fmt@mx\n",
+            "1 plugin from this marketplace.",
+            False,
+        ),
+        (
+            "Also uninstalled 1 plugin from this marketplace:\n  fmt@xm\n",
+            "1 plugin from this marketplace.",
+            False,
+        ),
+        # Only `count` lines are read.
+        (
+            "Also uninstalled 1 plugin from this marketplace:\n  fmt@m\n  lint@m\n",
+            "1 plugin from this marketplace: fmt@m.",
+            True,
+        ),
     ],
 )
 def test_uninstalled_warning_names_only_a_complete_valid_list(

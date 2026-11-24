@@ -443,7 +443,9 @@ async def test_spawn_pty_resume_session_reaches_argv(runner_config) -> None:
 
 
 @_POSIX_ONLY
-async def test_spawn_pty_launch_failure_sets_error(runner_config, tmp_path, monkeypatch) -> None:
+async def test_spawn_pty_launch_failure_sets_error(
+    runner_config, tmp_path, monkeypatch, caplog
+) -> None:
     """A keeper that fails to launch (OSError) marks the instance ERROR and persists it."""
     from clauster.models import Project, RemoteControlInstance
 
@@ -474,6 +476,7 @@ async def test_spawn_pty_launch_failure_sets_error(runner_config, tmp_path, monk
     detail = out.error_detail or ""
     assert detail.endswith("openpty: too many open files")
     assert token not in detail and len(detail) == 2000
+    assert "too many open files" in caplog.text and token not in caplog.text
     assert persisted == [True]  # the ERROR state was persisted, not swallowed
 
 

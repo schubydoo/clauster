@@ -700,7 +700,7 @@ async def test_spawn_poison_marks_error_and_clears_pointer(runner_config, monkey
     assert _anchor_dropped(pointer)  # heal cleared the stale pointer for a cold restart
 
 
-async def test_spawn_launch_failure_keeps_a_redacted_reason(runner_config, monkeypatch):
+async def test_spawn_launch_failure_keeps_a_redacted_reason(runner_config, monkeypatch, caplog):
     # TASK-515: an exec failure wrote no bridge output, so the exception is the only reason.
     runner = _make_runner(runner_config)
     token = "session_01ABCDEFGHJKMNPQRSTVWXYZ"
@@ -714,6 +714,7 @@ async def test_spawn_launch_failure_keeps_a_redacted_reason(runner_config, monke
     detail = inst.error_detail or ""
     assert detail.endswith("exec failed")
     assert token not in detail and len(detail) == 2000
+    assert "exec failed" in caplog.text and token not in caplog.text
 
 
 async def test_forget_refuses_running_bridge(runner_config, monkeypatch):
