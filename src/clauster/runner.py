@@ -618,6 +618,7 @@ class SessionRunner:
             retire_ended_starters=lambda: self._retire_ended_starters(),
             crash_note=lambda inst, pid: self._poll_loop.crash_note(inst, pid),
             announce_crash=lambda inst, note: self._poll_loop.announce_crash(inst, note),
+            reports_crashes=lambda: self._poll_loop.reports_crashes,
         )
 
     # ----- read API -------------------------------------------------------

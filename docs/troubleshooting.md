@@ -316,15 +316,16 @@ lifecycle](architecture.md#bridge-lifecycle).
 ### A worktree Interactive Session goes straight to "error"
 
 **What you see:** an Interactive Session in `worktree` spawn mode shows `error`
-at once. The card says that worktree mode needs a commit and that the repository
-has none.
+at once. The card says that worktree mode needs a commit and that `HEAD` names
+no commit.
 
 **Most likely cause:** the project is a git repository with no commit yet, for
 example one made with `git init` and nothing committed. A worktree branches from
-the commit at `HEAD`, and an empty repository has none. Clauster checks this
-before it starts the session, so no `claude` process runs.
+the commit at `HEAD`, and an empty repository has none. A branch made with
+`git checkout --orphan` and not yet committed has the same problem. Clauster
+checks this before it starts the session, so no `claude` process runs.
 
-**The fix:** make a first commit in the repository, or start the session in the
+**The fix:** make a commit in the repository, or start the session in the
 `same-dir` spawn mode.
 
 ### The card goes straight to "crashed"

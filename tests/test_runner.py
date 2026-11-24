@@ -3674,6 +3674,164 @@ async def test_watch_reconciles_an_expected_startup_exit_without_a_crash(
     assert "crash" not in events
 
 
+async def test_peer_process_watch_reconciles_a_startup_crash_without_announcing(
+    runner_config, monkeypatch
+):
+    # TASK-545 with #1104: a process that never runs the side-effecting poll (`clauster
+    # mcp` keeps the watch of a bridge it spawned) only reconciles. The live service, which
+    # adopts the row and has no watch for it, announces the death, so it is announced once.
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "stall")
+    monkeypatch.setattr("clauster.spawn_coordinator._READY_TIMEOUT", 0.2)
+    monkeypatch.setattr("clauster.spawn_coordinator._STARTUP_WATCH_INTERVAL", 0.05)
+    config, claude_json = runner_config
+    config.claude.startup_grace_seconds = 30
+    runner = SessionRunner(config, claude_json=claude_json)
+    events = _lifecycle_events(runner, monkeypatch)
+    inst = await runner.spawn("alpha")
+    assert not runner._poll_loop.reports_crashes
+    runner._procs[inst.instance_id].kill()
+    await runner._startup_watches[inst.instance_id]
+    assert inst.status is InstanceStatus.CRASHED
+    assert runner._crash_counts.get("alpha", 0) == 0
+    assert "crash" not in events
+
+
+async def test_poll_during_the_spawn_readiness_step_is_not_a_crash(runner_config, monkeypatch):
+    # TASK-545: before its watch exists, the spawn itself owns the STARTING row. A poll while
+    # the spawn reads a dead bridge's stderr must not count and announce a crash that the
+    # spawn then ends as ERROR.
+    import threading
+
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "stderr_error")
+    reading = threading.Event()
+    release = threading.Event()
+    real = SessionRunner._capture_error_detail
+
+    def held(cls, instance):
+        reading.set()
+        release.wait(10)
+        real(instance)
+
+    monkeypatch.setattr(SessionRunner, "_capture_error_detail", classmethod(held))
+    runner = _make_runner(runner_config)
+    events = _lifecycle_events(runner, monkeypatch)
+    spawn = asyncio.create_task(runner.spawn("alpha"))
+    try:
+        assert await asyncio.to_thread(reading.wait, 10)
+        inst = next(iter(runner._instances.values()))
+        assert inst.status is InstanceStatus.STARTING
+        await runner.poll_once()
+        assert inst.status is InstanceStatus.STARTING, "the poll loop decided a spawn's start"
+    finally:
+        release.set()
+    inst = await spawn
+    assert inst.status is InstanceStatus.ERROR
+    assert inst.error_detail and "HTTP 401" in inst.error_detail
+    assert runner._crash_counts.get("alpha", 0) == 0
+    assert "crash" not in events
+    assert runner._registry._spawn_in_flight == {}
+
+
+async def test_poll_loop_reconciles_a_running_row_whose_watch_still_runs(
+    runner_config, monkeypatch
+):
+    # TASK-545: the poll loop yields only a STARTING row. A row the watch already promoted,
+    # while the watch still finishes its last awaits, is the poll loop's to judge.
+    runner = _make_runner(runner_config)
+    monkeypatch.setattr("clauster.inspector.list_working_sessions", lambda *a, **k: [])
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: False)
+    inst = RemoteControlInstance(
+        project="alpha", label="alpha", status=InstanceStatus.RUNNING, bridge_pid=4242
+    )
+    runner._instances[inst.instance_id] = inst
+    watch = asyncio.create_task(asyncio.Event().wait())
+    runner._startup_watches[inst.instance_id] = watch
+    try:
+        await runner.poll_once()
+    finally:
+        watch.cancel()
+    assert inst.status is InstanceStatus.CRASHED
+    assert runner._crash_counts["alpha"] == 1
+
+
+class _Proc:
+    """A stand-in Popen whose successive ``poll()`` reads are scripted."""
+
+    def __init__(self, *reads):
+        self._reads = list(reads)
+        self.pid = 4242
+
+    def poll(self):
+        return self._reads.pop(0) if len(self._reads) > 1 else self._reads[0]
+
+
+@pytest.mark.parametrize(
+    "markers",
+    [
+        bridge_log.BridgeMarkers(trust_error=True),  # trust refused, bridge still alive
+        bridge_log.BridgeMarkers(poison_reason="archived"),  # the watch does not heal it
+    ],
+)
+async def test_apply_markers_with_detail_reads_the_reason_for_a_live_failure(
+    runner_config, monkeypatch, markers
+):
+    # TASK-544: every ERROR outcome gets the stderr tail before the row reads ERROR, also
+    # the ones where the bridge is still alive.
+    monkeypatch.setattr(
+        SessionRunner,
+        "_capture_error_detail",
+        classmethod(lambda cls, inst: setattr(inst, "error_detail", "stderr tail")),
+    )
+    runner = _make_runner(runner_config)
+    inst = RemoteControlInstance(project="alpha", label="alpha", status=InstanceStatus.STARTING)
+    await runner._spawner._apply_markers_with_detail(inst, markers, _Proc(None))
+    assert inst.status is InstanceStatus.ERROR
+    assert inst.error_detail == "stderr tail"
+
+
+async def test_apply_markers_with_detail_reads_liveness_once(runner_config, monkeypatch):
+    # TASK-544: a death after the one liveness read is the next tick's, so the row never
+    # ends ERROR on a death this step fetched no reason for.
+    runner = _make_runner(runner_config)
+    inst = RemoteControlInstance(project="alpha", label="alpha", status=InstanceStatus.STARTING)
+    await runner._spawner._apply_markers_with_detail(
+        inst, bridge_log.BridgeMarkers(), _Proc(None, 1)
+    )
+    assert inst.status is InstanceStatus.STARTING
+    assert inst.error_detail is None
+
+
+async def test_crash_note_keeps_the_baseline_when_its_reader_is_cancelled(
+    runner_config, monkeypatch
+):
+    # TASK-545: a watch cancelled in the task-limit read leaves the baseline, so the poll
+    # loop that then takes the crash still gives its reason.
+    import threading
+
+    started, release = threading.Event(), threading.Event()
+
+    def held(base):
+        started.set()
+        release.wait(10)
+        return "note"
+
+    monkeypatch.setattr("clauster.poll_loop.task_limits.crash_note", held)
+    runner = _make_runner(runner_config)
+    inst = RemoteControlInstance(project="alpha", label="alpha")
+    base = task_limits.TaskEventCount(pid=7, cgroup=Path("/nonexistent"), own=0, parent=None)
+    runner._poll_loop._task_counts[inst.instance_id] = base
+    reader = asyncio.create_task(runner._poll_loop.crash_note(inst, 7))
+    assert await asyncio.to_thread(started.wait, 10)
+    reader.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await reader
+    release.set()
+    assert runner._poll_loop._task_counts[inst.instance_id] is base
+    assert await runner._poll_loop.crash_note(inst, 7) == "note"
+    assert inst.instance_id not in runner._poll_loop._task_counts
+    assert await runner._poll_loop.crash_note(inst, 7) is None
+
+
 def test_capture_error_detail_no_log_is_noop():
     inst = RemoteControlInstance(project="x", label="x", bridge_debug_log_path=None)
     SessionRunner._capture_error_detail(inst)  # must not raise

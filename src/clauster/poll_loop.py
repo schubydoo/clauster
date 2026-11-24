@@ -129,6 +129,8 @@ class PollLoop:
         self._record = record
         # Last refused-fork counters of each live bridge, the baseline for a crash reason.
         self._task_counts: dict[str, task_limits.TaskEventCount] = {}
+        # Set once this process runs a side-effecting poll (see `reports_crashes`).
+        self._reports_crashes = False
         self._sample_one_bridge = sample_one_bridge
         self._warn_if_refresh_slow = warn_if_refresh_slow
         self._reconcile_status = reconcile_status
@@ -197,24 +199,45 @@ class PollLoop:
             self._warn_if_refresh_slow(time.monotonic() - started)
             await asyncio.sleep(self._config.metrics.poll_seconds)
 
-    def _startup_watched(self, instance: RemoteControlInstance) -> bool:
-        """Return True while a STARTING row's own startup watch still runs (TASK-545)."""
+    def _startup_owned(self, instance: RemoteControlInstance) -> bool:
+        """Return True while a STARTING row's own spawn or startup watch still runs (TASK-545).
+
+        Either one reads the bridge's death and decides the outcome, so the poll loop must
+        not decide it first. A watch that is done, even before its done-callback removed it,
+        leaves the row to the poll loop again, so a startup death is never lost.
+        """
+        if instance.status is not InstanceStatus.STARTING:
+            return False
+        if instance.instance_id in self._registry._spawn_in_flight:
+            return True
         watch = self._registry._startup_watches.get(instance.instance_id)
-        return (
-            instance.status is InstanceStatus.STARTING and watch is not None and not watch.done()
-        )
+        return watch is not None and not watch.done()
+
+    @property
+    def reports_crashes(self) -> bool:
+        """Whether this process announces crashes: it runs the side-effecting poll loop.
+
+        A peer process (``clauster mcp``, or a one-shot ``clauster start``) can run a startup
+        watch for a bridge that the live service also adopts. Only the live service announces
+        a crash, so one death gives one notification (#1104).
+        """
+        return self._reports_crashes
 
     async def crash_note(self, instance: RemoteControlInstance, pid: int | None) -> str | None:
         """Return the task-limit reason for a crash of ``pid``, and drop its baseline.
 
         Keyed to this pid: a resumed row keeps its instance id, and the counters of the
         previous process say nothing about this one. The startup watch also calls this, for a
-        crash it reconciles itself.
+        crash it reconciles itself. The baseline is dropped only after the read, so a reader
+        cancelled in the thread hop leaves it for the poll loop that then takes the crash.
         """
-        base = self._task_counts.pop(instance.instance_id, None)
+        base = self._task_counts.get(instance.instance_id)
         if base is None or base.pid != pid:
+            self._task_counts.pop(instance.instance_id, None)
             return None
-        return await asyncio.to_thread(task_limits.crash_note, base)
+        note = await asyncio.to_thread(task_limits.crash_note, base)
+        self._task_counts.pop(instance.instance_id, None)
+        return note
 
     def announce_crash(self, instance: RemoteControlInstance, note: str | None) -> None:
         """Count a crash, record its task-limit reason, and announce it once.
@@ -277,6 +300,8 @@ class PollLoop:
         The default stays ``True`` so the server's own poll loop is unaffected and a new
         caller cannot silently lose crash detection by forgetting the flag.
         """
+        if side_effects:
+            self._reports_crashes = True
         # Take over anything another process started before reconciling (#1091). Without
         # this the registry stays frozen at whatever `rediscover` found at startup, so a
         # `clauster start` / MCP-spawned bridge is never adopted and the cross-check below
@@ -399,8 +424,9 @@ class PollLoop:
             # pty keeper can write its sidecar error and exit before the next watch tick, and
             # read here first, that failed start would be counted and announced as a crash.
             # The watch decides the outcome, and counts and announces a real startup crash
-            # itself, through the two helpers below.
-            if not self._startup_watched(instance):
+            # itself, through the two helpers below. The spawn's own readiness wait owns the
+            # row in the same way, before the watch exists.
+            if not self._startup_owned(instance):
                 self._reconcile_status(instance, alive)
             if (
                 side_effects
@@ -957,6 +983,8 @@ class PollLoop:
 
     async def start_poll_loop(self) -> None:
         """Rediscover already-running bridges, then start the background poll loop."""
+        # First: a startup watch can end a crash before the loop's first tick.
+        self._reports_crashes = True
         await self._rediscover()
         # #867 L4: after live bridges are adopted, GC long-dead pointers (hygiene).
         await self._prune_stale_pointers()

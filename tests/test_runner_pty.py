@@ -1775,6 +1775,23 @@ async def test_worktree_pty_in_a_repo_with_no_commit_names_the_missing_commit(
     assert inst.instance_id not in runner._registry._procs
 
 
+@_POSIX_ONLY
+@_NEEDS_GIT
+async def test_same_dir_pty_in_a_repo_with_no_commit_still_starts(runner_config) -> None:
+    """TASK-555: only worktree mode needs a commit, so a same-dir session starts as before."""
+    config, _ = runner_config
+    alpha = config.projects_root / "alpha"
+    shutil.rmtree(alpha / ".git")
+    _git("init", "-q", str(alpha))
+    runner, _ = _pty_runner(runner_config)
+    inst = await runner.spawn("alpha", spawn_mode="same-dir")
+    try:
+        assert inst.status is InstanceStatus.RUNNING
+        assert inst.error_detail is None
+    finally:
+        await runner.stop(inst.instance_id)
+
+
 @pytest.mark.parametrize(
     ("info", "expected"), [({"error": "boom"}, "boom"), ({"state": "exited"}, None)]
 )

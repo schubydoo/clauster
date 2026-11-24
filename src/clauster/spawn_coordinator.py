@@ -119,19 +119,18 @@ _ADOPT_KEEPER_CHILD = sys.platform != "win32"
 # (TASK-555). claude exits at once with "Failed to resolve base branch", which it prints only
 # on its terminal, so the spawn checks for a commit first and says what is missing.
 _NO_COMMIT_DETAIL = (
-    "worktree mode needs a commit to branch from, and this repository has no commit yet "
-    "(git cannot resolve HEAD). Make a first commit in the repository, or start the "
-    "session in another spawn mode."
+    "worktree mode needs a commit to branch from, and HEAD in this repository names no "
+    "commit (the repository has no commit yet, or HEAD is on a branch with no commit). "
+    "Make a commit, or start the session in another spawn mode."
 )
 
 
 def _unregistered_detail(grace: float) -> str:
     """Return Clauster's reason for a bridge still unregistered at the grace deadline."""
     return (
-        f"The bridge is running, but it did not register a Remote Control environment within "
-        f"{grace:g} seconds (claude.startup_grace_seconds), so you cannot connect to it. A "
-        f"common cause is a claude login problem: run `clauster doctor` and read the bridge "
-        f"debug log."
+        f"The bridge did not register a Remote Control environment within {grace:g} seconds "
+        f"(claude.startup_grace_seconds), so you cannot connect to it. A common cause is a "
+        f"claude login problem: run `clauster doctor` and read the bridge debug log."
     )
 
 
@@ -196,6 +195,7 @@ class SpawnCoordinator:
         retire_ended_starters: Callable[[], Awaitable[None]],
         crash_note: Callable[[RemoteControlInstance, int | None], Awaitable[str | None]],
         announce_crash: Callable[[RemoteControlInstance, str | None], None],
+        reports_crashes: Callable[[], bool],
     ) -> None:
         """Bind to config + the shared registry/record/launch/rediscovery and injected helpers.
 
@@ -249,6 +249,7 @@ class SpawnCoordinator:
         # reconciles, because the poll loop leaves a watched STARTING row alone (TASK-545).
         self._crash_note = crash_note
         self._announce_crash = announce_crash
+        self._reports_crashes = reports_crashes
         # Mark remote control as acknowledged once, before the first spawn.
         self._rc_setting_ensured = False
         # Install the resume-recap SessionStart hook once, before the first spawn.
@@ -370,18 +371,26 @@ class SpawnCoordinator:
             self._registry._spawn_lock_for(name),
             self._registry._bridge_flock(name),
         ):
-            return await self._spawn_locked(
-                name,
-                spawn_mode=spawn_mode,
-                permission_mode=permission_mode,
-                resume_mode=resume_mode,
-                resume=resume,
-                resume_target=resume_target,
-                custom_name=custom_name,
-                resume_session_id=resume_session_id,
-                trust=trust,
-                create_session=create_session,
-            )
+            try:
+                return await self._spawn_locked(
+                    name,
+                    spawn_mode=spawn_mode,
+                    permission_mode=permission_mode,
+                    resume_mode=resume_mode,
+                    resume=resume,
+                    resume_target=resume_target,
+                    custom_name=custom_name,
+                    resume_session_id=resume_session_id,
+                    trust=trust,
+                    create_session=create_session,
+                )
+            finally:
+                # Spawns of one project are serialized by the lock held here, so every
+                # in-flight id of this project is this call's own (TASK-545). By now its
+                # row is resolved, or its startup watch owns it.
+                in_flight = self._registry._spawn_in_flight
+                for iid in [i for i, project in in_flight.items() if project == name]:
+                    del in_flight[iid]
 
     # ----- _spawn_locked's pre-spawn gates, in the order the spawn runs them ---------
     # Extracted from _spawn_locked (#1155) so the gate ordering is legible in one screen:
@@ -892,6 +901,9 @@ class SpawnCoordinator:
         # (via new_instance_id default_factory) or carried over from the instance
         # being resumed, NOT the project name.
         self._registry._instances[instance.instance_id] = instance  # on the loop
+        # The spawn owns this STARTING row until its readiness wait ends, and then its startup
+        # watch does: the poll loop must not decide a death that this spawn reads (TASK-545).
+        self._registry._spawn_in_flight[instance.instance_id] = name
 
         # One spawn-event chokepoint for both modes: the instance is registered, STARTING,
         # and its resume_mode is now resolved. A "ready" follows iff it reaches RUNNING.
@@ -1427,8 +1439,8 @@ class SpawnCoordinator:
             instance.status = InstanceStatus.ERROR
         else:
             # Alive but hasn't logged readiness within _READY_TIMEOUT. A slow start
-            # is not a failure: stay STARTING and let the poll loop promote it to
-            # RUNNING (or CRASHED if it later dies). Prevents a false "Failed to
+            # is not a failure: stay STARTING and let the startup watch promote it to
+            # RUNNING (or end it if it later dies). Prevents a false "Failed to
             # start" on a bridge that is simply still coming up.
             instance.status = InstanceStatus.STARTING
         if prev_status is not InstanceStatus.RUNNING and instance.status is InstanceStatus.RUNNING:
@@ -1446,12 +1458,17 @@ class SpawnCoordinator:
         is read BEFORE the row changes, while it is still STARTING, so no reader sees ERROR
         with no reason during the thread hop. The bridge's liveness is read once and handed
         down, so the row cannot end ERROR on a death this step did not fetch a detail for.
-        The read covers the ERROR outcomes of :meth:`_apply_markers` except the poisoned
-        reattach, whose own heal path owns that row.
+        The read covers every ERROR outcome of :meth:`_apply_markers`. For a poisoned
+        reattach the spawn's heal step then writes its own reason over the tail. The watch
+        does not heal, so there the tail is the reason.
         """
         proc_dead = proc.poll() is not None
-        fails = proc_dead or (markers.trust_error and not markers.is_ready)
-        if markers.poison_reason is None and instance.error_detail is None and fails:
+        fails = (
+            markers.poison_reason is not None
+            or proc_dead
+            or (markers.trust_error and not markers.is_ready)
+        )
+        if instance.error_detail is None and fails:
             await asyncio.to_thread(self._capture_error_detail, instance)
         self._apply_markers(instance, markers, proc, proc_dead=proc_dead)
 
@@ -1591,7 +1608,15 @@ class SpawnCoordinator:
         read before the status changes, so no reader sees the CRASHED row without it. A cancel
         during that read leaves a STARTING row, which the poll loop owns again once this
         watch is done, so the crash is still counted and announced, not lost.
+
+        Only the process that runs the side-effecting poll loop announces (#1104). In a peer
+        process (``clauster mcp`` keeps the watch of a bridge it spawned) the watch only
+        reconciles, and the live service, which adopted the row and has no watch for it,
+        announces the death once.
         """
+        if not self._reports_crashes():
+            self._reconcile_status(instance, False)
+            return
         note = await self._crash_note(instance, instance.bridge_pid)
         prev_status = instance.status
         self._reconcile_status(instance, False)
