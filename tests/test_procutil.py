@@ -751,6 +751,8 @@ def _gone_proc(monkeypatch, **attrs) -> None:
         ({"status_value": psutil.STATUS_ZOMBIE}, True),
         # Unknown is not gone: the change it gates drops Kill (TASK-526's second agent).
         ({"error": psutil.AccessDenied(4242)}, False),
+        ({"error": ValueError("pid must be a positive integer")}, False),
+        ({"error": RuntimeError("couldn't find btime in /proc/stat")}, False),
     ],
 )
 def test_hosted_agent_gone_reads_the_process_state(monkeypatch, attrs, gone):

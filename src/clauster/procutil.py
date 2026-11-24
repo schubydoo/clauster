@@ -690,7 +690,9 @@ def hosted_agent_gone(
         created = proc.create_time()
     except psutil.NoSuchProcess:
         return True
-    except psutil.Error:
+    # Total, like is_live_process: it runs on every dashboard poll, so a raise would fail
+    # /api/hosted. ValueError is a pid below 1; RuntimeError a procfs with no btime.
+    except (psutil.Error, ValueError, RuntimeError):
         return False
     if start_ticks is not None:
         live_ticks = proc_start_ticks(pid)
