@@ -197,6 +197,38 @@ class PollLoop:
             self._warn_if_refresh_slow(time.monotonic() - started)
             await asyncio.sleep(self._config.metrics.poll_seconds)
 
+    def _startup_watched(self, instance: RemoteControlInstance) -> bool:
+        """Return True while a STARTING row's own startup watch still runs (TASK-545)."""
+        watch = self._registry._startup_watches.get(instance.instance_id)
+        return (
+            instance.status is InstanceStatus.STARTING and watch is not None and not watch.done()
+        )
+
+    async def crash_note(self, instance: RemoteControlInstance, pid: int | None) -> str | None:
+        """Return the task-limit reason for a crash of ``pid``, and drop its baseline.
+
+        Keyed to this pid: a resumed row keeps its instance id, and the counters of the
+        previous process say nothing about this one. The startup watch also calls this, for a
+        crash it reconciles itself.
+        """
+        base = self._task_counts.pop(instance.instance_id, None)
+        if base is None or base.pid != pid:
+            return None
+        return await asyncio.to_thread(task_limits.crash_note, base)
+
+    def announce_crash(self, instance: RemoteControlInstance, note: str | None) -> None:
+        """Count a crash, record its task-limit reason, and announce it once.
+
+        The one place a crash is counted, for the poll loop and for the startup watch. The
+        crash notification is fired inside ``_emit_lifecycle`` (#541), so the single
+        chokepoint owns history + webhook + notification together.
+        """
+        self._registry._crash_counts[instance.project] = (
+            self._registry._crash_counts.get(instance.project, 0) + 1
+        )
+        instance.task_limit_note = note
+        self._record._emit_lifecycle("crash", instance)
+
     async def _link_orphans(self, sessions: list[WorkingSession]) -> None:
         """Mark each session that outlived its crashed standard bridge as ORPHANED (TASK-562).
 
@@ -363,7 +395,13 @@ class PollLoop:
                 else:
                     self._task_counts[instance.instance_id] = count
             prev_status = instance.status
-            self._reconcile_status(instance, alive)
+            # A STARTING row with a live startup watch belongs to that watch (TASK-545). A
+            # pty keeper can write its sidecar error and exit before the next watch tick, and
+            # read here first, that failed start would be counted and announced as a crash.
+            # The watch decides the outcome, and counts and announces a real startup crash
+            # itself, through the two helpers below.
+            if not self._startup_watched(instance):
+                self._reconcile_status(instance, alive)
             if (
                 side_effects
                 and prev_status is not InstanceStatus.CRASHED
@@ -374,20 +412,7 @@ class PollLoop:
                 # announce it. A one-shot reader has no standing to tell the operator a
                 # bridge died: the live service owns that, and both firing would
                 # double-notify for one death (#1104).
-                self._registry._crash_counts[instance.project] = (
-                    self._registry._crash_counts.get(instance.project, 0) + 1
-                )
-                # Keyed to this pid: a resumed row keeps its instance id, and the counters
-                # of the previous process say nothing about this one.
-                base = self._task_counts.pop(instance.instance_id, None)
-                instance.task_limit_note = (
-                    await asyncio.to_thread(task_limits.crash_note, base)
-                    if base is not None and base.pid == pid
-                    else None
-                )
-                # The crash notification is now fired inside _emit_lifecycle (#541), so
-                # the single chokepoint owns history + webhook + notification together.
-                self._record._emit_lifecycle("crash", instance)
+                self.announce_crash(instance, await self.crash_note(instance, pid))
             if alive:
                 live_projects.add(instance.project)
                 if side_effects:

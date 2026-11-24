@@ -616,6 +616,8 @@ class SessionRunner:
             project_path=lambda name: self._project_path(name),
             capture_error_detail=lambda inst: self._capture_error_detail(inst),
             retire_ended_starters=lambda: self._retire_ended_starters(),
+            crash_note=lambda inst, pid: self._poll_loop.crash_note(inst, pid),
+            announce_crash=lambda inst, note: self._poll_loop.announce_crash(inst, note),
         )
 
     # ----- read API -------------------------------------------------------
@@ -2617,11 +2619,11 @@ class SessionRunner:
     ) -> None:
         """After readiness is decided, fill in what the log alone can't tell us.
 
-        - RUNNING: a *reconnecting* bridge never re-logs ``Created initial
-          session``, so ``starter_session_id`` (and thus ``session_url``) would
-          be empty after a resume — backfill it from the pointer.
-        - ERROR/CRASHED: capture the bridge's stderr tail so the failure has a
-          visible reason instead of a bare "Failed to start".
+        RUNNING only: a *reconnecting* bridge never re-logs ``Created initial session``, so
+        ``starter_session_id`` (and thus ``session_url``) would be empty after a resume —
+        backfill it from the pointer. A failed start already carries its stderr tail:
+        ``SpawnCoordinator._apply_markers_with_detail`` reads it before the row reads ERROR
+        (TASK-544), so no reader sees ERROR without its reason.
         """
         if instance.status is InstanceStatus.RUNNING:
             await asyncio.to_thread(self._backfill_starter_session, instance, project_path)
@@ -2629,8 +2631,6 @@ class SessionRunner:
             # archived, and the new bridge's log says nothing about it (TASK-557). Both
             # callers are standard-only, and the pass itself reads standard rows only.
             await self._retire_ended_starters()
-        elif instance.status in (InstanceStatus.ERROR, InstanceStatus.CRASHED):
-            await asyncio.to_thread(self._capture_error_detail, instance)
 
     @classmethod
     def _backfill_starter_session(

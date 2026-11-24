@@ -14,7 +14,7 @@ from typing import cast
 import psutil
 import pytest
 
-from clauster import bridge_log, code_sessions, inspector, pointers, procutil
+from clauster import bridge_log, code_sessions, inspector, pointers, procutil, task_limits
 from clauster.claude_json import ClaudeJsonUnparseable
 from clauster.db.persistence import Persistence
 from clauster.models import (
@@ -1429,6 +1429,8 @@ async def test_watch_startup_alive_unregistered_becomes_error(runner_config, mon
     assert inst.status is InstanceStatus.ERROR  # honest: alive but never usable
     assert inst.url is None and inst.environment_id is None
     assert runner.running_count() == 0
+    # No stderr from this bridge, so the card gets Clauster's own reason (TASK-544).
+    assert "did not register" in (inst.error_detail or "")
 
     await runner.stop(inst.instance_id)  # clean up the still-idling fake bridge
 
@@ -3517,6 +3519,159 @@ async def test_spawn_captures_stderr_detail_on_failure(runner_config, monkeypatc
     inst = await runner.spawn("alpha")
     assert inst.status is InstanceStatus.ERROR
     assert inst.error_detail and "HTTP 401" in inst.error_detail
+
+
+def _slow_capture_error_detail(monkeypatch, *, text: str | None = None) -> None:
+    """Make the stderr-tail read slow, so a reader during it sees the row's state."""
+    real = SessionRunner._capture_error_detail
+
+    def slow(cls, instance):
+        time.sleep(0.5)
+        if text is None:
+            real(instance)
+        else:
+            instance.error_detail = text
+
+    monkeypatch.setattr(SessionRunner, "_capture_error_detail", classmethod(slow))
+
+
+def _assert_no_error_without_reason(runner) -> None:
+    """Fail when any row reads ERROR before its reason is on it (TASK-544)."""
+    for inst in list(runner._instances.values()):
+        if inst.status is InstanceStatus.ERROR:
+            assert inst.error_detail is not None, "ERROR row seen without its reason"
+
+
+async def test_spawn_sets_a_failed_start_reason_with_its_status(runner_config, monkeypatch):
+    # TASK-544: the spawn used to set ERROR, then flush the mirror and read the stderr tail
+    # on threads, so a reader in that wait saw ERROR with no reason.
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "stderr_error")
+    _slow_capture_error_detail(monkeypatch)
+    runner = _make_runner(runner_config)
+    spawn = asyncio.create_task(runner.spawn("alpha"))
+    while not spawn.done():
+        _assert_no_error_without_reason(runner)
+        await asyncio.sleep(0.02)
+    inst = await spawn
+    assert inst.status is InstanceStatus.ERROR
+    assert inst.error_detail and "HTTP 401" in inst.error_detail
+
+
+async def test_watch_deadline_sets_the_reason_with_the_status(runner_config, monkeypatch):
+    # TASK-544: on the grace deadline the watch set ERROR, then read the stderr tail on a
+    # thread, so a reader in that wait saw ERROR with no reason.
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "stall")
+    monkeypatch.setattr("clauster.spawn_coordinator._READY_TIMEOUT", 0.2)
+    monkeypatch.setattr("clauster.spawn_coordinator._STARTUP_WATCH_INTERVAL", 0.05)
+    config, claude_json = runner_config
+    config.claude.startup_grace_seconds = 0.3
+    runner = SessionRunner(config, claude_json=claude_json)
+    inst = await runner.spawn("alpha")
+    try:
+        assert inst.status is InstanceStatus.STARTING
+        _slow_capture_error_detail(monkeypatch, text="stderr tail")
+        watch = runner._startup_watches[inst.instance_id]
+        while not watch.done():
+            _assert_no_error_without_reason(runner)
+            await asyncio.sleep(0.02)
+        assert inst.status is InstanceStatus.ERROR
+        assert inst.error_detail == "stderr tail"
+    finally:
+        await runner.stop(inst.instance_id)
+
+
+def _lifecycle_events(runner, monkeypatch) -> list[str]:
+    """Record every lifecycle event the runner emits, in order."""
+    seen: list[str] = []
+    real = runner._record._emit_lifecycle
+
+    def spy(event, instance):
+        seen.append(event)
+        return real(event, instance)
+
+    monkeypatch.setattr(runner._record, "_emit_lifecycle", spy)
+    return seen
+
+
+async def test_startup_crash_with_a_poll_in_the_gap_is_counted_once(runner_config, monkeypatch):
+    # TASK-545: a poll between the bridge's death and the watch's next tick used to decide
+    # the outcome behind the watch. Now the watch owns a STARTING row, and it counts and
+    # announces a real startup crash exactly once, with its task-limit reason.
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "stall")
+    monkeypatch.setattr("clauster.spawn_coordinator._READY_TIMEOUT", 0.2)
+    monkeypatch.setattr("clauster.spawn_coordinator._STARTUP_WATCH_INTERVAL", 1.5)
+    monkeypatch.setattr(
+        "clauster.poll_loop.task_limits.crash_note", lambda base: f"limit hit by {base.pid}"
+    )
+    config, claude_json = runner_config
+    config.claude.startup_grace_seconds = 30
+    runner = SessionRunner(config, claude_json=claude_json)
+    events = _lifecycle_events(runner, monkeypatch)
+    inst = await runner.spawn("alpha")
+    assert inst.status is InstanceStatus.STARTING
+    proc = runner._procs[inst.instance_id]
+    runner._poll_loop._task_counts[inst.instance_id] = task_limits.TaskEventCount(
+        pid=proc.pid, cgroup=Path("/nonexistent"), own=0, parent=None
+    )
+    proc.kill()
+    await asyncio.to_thread(proc.wait, 10)
+
+    await runner.poll_once()  # between the death and the watch's next tick
+    assert inst.status is InstanceStatus.STARTING, "the poll loop decided a watched start"
+    assert runner._crash_counts.get("alpha", 0) == 0
+
+    await runner._startup_watches[inst.instance_id]
+    assert inst.status is InstanceStatus.CRASHED
+    assert runner._crash_counts["alpha"] == 1
+    assert events.count("crash") == 1
+    assert inst.task_limit_note == f"limit hit by {proc.pid}"
+    await runner.poll_once()  # the poll loop owns the row again, and does not count it twice
+    assert runner._crash_counts["alpha"] == 1
+    assert events.count("crash") == 1
+
+
+async def test_poll_loop_owns_a_starting_row_whose_watch_is_done(runner_config, monkeypatch):
+    # TASK-545: the poll loop yields only to a watch that still runs. A watch that ended
+    # (here one that never ran) leaves a dead STARTING row to the poll loop, so the crash is
+    # never lost.
+    runner = _make_runner(runner_config)
+    monkeypatch.setattr("clauster.inspector.list_working_sessions", lambda *a, **k: [])
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: False)
+    inst = RemoteControlInstance(
+        project="alpha", label="alpha", status=InstanceStatus.STARTING, bridge_pid=4242
+    )
+    runner._instances[inst.instance_id] = inst
+
+    async def _ended() -> None:
+        return None
+
+    watch = asyncio.create_task(_ended())
+    await watch
+    runner._startup_watches[inst.instance_id] = watch
+    await runner.poll_once()
+    assert inst.status is InstanceStatus.CRASHED
+    assert runner._crash_counts["alpha"] == 1
+
+
+async def test_watch_reconciles_an_expected_startup_exit_without_a_crash(
+    runner_config, monkeypatch
+):
+    # TASK-545: the watch takes the poll loop's own rule. A session-mode bridge that exits is
+    # STOPPED, so it is neither counted nor announced.
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "stall")
+    monkeypatch.setattr("clauster.spawn_coordinator._READY_TIMEOUT", 0.2)
+    monkeypatch.setattr("clauster.spawn_coordinator._STARTUP_WATCH_INTERVAL", 0.05)
+    config, claude_json = runner_config
+    config.claude.startup_grace_seconds = 30
+    runner = SessionRunner(config, claude_json=claude_json)
+    events = _lifecycle_events(runner, monkeypatch)
+    inst = await runner.spawn("alpha", spawn_mode="session")
+    assert inst.status is InstanceStatus.STARTING
+    runner._procs[inst.instance_id].kill()
+    await runner._startup_watches[inst.instance_id]
+    assert inst.status is InstanceStatus.STOPPED
+    assert runner._crash_counts.get("alpha", 0) == 0
+    assert "crash" not in events
 
 
 def test_capture_error_detail_no_log_is_noop():

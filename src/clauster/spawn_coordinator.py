@@ -64,6 +64,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -114,6 +115,48 @@ _STARTUP_WATCH_INTERVAL = 2.0
 # Whether a pty launch may adopt the keeper pid its sidecar names (TASK-503). Off on Windows,
 # where the frozen keeper stays one process and a two-process launch is unmeasured.
 _ADOPT_KEEPER_CHILD = sys.platform != "win32"
+# The card's reason for an Interactive Session in worktree mode whose repository has no commit
+# (TASK-555). claude exits at once with "Failed to resolve base branch", which it prints only
+# on its terminal, so the spawn checks for a commit first and says what is missing.
+_NO_COMMIT_DETAIL = (
+    "worktree mode needs a commit to branch from, and this repository has no commit yet "
+    "(git cannot resolve HEAD). Make a first commit in the repository, or start the "
+    "session in another spawn mode."
+)
+
+
+def _unregistered_detail(grace: float) -> str:
+    """Return Clauster's reason for a bridge still unregistered at the grace deadline."""
+    return (
+        f"The bridge is running, but it did not register a Remote Control environment within "
+        f"{grace:g} seconds (claude.startup_grace_seconds), so you cannot connect to it. A "
+        f"common cause is a claude login problem: run `clauster doctor` and read the bridge "
+        f"debug log."
+    )
+
+
+def _repo_has_no_commit(path: Path) -> bool:
+    """Return True only when git says that HEAD in ``path`` names no commit (TASK-555).
+
+    ``rev-parse --verify --quiet`` exits 1, silently, for exactly that: a new repository
+    before its first commit. Every other result (git missing, a timeout, a repository git
+    refuses to read, exit 128) is "not known", and the spawn goes on, so claude gives its
+    own answer. The check only adds a reason. It never blocks a start it cannot explain.
+    """
+    git = shutil.which("git")
+    if git is None:
+        return False
+    try:
+        res = subprocess.run(
+            [git, "-C", str(path), "rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
+            capture_output=True,
+            timeout=10,
+            env=procutil.child_env(),
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return res.returncode == 1
 
 
 class SpawnCoordinator:
@@ -151,6 +194,8 @@ class SpawnCoordinator:
         project_path: Callable[[str], Path | None],
         capture_error_detail: Callable[[RemoteControlInstance], None],
         retire_ended_starters: Callable[[], Awaitable[None]],
+        crash_note: Callable[[RemoteControlInstance, int | None], Awaitable[str | None]],
+        announce_crash: Callable[[RemoteControlInstance, str | None], None],
     ) -> None:
         """Bind to config + the shared registry/record/launch/rediscovery and injected helpers.
 
@@ -200,6 +245,10 @@ class SpawnCoordinator:
         self._project_path = project_path
         self._capture_error_detail = capture_error_detail
         self._retire_ended_starters = retire_ended_starters
+        # The poll loop's crash helpers: the startup watch counts and announces a crash it
+        # reconciles, because the poll loop leaves a watched STARTING row alone (TASK-545).
+        self._crash_note = crash_note
+        self._announce_crash = announce_crash
         # Mark remote control as acknowledged once, before the first spawn.
         self._rc_setting_ensured = False
         # Install the resume-recap SessionStart hook once, before the first spawn.
@@ -904,7 +953,7 @@ class SpawnCoordinator:
         instance.bridge_boot_id = await asyncio.to_thread(procutil.proc_boot_id)
 
         markers = await asyncio.to_thread(self._await_ready, raw_path, proc)
-        self._apply_markers(instance, markers, proc)
+        await self._apply_markers_with_detail(instance, markers, proc)
         await asyncio.to_thread(self._flush_redacted_mirror, instance)
         if markers.poison_reason is not None:
             await self._heal_poisoned_reattach(instance, proc, proj.path, markers.poison_reason)
@@ -1229,6 +1278,17 @@ class SpawnCoordinator:
         resume_session_id: str | None = None,
     ) -> RemoteControlInstance:
         """Spawn path for `resume_mode == "pty"`: launch the keeper, discover via sidecar."""
+        if instance.spawn_mode == "worktree" and await asyncio.to_thread(
+            _repo_has_no_commit, proj.path
+        ):
+            # The flag form exits at once when `--worktree` has no commit to branch from, and
+            # says why only on its terminal (TASK-555). Fail the start here with the reason,
+            # before any keeper exists, like a launch failure below.
+            _log.warning("pty spawn of %s refused: the repository has no commit", name)
+            instance.error_detail = _NO_COMMIT_DETAIL
+            instance.status = InstanceStatus.ERROR
+            await self._registry._persist()
+            return instance
         # The sidecar stays keyed off the public log_path; the bridge's --debug-file goes
         # to the private raw parse-source (== log_path unless on-disk redaction is on).
         sidecar = self._sidecar_path_for(log_path)
@@ -1335,12 +1395,17 @@ class SpawnCoordinator:
         instance: RemoteControlInstance,
         markers: bridge_log.BridgeMarkers,
         proc: subprocess.Popen,
+        *,
+        proc_dead: bool | None = None,
     ) -> None:
         """Fold parsed markers into ``instance`` and derive its status from them plus liveness.
 
         Emits the ``ready`` lifecycle event only on the transition into RUNNING, never on
-        every poll.
+        every poll. ``proc_dead`` is the caller's own reading of ``proc.poll()``, when it
+        already decided from it (``_apply_markers_with_detail``); otherwise it is read here.
         """
+        if proc_dead is None:
+            proc_dead = proc.poll() is not None
         prev_status = instance.status
         instance.bridge_id = markers.bridge_id or instance.bridge_id
         instance.environment_id = markers.environment_id or instance.environment_id
@@ -1354,9 +1419,9 @@ class SpawnCoordinator:
             # Surface it as ERROR (not a misleading RUNNING); the caller stops the idle
             # bridge and clears the stale pointer so the next launch starts cold.
             instance.status = InstanceStatus.ERROR
-        elif markers.is_ready and proc.poll() is None:
+        elif markers.is_ready and not proc_dead:
             instance.status = InstanceStatus.RUNNING
-        elif markers.trust_error or proc.poll() is not None:
+        elif markers.trust_error or proc_dead:
             # Genuine, terminal failure: the bridge rejected workspace trust, or it
             # exited before ever reaching the poll loop. Surface it as ERROR.
             instance.status = InstanceStatus.ERROR
@@ -1368,6 +1433,27 @@ class SpawnCoordinator:
             instance.status = InstanceStatus.STARTING
         if prev_status is not InstanceStatus.RUNNING and instance.status is InstanceStatus.RUNNING:
             self._record._emit_lifecycle("ready", instance)  # only on the transition
+
+    async def _apply_markers_with_detail(
+        self,
+        instance: RemoteControlInstance,
+        markers: bridge_log.BridgeMarkers,
+        proc: subprocess.Popen,
+    ) -> None:
+        """Fold the markers in, and give a failed start its ``error_detail`` in the same step.
+
+        The standard analogue of ``_apply_pty_info_with_detail`` (TASK-544). The stderr tail
+        is read BEFORE the row changes, while it is still STARTING, so no reader sees ERROR
+        with no reason during the thread hop. The bridge's liveness is read once and handed
+        down, so the row cannot end ERROR on a death this step did not fetch a detail for.
+        The read covers the ERROR outcomes of :meth:`_apply_markers` except the poisoned
+        reattach, whose own heal path owns that row.
+        """
+        proc_dead = proc.poll() is not None
+        fails = proc_dead or (markers.trust_error and not markers.is_ready)
+        if markers.poison_reason is None and instance.error_detail is None and fails:
+            await asyncio.to_thread(self._capture_error_detail, instance)
+        self._apply_markers(instance, markers, proc, proc_dead=proc_dead)
 
     # ----- startup watch --------------------------------------------------
 
@@ -1403,6 +1489,9 @@ class SpawnCoordinator:
         to the injected ``_reconcile_status`` so the CRASHED/STOPPED outcome matches the
         poll loop exactly, except for a pty keeper that left an ``error`` in its sidecar
         (the login screen, TASK-533): that is a failed start, ERROR, as at the readiness wait.
+        The poll loop leaves the row alone while this watch runs (TASK-545), so the watch
+        alone decides how a startup death ends, and counts and announces a crash itself
+        (:meth:`_reconcile_startup_death`).
         """
         grace = self._config.claude.startup_grace_seconds
         deadline = time.monotonic() + grace
@@ -1432,10 +1521,10 @@ class SpawnCoordinator:
                         # readiness wait reads it, and not a crash or a clean stop.
                         self._apply_pty_info(instance, info, proc, keeper_dead=True)
                     else:
-                        self._reconcile_status(instance, False)
+                        await self._reconcile_startup_death(instance)
                     instance.error_detail = detail
                 else:
-                    self._reconcile_status(instance, False)
+                    await self._reconcile_startup_death(instance)
                 await self._registry._persist()
                 return
             log_path = instance.bridge_debug_log_path
@@ -1463,7 +1552,7 @@ class SpawnCoordinator:
             else:
                 raw = instance.bridge_raw_log_path or log_path
                 markers = await asyncio.to_thread(self._read_markers, raw)
-                self._apply_markers(instance, markers, proc)
+                await self._apply_markers_with_detail(instance, markers, proc)
                 await asyncio.to_thread(self._flush_redacted_mirror, instance)  # at-rest log
                 if instance.status is not InstanceStatus.STARTING:  # promoted, or trust ERROR
                     await self._post_spawn_enrich(
@@ -1472,6 +1561,15 @@ class SpawnCoordinator:
                     await self._registry._persist()
                     return
             if time.monotonic() >= deadline:
+                # The reason first, then the status, with no await between them (TASK-544):
+                # a reader in the detail read must not see ERROR with no reason. A standard
+                # bridge's stderr tail is the bridge's own account. A pty bridge has no stderr
+                # file (its output goes to the PTY), so it gets Clauster's own reason, as does
+                # a standard bridge that wrote nothing to stderr.
+                if instance.resume_mode != "pty":
+                    await asyncio.to_thread(self._capture_error_detail, instance)
+                if instance.error_detail is None:
+                    instance.error_detail = _unregistered_detail(grace)
                 instance.status = InstanceStatus.ERROR
                 _log.warning(
                     "bridge %s (%s) is alive but never registered an environment within %.0fs; "
@@ -1481,6 +1579,21 @@ class SpawnCoordinator:
                     instance_id,
                     grace,
                 )
-                await asyncio.to_thread(self._capture_error_detail, instance)
                 await self._registry._persist()
                 return
+
+    async def _reconcile_startup_death(self, instance: RemoteControlInstance) -> None:
+        """End a STARTING row whose process died with no recorded reason, as the poll loop does.
+
+        The outcome comes from the injected ``_reconcile_status``, so CRASHED or STOPPED
+        matches the poll loop exactly. The poll loop leaves a watched STARTING row alone
+        (TASK-545), so this watch counts and announces a crash, once. The task-limit reason is
+        read before the status changes, so no reader sees the CRASHED row without it. A cancel
+        during that read leaves a STARTING row, which the poll loop owns again once this
+        watch is done, so the crash is still counted and announced, not lost.
+        """
+        note = await self._crash_note(instance, instance.bridge_pid)
+        prev_status = instance.status
+        self._reconcile_status(instance, False)
+        if prev_status is not InstanceStatus.CRASHED and instance.status is InstanceStatus.CRASHED:
+            self._announce_crash(instance, note)

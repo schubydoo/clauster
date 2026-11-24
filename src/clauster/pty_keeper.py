@@ -186,8 +186,9 @@ _ESCAPE_RUN_LIMIT = 512
 
 #: Seconds between publishing the error for a screen that holds the bridge (the login screen
 #: or the Settings Error screen) and stopping the bridge. The runner's startup watch reads the
-#: sidecar every 2 s. While the bridge is alive it reads ``error`` as ERROR, and once it is
-#: gone the poll loop can see the dead bridge first and mark the row CRASHED.
+#: sidecar every 2 s. While the bridge is alive it reads ``error`` as ERROR. Once the keeper is
+#: gone the watch still reads the error as ERROR, and the poll loop leaves a watched row alone
+#: (TASK-545), so the delay only keeps the common path on the live read.
 _HELD_STOP_DELAY = 5.0
 
 #: Seconds a bridge stopped at such a screen gets to exit after SIGTERM before SIGKILL.
@@ -628,9 +629,9 @@ class _KeeperDrain:
         instead of promoting the bridge to RUNNING at the URL timeout. The readiness wait and
         the startup watch read the sidecar's ``error`` as ERROR
         (``SpawnCoordinator._apply_pty_info``, and the watch's dead-keeper branch). The poll
-        loop reads only whether the bridge is alive, and a dead STARTING bridge is CRASHED
-        there, so the backend stops the bridge only after :data:`_HELD_STOP_DELAY`
-        (:meth:`stop_due`), once the 2 s watch has had time to read the live error.
+        loop leaves a STARTING row alone while its watch runs (TASK-545). The backend stops
+        the bridge only after :data:`_HELD_STOP_DELAY` (:meth:`stop_due`), once the 2 s watch
+        has had time to read the live error.
 
         The bridge is stopped, not left at the screen. It cannot get past it: the screen waits
         for a keypress, and nothing sends one. Left running, it would hold its keeper on an

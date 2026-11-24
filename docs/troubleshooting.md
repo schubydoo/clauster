@@ -300,7 +300,9 @@ database](operations.md#recovering-from-a-corrupted-state-database) and
 
 **Most likely cause:** the bridge spawned but never registered an environment
 within `startup_grace_seconds` — most often a `claude` login problem (the
-bridge starts, then hangs unauthenticated).
+bridge starts, then hangs unauthenticated). The card's reason shows the bridge's
+own stderr when it wrote some. Otherwise it says that the bridge did not register
+within `startup_grace_seconds`.
 
 ```sh
 clauster doctor                          # read the claude-login row
@@ -310,6 +312,20 @@ tail ~/.clauster/logs/<label>-*.log      # the bridge's own account of it
 **Mechanism:** [Reading the bridge debug
 log](operations.md#reading-the-bridge-debug-log) · [Bridge
 lifecycle](architecture.md#bridge-lifecycle).
+
+### A worktree Interactive Session goes straight to "error"
+
+**What you see:** an Interactive Session in `worktree` spawn mode shows `error`
+at once. The card says that worktree mode needs a commit and that the repository
+has none.
+
+**Most likely cause:** the project is a git repository with no commit yet, for
+example one made with `git init` and nothing committed. A worktree branches from
+the commit at `HEAD`, and an empty repository has none. Clauster checks this
+before it starts the session, so no `claude` process runs.
+
+**The fix:** make a first commit in the repository, or start the session in the
+`same-dir` spawn mode.
 
 ### The card goes straight to "crashed"
 
