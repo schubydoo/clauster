@@ -835,16 +835,21 @@ not `010`, `0b101` or `1_000`. Quote a value that must stay a string. See
 Clauster never runs a hook command and never connects to an MCP server from
 this editor.
 
-- `name` must be lowercase letters, digits and hyphens, at most 239
-  characters, and the same as the name of the file. The name is also the
+- `name` must be lowercase letters, digits and single hyphens, start with a
+  letter, not end with a hyphen, have at most 239 characters, and be the same
+  as the name of the file. The name is also the
   file name, so this rule is narrower than the Claude Code rule. A file with
   a longer or other name does not show in the list. The **Name** box holds at
   most 239 characters. The editor writes the name into the frontmatter for
   you. It quotes the names `yes`, `no`, `on`, `off`, `true`, `false` and
-  `null`, because YAML reads them unquoted as a boolean or null. On Windows
-  without long paths, the whole path of the file must also fit in 259
-  characters. If it does not, the save returns `422` with the longest name
-  that fits in that project.
+  `null`, because YAML reads them unquoted as a boolean or null.
+- The subagent file path has one more limit. On Windows without long paths,
+  the path of the temporary file that a subagent save writes must fit in 259
+  characters. That path is 13
+  characters longer than the path of the subagent file. If it does not fit,
+  the save returns `422`. The message names the longest name that fits in
+  that project, or tells you to move the project to a shorter path when no
+  name fits. It also says that you can turn on long paths in Windows.
 - `memory`, `color` and `experimental.cacheTtl` offer their listed values,
   written exactly as listed. Another text value saves with a warning.
 - `effort` accepts a level name in any case, the alias `med`, or an integer.

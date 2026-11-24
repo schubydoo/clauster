@@ -355,8 +355,58 @@ def test_winerror_206_on_a_short_path_does_not_ask_for_a_shorter_name(
     # The name already fits the computed room, so "a name of at most N" would not help.
     monkeypatch.setattr(sub, "_is_windows", lambda: True)
     monkeypatch.setattr(fw.tempfile, "mkstemp", _mkstemp_failing_past(0, _winerror_206))
-    with pytest.raises(cw.InvalidCandidateError, match="move the project to a shorter path"):
+    with pytest.raises(cw.InvalidCandidateError, match="move the project to a shorter path") as ei:
         sub.write_project_agent(tmp_path, "my-agent", _content(), None)
+    assert "characters with the temporary file" not in str(ei.value)  # the count fits
+
+
+def test_windows_path_of_exactly_the_limit_is_not_called_too_long(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A temp path of exactly 259 characters fits MAX_PATH, so its failure is another one.
+    monkeypatch.setattr(sub, "_is_windows", lambda: True)
+    monkeypatch.setattr(fw.tempfile, "mkstemp", _mkstemp_failing_past(0, _enoent))
+    room = 259 - (len(str(_agents_parent(tmp_path))) + 1 + 16)
+    name = "a" * room
+    with pytest.raises(FileNotFoundError):
+        sub.write_project_agent(tmp_path, name, _content(name), None)
+
+
+def test_winerror_206_when_the_name_already_fits_the_room_asks_for_a_shorter_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # room == len(name): "a name of at most N" would name this name's own length.
+    monkeypatch.setattr(sub, "_is_windows", lambda: True)
+    monkeypatch.setattr(fw.tempfile, "mkstemp", _mkstemp_failing_past(0, _winerror_206))
+    room = 259 - (len(str(_agents_parent(tmp_path))) + 1 + 16)
+    name = "a" * room
+    with pytest.raises(cw.InvalidCandidateError, match="move the project to a shorter path"):
+        sub.write_project_agent(tmp_path, name, _content(name), None)
+
+
+@pytest.mark.parametrize(
+    ("exc_for", "raised"),
+    [
+        (lambda: OSError(errno.ENAMETOOLONG, "File name too long"), cw.InvalidCandidateError),
+        (lambda: PermissionError(errno.EACCES, "denied"), PermissionError),
+    ],
+    ids=["enametoolong", "other"],
+)
+def test_the_pre_write_read_maps_only_a_too_long_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exc_for, raised: type
+) -> None:
+    # On POSIX a path over PATH_MAX fails at the read before the write (ENAMETOOLONG).
+    real_read = Path.read_bytes
+
+    def _read(self: Path) -> bytes:
+        if self.name == "my-agent.md":
+            raise exc_for()
+        return real_read(self)
+
+    monkeypatch.setattr(Path, "read_bytes", _read)
+    with pytest.raises(raised):
+        sub.write_project_agent(tmp_path, "my-agent", _content(), None)
+    assert not (sub.project_agents_dir(tmp_path) / "my-agent.md").exists()
 
 
 def test_posix_oserror_that_is_not_about_length_is_reraised(

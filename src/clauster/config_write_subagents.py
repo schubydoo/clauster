@@ -2090,6 +2090,12 @@ def _write_agent(root: Path, name: str, content: str, expected_hash: str | None)
         # below then fails on the longer temp path, and that failure is the 422 (TASK-468).
         current = b""
         found = False
+    except OSError as exc:
+        # A POSIX path over PATH_MAX fails here with ENAMETOOLONG, before the write does.
+        too_long = _path_too_long_error(target, name, exc)
+        if too_long is None:
+            raise
+        raise too_long from exc
     if found and _is_read_only_file(target, current):
         raise ReadOnlyAgentError(f"{name!r} is a plugin-provided subagent (read-only)")
 
@@ -2148,10 +2154,13 @@ def _path_too_long_error(target: Path, name: str, exc: OSError) -> cw.InvalidCan
             if 0 < room < len(name)
             else "move the project to a shorter path"
         )
+        # The count only when it is over the limit: a winerror 206 on a path that fits by this
+        # count would otherwise read as "90 characters, and Windows allows 259".
+        over = f"{longest} characters with the temporary file, and " if windows_limit else ""
         return cw.InvalidCandidateError(
-            f"the path for subagent {name!r} is too long: {longest} characters with the "
-            f"temporary file, and Windows without long paths allows {_WINDOWS_MAX_PATH_CHARS}. "
-            f"To save it, {fix}, or turn on long paths in Windows"
+            f"the path for subagent {name!r} is too long: {over}Windows without long paths "
+            f"allows {_WINDOWS_MAX_PATH_CHARS}. To save it, {fix}, or turn on long paths in "
+            "Windows"
         )
     if exc.errno == errno.ENAMETOOLONG:
         return cw.InvalidCandidateError(

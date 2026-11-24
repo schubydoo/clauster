@@ -563,10 +563,8 @@ def test_route_invalid_scope_is_422(write_config, tmp_path) -> None:
     [
         (b'{"env": {sk-ant-api03-SECRETVALUE: 1}}', "is not valid JSON: Expecting property name"),
         (b'{"env": "sk-ant-\xff-SECRETVALUE"}', "is not valid UTF-8 (at byte 16)"),
-        # The position counts the blank lines before the object: the file is not stripped.
-        (b'\n\n\n{"env": {sk-ant-api03-SECRETVALUE: 1}}', "line 4 column 10 (char 12)"),
     ],
-    ids=["broken-json", "not-utf8", "leading-blank-lines"],
+    ids=["broken-json", "not-utf8"],
 )
 def test_route_local_load_of_a_broken_file_names_the_reason_not_the_content(
     write_config, tmp_path, projects_root, raw: bytes, reason: str

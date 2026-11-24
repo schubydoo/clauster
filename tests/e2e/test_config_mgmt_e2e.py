@@ -575,22 +575,22 @@ def test_config_mgmt_failed_surface_load_shows_detail_or_status(
     assert "<html>" not in browser.get_text('[data-test="cm-error"]')
 
 
-# The list fails with a 404 whose body arrives late, so the operator switches tabs while
-# the load error is still being read.
+# The list fails with a 404 whose body the TEST releases, after the operator switched
+# tabs, so the load error is read only once its load is superseded (no timer to race).
 _SLOW_FAILING_SUBAGENTS_LIST = """(() => {
   const orig = window.fetch;
-  window.slowBodyRead = false;
   window.fetch = (url, opts) => {
     if (!String(url).includes("/api/config-write/subagents?")) return orig(url, opts);
     return Promise.resolve({
       ok: false, status: 404,
-      json: () => new Promise((resolve) => setTimeout(() => {
-        window.slowBodyRead = true; resolve({ detail: "late subagents detail" });
-      }, 1500)),
+      json: () => new Promise((resolve) => {
+        window.releaseBody = () => resolve({ detail: "late subagents detail" });
+      }),
     });
   };
   return "stubbed";
 })()"""
+_LIVE_ERROR_TEXT = "document.querySelector('[data-test=\"cm-error-live\"]').textContent"
 
 
 def test_config_mgmt_superseded_load_error_never_reaches_the_banner(
@@ -601,15 +601,17 @@ def test_config_mgmt_superseded_load_error_never_reaches_the_banner(
     browser.select('[data-test="cm-project"]', "alpha")
     assert browser.eval_json(_SLOW_FAILING_SUBAGENTS_LIST) == "stubbed"
     browser.click('[data-test="cm-surface-subagents"]')
+    # The stub was reached: the subagents load is waiting on the body.
+    deadline = time.monotonic() + 5
+    while browser.eval_json("typeof window.releaseBody") != "function":
+        assert time.monotonic() < deadline, "the subagents list fetch never reached the stub"
+        time.sleep(0.2)
     browser.click('[data-test="cm-surface-settings"]')
     browser.expect_visible('[data-test="cm-settings-rows"]')
-    deadline = time.monotonic() + 5
-    while not browser.eval_json("window.slowBodyRead") and time.monotonic() < deadline:
-        time.sleep(0.2)
-    assert browser.eval_json("window.slowBodyRead") is True
-    time.sleep(0.3)  # one more tick for the awaiting loader to run
-    assert "late subagents detail" not in browser.get_text('[data-test="cm-error-live"]')
-    browser.expect_hidden('[data-test="cm-error"]')
+    assert browser.eval_json("(window.releaseBody(), true)") is True
+    time.sleep(0.3)  # let the awaiting loader run
+    assert "late subagents detail" not in browser.eval_json(_LIVE_ERROR_TEXT)
+    assert browser.eval_json(f"{_ROOT}.configMgmt.error") == ""
 
 
 # --- TASK-271: a typed row for every top-level key --------------------------------------
