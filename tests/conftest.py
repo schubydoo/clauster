@@ -312,6 +312,8 @@ def _reset_known_value_store():
     def _reset() -> None:
         with redact._known_lock:
             redact._known_owners.clear()
+            redact._stream_runs.clear()
+            redact._stream_lifetime.clear()
             redact._rebuild_known_matcher()
 
     _reset()

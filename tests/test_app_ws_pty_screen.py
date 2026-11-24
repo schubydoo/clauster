@@ -72,39 +72,72 @@ def test_absent_sidecar_poll_is_skipped(runner_config, tmp_path: Path, monkeypat
     monkeypatch.setattr(ws_module, "_SCREEN_POLL_INTERVAL", 0)
     calls = {"n": 0}
 
-    def _read(_path):
+    def _read(_path, *, after_seq):
         calls["n"] += 1
         if calls["n"] == 1:
             return None  # nothing on disk yet → skip this tick
         return {"seq": 1, "state": "live", "error": None, "screen": {"rows": ["hi"]}}
 
-    monkeypatch.setattr(pty_screen, "read_screen_sidecar", _read)
+    monkeypatch.setattr(pty_screen, "read_new_screen_frame", _read)
     log = tmp_path / "alpha-1-1.log"
     with _client_with(runner_config, _pty_running("alpha", log), screen_enabled=True) as client:
         with client.websocket_connect("/ws/pty-screen/alpha") as ws:
             assert ws.receive_json()["seq"] == 1
 
 
-def test_unchanged_frame_is_not_resent(runner_config, tmp_path: Path, monkeypatch):
-    # When the keeper hasn't updated the sidecar between two polls the reader sees the same
-    # seq twice and must skip the duplicate, forwarding only on a strictly higher seq. Covers
-    # the `seq > last_seq` False arc (the de-dup skip).
+def test_unchanged_frame_is_not_resent_or_masked_again(runner_config, tmp_path: Path, monkeypatch):
+    # When the keeper hasn't updated the sidecar between polls the reader sees the same seq
+    # again and must skip it, forwarding only on a strictly higher seq. TASK-470: the skip
+    # comes BEFORE the mask, so an unchanged frame is masked once, not on every poll.
     monkeypatch.setattr(ws_module, "_SCREEN_POLL_INTERVAL", 0)
-    calls = {"n": 0}
-
-    def _read(_path):
-        calls["n"] += 1
-        if calls["n"] >= 3:  # third poll onward: a newer frame
-            return {"seq": 2, "state": "live", "error": None, "screen": {"rows": ["b"]}}
-        return {"seq": 1, "state": "live", "error": None, "screen": {"rows": ["a"]}}  # polls 1-2
-
-    monkeypatch.setattr(pty_screen, "read_screen_sidecar", _read)
     log = tmp_path / "alpha-1-1.log"
+    _write_frame(log, 1, screen={"rows": ["a"]})
+    polls, masks = {"n": 0}, {"n": 0}
+    load, mask = pty_screen._load_sidecar, pty_screen._redact_known_frame
+
+    def _counted_load(path):
+        polls["n"] += 1
+        if polls["n"] == 6:  # five polls of the same frame, then the keeper publishes seq 2
+            _write_frame(log, 2, screen={"rows": ["b"]})
+        return load(path)
+
+    def _counted_mask(data):
+        masks["n"] += 1
+        return mask(data)
+
+    monkeypatch.setattr(pty_screen, "_load_sidecar", _counted_load)
+    monkeypatch.setattr(pty_screen, "_redact_known_frame", _counted_mask)
     with _client_with(runner_config, _pty_running("alpha", log), screen_enabled=True) as client:
         with client.websocket_connect("/ws/pty-screen/alpha") as ws:
-            first = ws.receive_json()  # seq 1 (poll 1)
-            second = ws.receive_json()  # seq 2 (poll 3); poll 2's duplicate seq 1 was skipped
-    assert first["seq"] == 1 and second["seq"] == 2
+            first = ws.receive_json()  # seq 1 (poll 1); polls 2-5 read it again and skip it
+            second = ws.receive_json()  # seq 2 (poll 6)
+            sent_masks = masks["n"]
+    assert first["seq"] == 1 and first["screen"]["rows"] == ["a"]
+    assert second["seq"] == 2 and second["screen"]["rows"] == ["b"]
+    assert polls["n"] >= 6
+    assert sent_masks == 2  # one mask per frame sent; masking per poll made it 6
+
+
+def test_reader_skips_an_old_frame_before_it_masks(tmp_path: Path, monkeypatch):
+    sidecar = tmp_path / "alpha.screen.json"
+    masks = {"n": 0}
+    mask = pty_screen._redact_known_frame
+
+    def _counted_mask(data):
+        masks["n"] += 1
+        return mask(data)
+
+    monkeypatch.setattr(pty_screen, "_redact_known_frame", _counted_mask)
+    assert pty_screen.read_new_screen_frame(sidecar, after_seq=-1) is None  # no file yet
+    for seq in (3, "3", None, True):
+        sidecar.write_text(json.dumps({"seq": seq, "screen": None}), encoding="utf-8")
+        assert pty_screen.read_new_screen_frame(sidecar, after_seq=3) is None
+    sidecar.write_text(json.dumps({"seq": 4, "screen": {"rows": ["x"]}}), encoding="utf-8")
+    assert pty_screen.read_new_screen_frame(sidecar, after_seq=3) == {
+        "seq": 4,
+        "screen": {"rows": ["x"]},
+    }
+    assert masks["n"] == 1  # only the frame that is returned was masked
 
 
 def test_streams_status_frame_with_seq_zero(runner_config, tmp_path: Path):
@@ -130,13 +163,13 @@ def test_stream_teardown_returns_cleanly(runner_config, tmp_path: Path, monkeypa
     monkeypatch.setattr(ws_module, "_SCREEN_POLL_INTERVAL", 0)
     calls = {"n": 0}
 
-    def _read(_path):
+    def _read(_path, *, after_seq):
         calls["n"] += 1
         if calls["n"] == 1:
             return {"seq": 1, "state": "live", "error": None, "screen": {"rows": ["hi"]}}
         raise RuntimeError("stream torn down")  # second read raises → except returns cleanly
 
-    monkeypatch.setattr(pty_screen, "read_screen_sidecar", _read)
+    monkeypatch.setattr(pty_screen, "read_new_screen_frame", _read)
     log = tmp_path / "alpha-1-1.log"
     with _client_with(runner_config, _pty_running("alpha", log), screen_enabled=True) as client:
         with client.websocket_connect("/ws/pty-screen/alpha") as ws:

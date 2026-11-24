@@ -2648,7 +2648,7 @@ class SessionRunner:
         flag-form true-resume, which leaves no pointer and whose keeper can't capture
         the connect URL (a reconnect never reprints it) — the bridge's ``--debug-file``,
         where a ``--continue`` logs the session it resumed as ``[remote-bridge]
-        Unarchive session_<id>`` (see ``bridge_log._RE_RESUME_SESSION``).
+        Unarchive session_<id>`` (see ``bridge_log._RESUME_SESSION``).
         """
         if instance.starter_session_id is not None:
             return
