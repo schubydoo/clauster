@@ -3975,6 +3975,25 @@ async def test_recheck_keeps_an_orphan_without_proof_its_agent_ended(monkeypatch
     assert inst.is_orphan is True
 
 
+@pytest.mark.parametrize("case", ["no-pid", "closing"])
+async def test_recheck_never_probes_a_row_with_no_pid_or_while_closing(monkeypatch, case):
+    """With no pid there is nothing to probe, and a closing manager changes no row."""
+    probed: list[object] = []
+
+    async def _probe(instance):
+        probed.append(instance)
+        return True
+
+    monkeypatch.setattr(HostedManager, "_agent_gone", staticmethod(_probe))
+    mgr = HostedManager()
+    inst = _orphan_instance(pid=None) if case == "no-pid" else _orphan_instance()
+    mgr._instances[inst.claustrum_process_id] = inst
+    mgr._closing = case == "closing"
+    await mgr.recheck_orphans()
+    assert probed == []
+    assert inst.is_orphan is True
+
+
 async def test_recheck_never_waits_for_a_row_a_lifecycle_op_owns(monkeypatch):
     """The poll must not wait behind a Resume or Kill, held or queued for the lock."""
     monkeypatch.setattr(HostedManager, "_agent_gone", staticmethod(_always_gone))
