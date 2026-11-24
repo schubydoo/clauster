@@ -109,6 +109,7 @@ from .config_write_hooks import (
     validate_hooks,
 )
 from .config_write_mcp import (
+    RELOAD_HINT_TAIL,
     _convert_legacy_entry,
     _merge_kept,
     _redact_entry,
@@ -685,9 +686,27 @@ def _validate_mcp_servers(value: Any, label: str) -> None:
         try:
             _validate_server_fields(server_name, definition)
         except cw.InvalidCandidateError as exc:
+            detail = _inline_server_detail(str(exc), server_name)
             raise cw.InvalidCandidateError(
-                f"{label} inline server {server_name!r}: {exc}.{_by_hand_hint(definition)}"
+                f"{label} inline server {server_name!r}: {detail}.{_by_hand_hint(definition)}"
             ) from exc
+
+
+#: What this surface says in place of the MCP tab's
+#: :data:`~clauster.config_write_mcp.RELOAD_HINT_TAIL`.
+_SUBAGENT_RELOAD_HINT_TAIL = "when it opens the subagent file, so open the file again and save it"
+
+
+def _inline_server_detail(message: str, server_name: str) -> str:
+    """Return the MCP tab's refusal ``message`` worded for an inline server (TASK-486).
+
+    The prefix above already names the server, so the message's own ``server 'name'``
+    (also ``remote server`` or ``stdio server``) is dropped, and the MCP tab's advice to
+    reload the server becomes advice to open the subagent file again, which converts it.
+    """
+    prefix = re.match(rf"(?:remote |stdio )?server {re.escape(repr(server_name))} ", message)
+    detail = message[prefix.end() :] if prefix else message
+    return detail.replace(RELOAD_HINT_TAIL, _SUBAGENT_RELOAD_HINT_TAIL)
 
 
 def _by_hand_hint(definition: Any) -> str:
@@ -752,9 +771,10 @@ def _validate_env(value: Any, label: str) -> None:
 #: here and a string there, ``010`` is 8 here and 10 there.
 #: :func:`_refuse_yaml11_only_spellings` refuses those for the boolean and number fields.
 #: Other differences are stricter here, for example a plain ``2024-01-01`` is a date to
-#: PyYAML, so it is refused as a ``maxTurns`` that the CLI would read as 2024. A top-level
-#: field this module checks only as "a string" (``model``) is not compared spelling by
-#: spelling; the string values of an inline MCP definition are.
+#: PyYAML, so it is refused as a ``maxTurns`` that the CLI would read as 2024. ``model`` and
+#: ``effort`` are also read from the YAML 1.2 view (:func:`_refuse_yaml12_only_numbers`), so
+#: a plain ``model: 1e3``, a number to the CLI, is refused; the string values of an inline
+#: MCP definition are compared by the shared seam.
 _OPTIONAL_FRONTMATTER_RULES: tuple[tuple[str, _FrontmatterRule], ...] = (
     # Claude Code accepts either a comma-separated string or an array for these —
     # this repo's own shipped subagents use the string form. `tools` must name at least
@@ -871,6 +891,33 @@ def validate_agent_content(candidate: Any, *, expected_name: str | None = None) 
     if header is not None:  # pragma: no branch — always, once parse_frontmatter accepted it
         with cw.refuse_check_failures("frontmatter"):  # it walks the composed tree itself
             _refuse_yaml11_only_spellings(cw.frontmatter_header(candidate, header))
+            _refuse_yaml12_only_numbers(cw.frontmatter_header(candidate, header), frontmatter)
+
+
+def _refuse_yaml12_only_numbers(header: str, frontmatter: dict[str, Any]) -> None:
+    """Refuse a ``model`` or ``effort`` that only the CLI's YAML 1.2 reads as a number.
+
+    A plain ``1e3`` or ``0o17`` is text to PyYAML and a number to YAML 1.2 (TASK-485). The
+    2.1.330 agent-file loader reads ``model`` only when it is text, so ``model: 1e3`` would
+    leave the subagent on the session model; and ``effort: 1e400`` is ``Infinity`` there,
+    which it ignores. Each check reads the value from :func:`~clauster.config_write.
+    yaml12_view`, so ``!!str 1e3`` and a quoted ``'1e3'`` stay text and save.
+    """
+    view = cw.yaml12_view(header)
+    if not isinstance(view, dict):  # pragma: no cover - the header loaded as a mapping
+        return
+    if isinstance(frontmatter.get("model"), str) and not isinstance(view.get("model"), str):
+        raise cw.InvalidCandidateError(
+            "frontmatter 'model' is a number to the YAML 1.2 that Claude Code reads, and "
+            "Claude Code ignores a model that is not text. Quote the value"
+        )
+    effort = view.get("effort")
+    if isinstance(effort, (int, float)) and not isinstance(effort, bool):
+        if _cli_effort(effort) is None:
+            raise cw.InvalidCandidateError(
+                "frontmatter 'effort' is a number that the YAML 1.2 Claude Code reads cannot "
+                "hold, so Claude Code ignores it. Write a level or a smaller integer"
+            )
 
 
 #: The fields whose loaded value this module checks as a boolean or a number, and the
@@ -977,7 +1024,7 @@ def _refuse_yaml11_only_spellings(header: str) -> None:
     or its retry text: :func:`~clauster.config_write.cli_frontmatter_text`) yields a mapping
     node and does not fail.
     """
-    root = yaml.compose(cw.cli_frontmatter_text(header), Loader=yaml.SafeLoader)
+    root = yaml.compose(cw.cli_frontmatter_text(header), Loader=cw.FrontmatterLoader)
     _check_mapping(
         root,
         set(),
@@ -1152,7 +1199,9 @@ def _mcp_servers_block_bounds(lines: list[str]) -> tuple[int, int] | None:
 
     None when there is no such key line, more than one, or a value on the key line (a flow
     collection). The block runs until the next line that starts at column 0 (the next
-    top-level key), so ``lines[start + 1 : end]`` are its entries.
+    top-level key), so ``lines[start + 1 : end]`` are its entries. A ``- `` item line at
+    column 0 is part of the block: YAML lets a mapping's list value sit at the key's own
+    indent (TASK-486). The callers' re-parse check refuses any other shape.
     """
     starts = [i for i, line in enumerate(lines) if _MCP_SERVERS_KEY_LINE_RE.match(line)]
     if len(starts) != 1 or not _MCP_SERVERS_BLOCK_KEY_RE.match(lines[starts[0]].rstrip("\r\n")):
@@ -1162,7 +1211,7 @@ def _mcp_servers_block_bounds(lines: list[str]) -> tuple[int, int] | None:
         (
             i
             for i in range(start + 1, len(lines))
-            if lines[i][:1] not in ("", " ", "\t", "\r", "\n")
+            if lines[i][:1] not in ("", " ", "\t", "\r", "\n") and not _is_item_line(lines[i])
         ),
         len(lines),
     )
@@ -1633,6 +1682,8 @@ def _scalar_spellings(text: str | None) -> dict[tuple[type, Any], str]:
     # The caller passes only a stored file whose frontmatter loaded, so this composes; the
     # caller's `refuse_check_failures` would turn a failure into "cannot rewrite".
     source = cw.cli_frontmatter_text(cw.frontmatter_header(text, match))
+    # Plain SafeLoader on purpose, like the masking view: a header only FrontmatterLoader
+    # reads keeps no masked value, so its save is refused (TASK-485).
     root = yaml.compose(source, Loader=yaml.SafeLoader)
     constructor = yaml.constructor.SafeConstructor()
     stack = [root] if root is not None else []
@@ -1725,6 +1776,7 @@ def _rewrite_values(text: str, target: dict[str, Any], *, stored: str | None) ->
             value, _body = parse_frontmatter(text)
             if cw.same_yaml_value(value, target):
                 return text
+            # Plain SafeLoader on purpose (see _scalar_spellings, TASK-485).
             root = yaml.compose(source, Loader=yaml.SafeLoader)
             slots = None if root is None else _changed_scalars(root, value, target)
             if not slots:
@@ -1781,7 +1833,22 @@ def _mask_agent_text(text: str) -> str | None:
         masked = _unloaded_header_view(match.group(1))
         return bom + core[: match.start(1)] + masked + core[match.end(1) :]
     shown = _rewrite_values(core, view, stored=None)
+    if shown is None and not _safe_loader_composes(cw.frontmatter_header(core, match)):
+        # A header only cw.FrontmatterLoader reads (a tab in a value, TASK-485): the
+        # in-place writer composes with plain SafeLoader, so the view is the line-by-line
+        # one this header had before that loader, never less masked.
+        masked = _unloaded_header_view(match.group(1))
+        return bom + core[: match.start(1)] + masked + core[match.end(1) :]
     return None if shown is None else bom + shown
+
+
+def _safe_loader_composes(header: str) -> bool:
+    """Whether plain ``SafeLoader`` composes the text the CLI parses for ``header``."""
+    try:
+        yaml.compose(cw.cli_frontmatter_text(header), Loader=yaml.SafeLoader)
+    except (yaml.YAMLError, RecursionError):
+        return False
+    return True
 
 
 def _keep_masked_values(

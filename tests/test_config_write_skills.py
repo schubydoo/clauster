@@ -2052,11 +2052,48 @@ def test_a_plain_spelling_inside_frontmatter_hooks_saves() -> None:
         ("tab\there", False),
         ("a\u3164b", False),  # Hangul filler: a letter to Python, a blank to the CLI
         ("a\u2800b", False),  # Braille blank
-        ("caf\u0065\u0301", False),  # a combining mark: narrower than the CLI, on purpose
+        ("caf\u0065\u0301", True),  # a combining mark on a letter (TASK-485)
         ("a&lt;b", False),  # the CLI turns &lt; back into < before it checks
     ],
 )
 def test_cli_shows_name(name: str, shown: bool) -> None:
+    assert sk.cli_shows_name(name) is shown
+
+
+@pytest.mark.parametrize(
+    ("name", "shown"),
+    [
+        # TASK-485: each row is what the installed CLI (2.1.330) showed or logged under
+        # `[names]` for a skill with this frontmatter name, in a throwaway HOME.
+        ("e\u0301clair", True),
+        ("a\u0300\u0301", True),  # two marks on one letter
+        ("1\u0301", True),  # a digit takes an Inherited mark too
+        ("\u0301x", False),  # a mark at the start
+        ("a \u0301b", False),  # a mark after a space
+        ("x-\u0301", False),  # a mark after a hyphen
+        ("1\u20e3", False),  # the keycap mark, anywhere
+        ("a" + "\u0301" * 8, True),
+        ("a" + "\u0301" * 9, False),  # a run of nine
+        ("i\u0307", False),  # a second dot on a soft-dotted letter
+        ("z\u0307", True),
+        ("\u0131\u0301", False),  # a mark on a dotless i
+        ("a\ufe0f", False),  # a variation selector is hidden
+        ("a\u034f", False),  # so is the combining grapheme joiner
+        ("\u1100\u1161", True),  # Hangul leading + vowel jamo: one syllable
+        ("\u1100\u1161\u11a8", True),
+        ("\uac00\u11a8", True),  # a final jamo on a syllable
+        ("\u1100", True),  # a leading jamo is a letter
+        ("\u1161", False),  # a lone vowel jamo
+        ("\u11a8", False),  # a lone final jamo
+        ("a\u11a8", False),  # a jamo on a Latin letter
+        ("\u0915\u093f", True),  # Devanagari ka + vowel sign i
+        ("a\u093f", False),  # that vowel sign on a Latin letter
+        ("\u0628\u06e1", True),  # an Arabic mark on an Arabic letter
+        ("\u0640\u06e1", False),  # the same mark on the Common tatweel
+        ("\u30ab\u3099", True),  # a decomposed Japanese voiced mark
+    ],
+)
+def test_cli_shows_name_matches_the_cli_for_marks_and_jamo(name: str, shown: bool) -> None:
     assert sk.cli_shows_name(name) is shown
 
 
@@ -3871,3 +3908,54 @@ def test_delete_skill_still_removes_every_member(tmp_path: Path) -> None:
     skill_dir = _stored(tmp_path)
     assert sk.delete_skill(tmp_path, "s") is True
     assert not skill_dir.exists()
+
+
+# --- TASK-485: forms the CLI reads that the editor used to refuse ----------------------------
+
+
+@pytest.mark.parametrize("field", ["model", "effort"])
+def test_an_explicit_str_number_spelling_saves(field: str) -> None:
+    # `!!str 1e3` is the text 1e3 to both YAML versions; the YAML 1.2 view used to read it
+    # as the number 1000 and refuse the field as one that reads differently.
+    readings = sk._check_skill_md(_fm(f"{field}: !!str 1e3"))
+    assert readings[field] == sk._tagged("1e3" if field == "model" else 1)
+
+
+@pytest.mark.parametrize("spelling", ["1e3", "0o17"])
+def test_a_model_that_yaml_1_2_reads_as_a_number_is_still_refused(spelling: str) -> None:
+    # The CLI reads `model` only when it is text, as the subagent surface now checks too.
+    with pytest.raises(cw.InvalidCandidateError, match="'model' must be a model alias"):
+        sk.validate_skill_md_content(_fm(f"model: {spelling}"))
+
+
+@pytest.mark.parametrize(
+    ("line", "key", "expected"),
+    [
+        ("description: runs\tthe checks", "description", "runs\tthe checks"),
+        ("allowed-tools: Read\tBash", "allowed-tools", ["Read\tBash"]),
+        ("argument-hint: x\ty", "argument-hint", "x\ty"),
+        ("model: sonnet\t# a note", "model", "sonnet"),
+    ],
+)
+def test_a_tab_inside_a_value_saves(line: str, key: str, expected: object) -> None:
+    readings = sk._check_skill_md(_fm(line))
+    assert readings[key] == sk._tagged(expected)
+
+
+def test_a_name_with_a_combining_mark_saves() -> None:
+    sk.validate_skill_md_content(_fm("name: e\u0301clair"))  # no raise
+    with pytest.raises(cw.InvalidCandidateError, match="'name' holds a character"):
+        sk.validate_skill_md_content(_fm("name: x-\u0301"))
+
+
+def test_a_tab_header_that_may_hold_a_secret_is_masked_whole() -> None:
+    # The header view composes with plain SafeLoader, which cannot read the tab, so every
+    # line of such a header is masked, as before the tab loaded (never less masked).
+    text = (
+        "---\nname: s\ndescription: a\tb\n"
+        'mcpServers: [{api: {type: http, url: "https://u:qv-tab@h.example.com/mcp"}}]\n'
+        "---\nBody.\n"
+    )
+    sk.validate_skill_md_content(text)  # the save path reads it
+    mask = cw.REDACTION_SENTINEL
+    assert sk._member_view(text) == "---\n" + f"{mask}\n" * 3 + "---\nBody.\n"

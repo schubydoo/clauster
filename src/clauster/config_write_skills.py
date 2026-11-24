@@ -279,8 +279,81 @@ _UNSCANNED_KEYS = frozenset({"metadata", "mcpServers", "lspServers"})
 _NAME_REFUSED_CODEPOINTS = frozenset(
     {0x115F, 0x1160, 0x3164, 0xFFA0, 0x2800, 0xFFFC, 0x1D159, 0x13441, 0x13442, 0x16FE4}
 )
-#: Hangul jamo the CLI accepts only in a context it checks script by script. Refused here.
-_NAME_REFUSED_RANGES = ((0x1160, 0x11FF), (0xD7B0, 0xD7FF))
+#: The CLI's ``d`` class in its name rule (2.1.330): a combining mark, or a Hangul vowel or
+#: final jamo (U+1160-U+11FF, U+D7B0-U+D7FF), which also only joins the letter before it.
+_NAME_JAMO_RANGES = ((0x1160, 0x11FF), (0xD7B0, 0xD7FF))
+#: Combining marks whose Unicode script is Inherited: the CLI takes them after any letter
+#: or digit. Whole blocks only, each Inherited throughout (U+FE2E and U+FE2F are Cyrillic,
+#: so they stay out). A mark outside these blocks counts as script-specific here, which
+#: only refuses more.
+_NAME_INHERITED_MARKS = (
+    (0x0300, 0x036F),
+    (0x0485, 0x0486),
+    (0x064B, 0x0655),
+    (0x0670, 0x0670),
+    (0x0951, 0x0954),
+    (0x1AB0, 0x1AFF),
+    (0x1DC0, 0x1DFF),
+    (0x20D0, 0x20FF),
+    (0x302A, 0x302D),
+    (0x3099, 0x309A),
+    (0xFE20, 0xFE2D),
+)
+#: The marks that are default-ignorable (hidden): the combining grapheme joiner, the Khmer
+#: inherent vowels, the Mongolian and the other variation selectors. The CLI refuses each
+#: one, also after a letter (checked against its ``[names]`` log).
+_NAME_HIDDEN_MARKS = (
+    (0x034F, 0x034F),
+    (0x17B4, 0x17B5),
+    (0x180B, 0x180F),
+    (0xFE00, 0xFE0F),
+    (0xE0100, 0xE01EF),
+)
+#: Blocks whose letters all have one script that is neither Latin nor Common, so a
+#: script-specific mark or jamo after such a letter is one the CLI takes. U+0640 ARABIC
+#: TATWEEL is Common and is excluded. Any other base letter takes only Inherited marks
+#: here, which only refuses more: the CLI also takes, for example, a Greek letter's marks.
+_NAME_SCRIPT_BASES = (
+    (0x0400, 0x04FF),  # Cyrillic
+    (0x0590, 0x05FF),  # Hebrew
+    (0x0600, 0x06FF),  # Arabic
+    (0x0900, 0x0DFF),  # Devanagari to Sinhala
+    (0x0E00, 0x0EFF),  # Thai, Lao
+    (0x0F00, 0x109F),  # Tibetan, Myanmar
+    (0x1100, 0x115E),  # Hangul leading jamo
+    (0x1780, 0x17FF),  # Khmer
+    (0xA960, 0xA97C),  # Hangul leading jamo, extended
+    (0xAC00, 0xD7A3),  # Hangul syllables
+)
+_NAME_COMMON_LETTERS = frozenset({0x0640})
+#: Unicode's Soft_Dotted letters (PropList.txt): the CLI refuses one followed, after any
+#: marks, by U+0307 COMBINING DOT ABOVE (a second dot).
+_SOFT_DOTTED = (
+    (0x0069, 0x006A),
+    (0x012F, 0x012F),
+    (0x0249, 0x0249),
+    (0x0268, 0x0268),
+    (0x029D, 0x029D),
+    (0x02B2, 0x02B2),
+    (0x03F3, 0x03F3),
+    (0x0456, 0x0456),
+    (0x0458, 0x0458),
+    (0x1D62, 0x1D62),
+    (0x1D96, 0x1D96),
+    (0x1DA4, 0x1DA4),
+    (0x1DA8, 0x1DA8),
+    (0x1E2D, 0x1E2D),
+    (0x1ECB, 0x1ECB),
+    (0x2071, 0x2071),
+    (0x2148, 0x2149),
+    (0x2C7C, 0x2C7C),
+    (0x1D422, 0x1D693),  # the mathematical i and j, a superset of the exact list
+    (0x1DF1A, 0x1DF1A),
+    (0x1E04C, 0x1E04D),
+    (0x1E068, 0x1E068),
+)
+#: The CLI caps a run of marks and jamo below this many.
+_NAME_MAX_MARK_RUN = 9
 
 
 class _IgnoredFieldError(cw.InvalidCandidateError):
@@ -309,11 +382,11 @@ def _utf16_length(text: str) -> int:
 def cli_shows_name(name: str) -> bool:
     """Return whether Claude Code shows and matches ``name`` as a skill name.
 
-    A port, slightly narrower, of the CLI's name rule (``GJ``) and of the docs'
-    "Characters a skill name can't hold": at most 256 UTF-16 code units, no control,
-    format, private-use, surrogate or unassigned character, no blank other than one plain
-    space between words, and no ``<`` or ``>``. The CLI decides some combining marks and
-    jamo script by script; those are refused here outright, which only ever refuses more.
+    A port, slightly narrower, of the CLI's name rule (``GJ`` in 2.1.318, ``nHr`` in 2.1.330)
+    and of the docs' "Characters a skill name can't hold": at most 256 UTF-16 code units,
+    no control, format, private-use, surrogate or unassigned character, no blank other than
+    one plain space between words, and no ``<`` or ``>``. Combining marks and Hangul vowel
+    and final jamo follow :func:`_name_marks_join` (TASK-485).
     """
     if not name or _utf16_length(name) > MAX_CLI_NAME_UNITS:
         return False
@@ -324,13 +397,68 @@ def cli_shows_name(name: str) -> bool:
     for char in name:
         point = ord(char)
         category = unicodedata.category(char)
-        if category[0] in "CM" or category in ("Zl", "Zp"):
+        if category[0] == "C" or category in ("Zl", "Zp"):
             return False
         if category == "Zs" and char != " ":
             return False
         if point in _NAME_REFUSED_CODEPOINTS:
             return False
-        if any(low <= point <= high for low, high in _NAME_REFUSED_RANGES):
+    return _name_marks_join(name)
+
+
+def _in_ranges(point: int, ranges: tuple[tuple[int, int], ...]) -> bool:
+    """Whether code point ``point`` lies in one of the inclusive ``ranges``."""
+    return any(low <= point <= high for low, high in ranges)
+
+
+def _is_name_mark(char: str) -> bool:
+    """Whether ``char`` is in the CLI's ``d`` class: a combining mark or a vowel/final jamo."""
+    return unicodedata.category(char)[0] == "M" or _in_ranges(ord(char), _NAME_JAMO_RANGES)
+
+
+def _name_marks_join(name: str) -> bool:
+    r"""Whether every combining mark and vowel or final jamo in ``name`` joins its letter.
+
+    A port of the CLI's ``Te`` pattern (2.1.330), read from its bundle and checked against
+    its ``[names]`` log. The CLI refuses a name where such a character:
+
+    * does not follow a letter, a digit or another mark (``\u0301x``, ``x-\u0301``, a
+      lone ``\u1161``);
+    * is the ninth of a run;
+    * is a second dot, U+0307, on a soft-dotted letter (``i\u0307``), or any mark on a
+      dotless ``\u0131`` or ``\u0237``;
+    * is not of the Inherited script and follows a Latin or Common letter, through other
+      marks (``a\u11a8``, a Devanagari vowel sign after a Latin letter).
+
+    It also refuses U+20E3, the keycap mark, and a hidden mark (:data:`_NAME_HIDDEN_MARKS`)
+    anywhere. Python has no script property, so
+    the last rule is narrower here: a mark outside :data:`_NAME_INHERITED_MARKS` is taken
+    only after a letter of :data:`_NAME_SCRIPT_BASES`. One pass, linear in the length.
+    """
+    base: str | None = None  # the letter or digit the current run of marks follows
+    run = 0
+    for char in name:
+        point = ord(char)
+        if point == 0x20E3 or _in_ranges(point, _NAME_HIDDEN_MARKS):
+            return False
+        if not _is_name_mark(char):
+            base, run = char, 0
+            continue
+        run += 1
+        if base is None or unicodedata.category(base)[0] not in "LN":
+            return False
+        if run >= _NAME_MAX_MARK_RUN:
+            return False
+        base_point = ord(base)
+        if point == 0x0307 and _in_ranges(base_point, _SOFT_DOTTED):
+            return False
+        if base_point in (0x0131, 0x0237) and unicodedata.category(char)[0] == "M":
+            return False
+        if not _in_ranges(point, _NAME_INHERITED_MARKS) and (
+            unicodedata.category(base)[0] != "L"
+            or base_point in _NAME_COMMON_LETTERS
+            or not _in_ranges(base_point, _NAME_SCRIPT_BASES)
+        ):
             return False
     return True
 
@@ -1065,7 +1193,7 @@ def _without_top_level_keys(text: str, keys: list[str]) -> str | None:
     full = cw.frontmatter_header(text, match)
     if cw.cli_frontmatter_text(full) != full:
         return None  # the CLI reads a re-quoted copy: the lines on disk are not its lines
-    root = yaml.compose(header, Loader=yaml.SafeLoader)
+    root = yaml.compose(header, Loader=cw.FrontmatterLoader)
     if not isinstance(root, yaml.MappingNode) or root.flow_style:
         return None
     if any(key_node.tag == "tag:yaml.org,2002:merge" for key_node, _ in root.value):
@@ -2139,6 +2267,8 @@ def _mask_header_values(header: str, *, readable: bool) -> str:
         return header
     try:
         source = cw.cli_frontmatter_text(header)
+        # Plain SafeLoader on purpose: a header only FrontmatterLoader reads (a tab in a
+        # value) fails here and is masked whole, never less than before (TASK-485).
         root = yaml.compose(source, Loader=yaml.SafeLoader)
         composed = True
     except (yaml.YAMLError, RecursionError):

@@ -1730,8 +1730,65 @@ class FlowNestingTooDeepError(yaml.YAMLError):
         self.mark = mark
 
 
-class _FlowDepthLoader(yaml.SafeLoader):
-    """``SafeLoader`` whose scanner stops at a flow collection past :data:`MAX_NESTING_DEPTH`.
+#: The attribute :class:`FrontmatterLoader` sets on a scalar node written with a tag.
+_EXPLICIT_TAG_ATTR = "clauster_explicit_tag"
+#: The characters that end a line to PyYAML's scanner.
+_YAML_LINE_BREAKS = "\r\n\x85\u2028\u2029"
+
+
+class FrontmatterLoader(yaml.SafeLoader):
+    r"""``SafeLoader`` that reads two things in a frontmatter header as YAML 1.2 does (TASK-485).
+
+    Claude Code's YAML 1.2 loader (checked against eemeli/yaml) reads both; PyYAML does not:
+
+    * **A tab inside a plain value.** YAML 1.2 reads a tab between the words of a plain
+      scalar as white space (``description: a<TAB>b`` is ``"a\tb"``), and a tab before a
+      ``#`` as the space that starts a comment. PyYAML refuses every such tab ("found
+      character '\t' that cannot start any token"). Here a run of spaces and tabs inside
+      the line of a plain scalar is read as YAML 1.2 reads it. A run with no tab, and every
+      other place a tab can stand (indentation, after a ``:`` or ``-`` indicator, after a
+      quoted value or a ``]``), is scanned by PyYAML's own code, so it is refused as before.
+    * **An explicit ``!!str``.** ``!!str 1e3`` is the string ``1e3`` to both, but PyYAML's
+      composed node does not say that the tag was written, and ``1e3`` resolves to a string
+      in YAML 1.1 anyway. This marks a scalar written with a tag, so :func:`yaml12_view`
+      reads it as the string, not as the number a plain ``1e3`` is in YAML 1.2.
+
+    Every frontmatter check composes with this loader, so they all read one document. The
+    editor's masking (``_mask_header_values``) and its masked-value restore still compose
+    with plain ``SafeLoader``: a header only this loader reads has every line masked whole
+    there, which is never less masking than before. Never evaluates anything.
+    """
+
+    def scan_plain_spaces(self, indent: int, start_mark: yaml.Mark) -> list[str] | None:
+        """Read a run of spaces and tabs after a plain scalar's text as YAML 1.2 does."""
+        length = 0
+        while self.peek(length) in " \t":
+            length += 1
+        if "\t" not in self.prefix(length):
+            return super().scan_plain_spaces(indent, start_mark)  # PyYAML's own reading
+        whitespaces = self.prefix(length)
+        self.forward(length)
+        if self.peek() in _YAML_LINE_BREAKS:
+            # White space at the end of a line is dropped; PyYAML folds the line break.
+            return super().scan_plain_spaces(indent, start_mark)
+        # In-line white space: kept when more of the value follows, and a `#` after it
+        # starts a comment (scan_plain checks for one).
+        return [whitespaces]
+
+    def compose_scalar_node(self, anchor: Any) -> yaml.ScalarNode:
+        """Compose a scalar as PyYAML does, and mark it when it was written with a tag."""
+        tagged = self.peek_event().tag not in (None, "!")
+        node = super().compose_scalar_node(anchor)
+        if tagged:
+            setattr(node, _EXPLICIT_TAG_ATTR, True)
+        return node
+
+
+class _FlowDepthLoader(FrontmatterLoader):
+    """:class:`FrontmatterLoader` whose scanner stops at a flow collection past the cap.
+
+    The cap is :data:`MAX_NESTING_DEPTH`. It reads tabs as the parse does, so the check
+    covers the same text the parse reads.
 
     The stop is in the scanner, so it reads quotes, comments and block scalars exactly as
     the parse does, and the cost of reaching it is linear. Raises
@@ -2052,7 +2109,10 @@ def _yaml12_scalar(node: yaml.ScalarNode) -> Any:
     implicit = _RESOLVER.resolve(
         yaml.ScalarNode, node.value, (node.style is None, node.style is not None)
     )
-    if node.tag != implicit:
+    # An explicit `!!str` on text that YAML 1.1 also resolves to a string (`!!str 1e3`) has
+    # the implicit tag, so only FrontmatterLoader's mark tells it apart (TASK-485).
+    explicit_str = node.tag == _YAML_STR_TAG and getattr(node, _EXPLICIT_TAG_ATTR, False)
+    if node.tag != implicit or explicit_str:
         # An explicit tag. `!!str` reads the same in both versions; any other tag is refused
         # by whichever surface checks the field.
         return node.value if node.tag == _YAML_STR_TAG else Yaml12Unknown()
@@ -2246,9 +2306,10 @@ def _is_yaml11_only_syntax_error(exc: yaml.YAMLError) -> bool:
     eemeli/yaml (YAML 1.2): a second anchor of one name (YAML 1.2 does not require unique
     anchors), an anchor or alias name with a character other than letters, digits, ``_``
     and ``-`` (``&a.b``, ``&é``), a flow item that starts with ``:`` (``[:a]``), and a tab
-    after a value (``Bash\t# note``: PyYAML cannot start a token there, YAML 1.2 reads the
-    tab as white space and the ``#`` as a comment). A tab used as indentation is refused by
-    both, and that one does take the retry (which turns it into spaces).
+    after a quoted value or a ``:`` (``"Bash"\t# note``: PyYAML cannot start a token there,
+    YAML 1.2 reads the tab as white space and the ``#`` as a comment). A tab after an
+    unquoted value loads (:class:`FrontmatterLoader`). A tab used as indentation is refused
+    by both, and that one does take the retry (which turns it into spaces).
     """
     if isinstance(exc, ComposerError):
         return exc.problem == "second occurrence"
@@ -2415,7 +2476,7 @@ def _yaml12_refuses(text: str, root: yaml.Node | None) -> tuple[int, int] | None
         # The first lone CR: every `\r` before it is part of a `\r\n`, so `\n` counts lines.
         at = lone_cr.start()
         return body.count("\n", 0, at), at - (body.rfind("\n", 0, at) + 1)
-    for token in yaml.scan(text, Loader=yaml.SafeLoader):
+    for token in yaml.scan(text, Loader=FrontmatterLoader):
         end = token.end_mark
         # Zero-width tokens (stream, block start and end) sit before a comment line, not on
         # it, and a token that ends at a line start (a block scalar) is followed by a comment
@@ -2457,7 +2518,7 @@ def _flow_question_mark(text: str) -> tuple[int, int] | None:
     depth = 0
     previous: yaml.Token | None = None
     try:
-        for token in yaml.scan(text, Loader=yaml.SafeLoader):
+        for token in yaml.scan(text, Loader=FrontmatterLoader):
             if isinstance(token, (yaml.FlowMappingStartToken, yaml.FlowSequenceStartToken)):
                 depth += 1
             elif isinstance(token, (yaml.FlowMappingEndToken, yaml.FlowSequenceEndToken)):
@@ -2542,7 +2603,7 @@ def yaml12_view(header: str) -> Any:
     The header goes through :func:`cli_frontmatter_text` first, as in the seam.
     """
     try:
-        root = yaml.compose(cli_frontmatter_text(header), Loader=yaml.SafeLoader)
+        root = yaml.compose(cli_frontmatter_text(header), Loader=FrontmatterLoader)
         return None if root is None else _yaml12_node(root)
     except RecursionError as exc:
         raise InvalidCandidateError("frontmatter is nested too deeply to parse") from exc
@@ -2917,7 +2978,7 @@ def load_frontmatter_yaml(header: str, *, what: str, line_offset: int = 0) -> An
         # `!<tag:yaml.org,2002:merge>` and a `%`-escaped tag are merge keys too. Every walk
         # below reads this one composed graph. ``compose`` raises the same
         # ``YAMLError``/``RecursionError`` ``safe_load`` would, mapped below.
-        root = yaml.compose(header, Loader=yaml.SafeLoader)
+        root = yaml.compose(header, Loader=FrontmatterLoader)
         with refuse_check_failures(what):
             if root is not None and _merge_expands_beyond(root, MAX_MERGE_EXPANDED_PAIRS):
                 raise InvalidCandidateError(
@@ -2932,7 +2993,7 @@ def load_frontmatter_yaml(header: str, *, what: str, line_offset: int = 0) -> An
                     f"{what} has an alias to a node that encloses it, which the YAML 1.2 "
                     "that Claude Code reads refuses. Remove the self-reference"
                 )
-        value = yaml.safe_load(header)
+        value = yaml.load(header, Loader=FrontmatterLoader)  # noqa: S506 - a SafeLoader
     except yaml.YAMLError as exc:
         raise InvalidCandidateError(
             f"{what} is not valid YAML"

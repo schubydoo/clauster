@@ -3261,3 +3261,165 @@ def test_a_crash_in_the_subagent_spelling_walk_is_a_refusal(monkeypatch) -> None
     monkeypatch.setattr(sub, "_refuse_yaml11_only_spellings", _boom)
     with pytest.raises(cw.InvalidCandidateError, match="TypeError"):
         sub.validate_agent_content(_content("my-agent"), expected_name="my-agent")
+
+
+# --- TASK-483: the JavaScript-compat helpers are one shared copy ----------------------------
+
+
+def test_the_javascript_compat_helpers_are_one_shared_copy() -> None:
+    # Both surfaces alias the one copy in config_write, so they cannot drift apart.
+    from clauster import config_write_skills as sk
+
+    shared = {
+        "_JS_WHITESPACE": cw.JS_WHITESPACE,
+        "_JS_PARSE_INT_RE": cw.JS_PARSE_INT_RE,
+        "_js_parse_int": cw.js_parse_int,
+        "_cli_tool_entries": cw.cli_tool_entries,
+        "_cli_effort": cw.cli_effort,
+        "_EFFORT_LEVELS": cw.EFFORT_LEVELS,
+    }
+    for name, helper in shared.items():
+        assert getattr(sub, name) is helper, name
+        assert getattr(sk, name) is helper, name
+
+
+@pytest.mark.parametrize("value", [["high"], ["high", "low"], {"a": 1}, [None]])
+def test_effort_still_refuses_a_list_or_a_mapping(value: object) -> None:
+    # The shared reader joins a list, as the CLI's does (`[high]` is high); this surface
+    # reads the scalar YAML types only, as it did before the helpers moved.
+    with pytest.raises(cw.InvalidCandidateError, match="must be one of"):
+        sub._validate_effort(value, "frontmatter 'effort'")
+    assert cw.cli_effort(["high"]) == "high"
+
+
+# --- TASK-485: values the CLI's YAML 1.2 reads differently from PyYAML -----------------------
+
+
+@pytest.mark.parametrize("spelling", ["1e3", "1E3", "0o17", "+0o7", "1.5e3"])
+def test_a_model_that_yaml_1_2_reads_as_a_number_is_refused(spelling: str) -> None:
+    # Text to PyYAML, a number to the CLI's YAML 1.2. The 2.1.330 agent-file loader reads
+    # `model` only when it is text, so the subagent would run on the session model.
+    with pytest.raises(cw.InvalidCandidateError, match="'model' is a number"):
+        sub.validate_agent_content(_content(model=spelling))
+
+
+@pytest.mark.parametrize("spelling", ["'1e3'", '"0o17"', "!!str 1e3", "opus", "claude-x-1"])
+def test_a_model_that_is_text_to_both_yaml_versions_saves(spelling: str) -> None:
+    sub.validate_agent_content(_content(model=spelling))  # no raise
+
+
+def test_an_effort_that_yaml_1_2_cannot_hold_is_refused() -> None:
+    # `1e400` is Infinity to the CLI, which ignores the field; PyYAML reads text, "1".
+    with pytest.raises(cw.InvalidCandidateError, match="'effort' is a number"):
+        sub.validate_agent_content(_content(effort="1e400"))
+
+
+@pytest.mark.parametrize("spelling", ["1e3", "!!str 1e3", "'1e3'", "high", "0o17"])
+def test_an_effort_both_yaml_versions_read_saves(spelling: str) -> None:
+    sub.validate_agent_content(_content(effort=spelling))  # no raise
+
+
+def test_a_tab_inside_a_value_saves_and_reads_back(tmp_path: Path) -> None:
+    # YAML 1.2 reads the tab as part of the text; PyYAML's own loader refused the file.
+    content = (
+        "---\nname: my-agent\ndescription: runs\tthe checks\ntools: Read,\tBash\n"
+        "---\nYou are a helper.\n"
+    )
+    sub.write_project_agent(tmp_path, "my-agent", content, None)
+    doc = sub.read_project_agent(tmp_path, "my-agent")
+    assert doc["frontmatter"]["description"] == "runs\tthe checks"
+    assert (doc["content"], doc["frontmatter"]["tools"]) == (content, "Read,\tBash")
+
+
+def test_a_tab_header_with_a_secret_is_masked_line_by_line(tmp_path: Path) -> None:
+    # The in-place masker composes with plain SafeLoader, which cannot read the tab: the
+    # editor shows every header line masked, as it did before (never less masked).
+    text = (
+        "---\nname: my-agent\ndescription: a\tb\nmcpServers:\n"
+        "  - local:\n      command: npx\n      env:\n        TOKEN: qv-tab-env\n"
+        "---\nYou help.\n"
+    )
+    _place(tmp_path, "my-agent", text)
+    doc = sub.read_project_agent(tmp_path, "my-agent")
+    mask = cw.REDACTION_SENTINEL
+    assert doc["content"] == "---\n" + f"{mask}\n" * 7 + "---\nYou help.\n"
+    servers = doc["frontmatter"]["mcpServers"]
+    assert servers == [{"local": {"command": "npx", "env": {"TOKEN": mask}}}]
+    assert "qv-tab-env" not in json.dumps(doc)
+
+
+# --- TASK-486: inline mcpServers, zero-indented lists and message wording --------------------
+
+_ZERO_INDENT_LEGACY = (
+    "---\nname: my-agent\ndescription: d\n"
+    "mcpServers:\n"
+    "- github\n"
+    "- legacy:\n    transport: sse  # old spelling\n    url: https://e.com/sse\n"
+    "- both:\n    type: http\n    url: https://e.com/mcp\n    env:\n      TOKEN: x\n"
+    "model: opus\n"
+    "---\nYou are a helper.\n"
+)
+_ZERO_INDENT_CONVERTED = (
+    "---\nname: my-agent\ndescription: d\n"
+    "mcpServers:\n"
+    "- github\n"
+    "- legacy:\n    type: sse  # old spelling\n    url: https://e.com/sse\n"
+    "- both:\n    type: http\n    url: https://e.com/mcp\n"
+    "model: opus\n"
+    "---\nYou are a helper.\n"
+)
+
+
+def test_a_zero_indented_inline_list_converts_on_load(tmp_path: Path) -> None:
+    # YAML lets the list sit at the key's own indent; it converts like an indented one.
+    path = _place(tmp_path, "my-agent", _ZERO_INDENT_LEGACY)
+    doc = sub.read_project_agent(tmp_path, "my-agent")
+    assert doc["content"] == _ZERO_INDENT_CONVERTED
+    assert doc["converted"].startswith("Inline MCP server 'legacy': 'transport' is converted")
+    assert "Inline MCP server 'both': 'env' on a remote server is removed" in doc["converted"]
+    sub.write_project_agent(tmp_path, "my-agent", doc["content"], doc["hash"])
+    assert path.read_bytes() == _ZERO_INDENT_CONVERTED.encode("utf-8")
+
+
+def test_a_zero_indented_list_ends_at_the_next_top_level_key() -> None:
+    lines = _ZERO_INDENT_LEGACY.split("---\n")[1].splitlines(keepends=True)
+    start, end = sub._mcp_servers_block_bounds(lines)
+    assert (lines[start], lines[end]) == ("mcpServers:\n", "model: opus\n")
+
+
+@pytest.mark.parametrize(
+    ("definition", "detail"),
+    [
+        ({"command": "x", "timeout": 0}, "'timeout' must be a positive integer"),
+        ({"type": "http"}, "requires a non-empty string 'url'"),
+        ({"args": ["a"]}, "requires a non-empty string 'command'"),
+        ({"url": "https://e.com"}, "has a 'url' but no 'type'"),
+        ({"type": "http", "url": "u", "oauth": 5}, "'oauth' must be an object"),
+        ("not-an-object", "must be an object"),
+    ],
+)
+def test_an_inline_refusal_names_the_server_once(definition: object, detail: str) -> None:
+    with pytest.raises(cw.InvalidCandidateError) as exc:
+        sub.validate_frontmatter(_servers({"srv": definition}))
+    message = str(exc.value)
+    assert message.startswith(f"frontmatter 'mcpServers' inline server 'srv': {detail}")
+    assert message.count("'srv'") == 1
+
+
+@pytest.mark.parametrize(
+    "definition",
+    [
+        "{transport: sse, url: https://e.com}",
+        "{type: http, url: https://e.com, env: {A: b}}",
+    ],
+)
+def test_an_inline_refusal_gives_subagent_file_advice(tmp_path: Path, definition: str) -> None:
+    # The MCP tab says to reload the server; an inline server converts when the subagent
+    # FILE loads, so the advice names the file (the flow style here is not converted).
+    text = f"---\nname: my-agent\ndescription: d\nmcpServers:\n  - srv: {definition}\n---\nb\n"
+    with pytest.raises(cw.InvalidCandidateError) as exc:
+        sub.write_project_agent(tmp_path, "my-agent", text, None)
+    message = str(exc.value)
+    assert "when it opens the subagent file, so open the file again and save it" in message
+    assert "reload the server" not in message
+    assert message.count("'srv'") == 1
