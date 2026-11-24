@@ -2419,6 +2419,22 @@ next start.</p>
 <li><strong>A stopped user manager stops the scopes.</strong> Linger keeps the manager running
   after logout.</li>
 </ul>
+<p>To see task use, run <code>clauster doctor</code>. The <code>service tasks</code> check shows the
+current count, the limit, and how many process or thread starts the limit
+refused. The kernel keeps that count until the cgroup is recreated, usually at a
+reboot, so a warning can describe an old event. With <code>bridge_task_limit</code> set, the
+<code>bridge task limit</code> check also shows the refusals in <code>clauster_bridges.slice</code>.</p>
+<p>If a limit refuses starts shortly before a bridge exits, the crashed row and the
+crash notification say so. The text says "likely" because the timing does not
+prove the cause. If the scope of the bridge is already gone, the text says
+"possible", because the remaining count can come from another bridge. Clauster
+needs one live poll of the bridge first, so a bridge that dies right after it
+starts has no such reason. The reason is not kept across a Clauster restart.</p>
+<p>The slice count needs a kernel that adds a child scope's refusals to its parent.
+If the cgroup files have no <code>pids.events.local</code>, the kernel can leave the slice
+count at 0. Then doctor shows no slice refusals, and a crash whose scope is gone
+has no "possible" reason. The <code>service tasks</code> count and the "likely" reason do
+not depend on this.</p>
 <h2 id="backup-restore-and-corruption-recovery">Backup, restore, and corruption recovery<a class="headerlink" href="#backup-restore-and-corruption-recovery" title="Permanent link">&para;</a></h2>
 <h3 id="routine-backup">Routine backup<a class="headerlink" href="#routine-backup" title="Permanent link">&para;</a></h3>
 <p><code>clauster backup</code> tars the whole <code>state_dir</code> — the <code>clauster.db</code> persistence
