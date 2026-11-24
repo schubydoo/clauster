@@ -670,6 +670,40 @@ def is_killable_hosted(
     )
 
 
+def hosted_agent_gone(
+    pid: int, proc_start: str | float | None, *, start_ticks: int | None
+) -> bool:
+    """Whether there is positive evidence that the hosted agent at ``pid`` has ended.
+
+    The re-check of an orphan row (TASK-556) turns it into a lost row, which drops Kill
+    and lets Resume start a new agent without ending the old one. So "not provably live"
+    (:func:`is_killable_hosted` False) is not enough: an ``AccessDenied`` or a drifted
+    epoch reads the same, and a live agent would get a second one beside it. This is True
+    only when the process is gone, is a zombie, or the pid now holds a different process:
+    a different tick count (exact, drift-immune), or, where create-times do not drift
+    (macOS, Windows), a different create-time. Anything it cannot tell is False.
+    """
+    try:
+        proc = psutil.Process(pid)
+        if proc.status() == psutil.STATUS_ZOMBIE:
+            return True
+        created = proc.create_time()
+    except psutil.NoSuchProcess:
+        return True
+    # Total, like is_live_process: it runs on every dashboard poll, so a raise would fail
+    # /api/hosted. ValueError is a pid below 1; RuntimeError a procfs with no btime.
+    except (psutil.Error, ValueError, RuntimeError):
+        return False
+    if start_ticks is not None:
+        live_ticks = proc_start_ticks(pid)
+        if live_ticks is not None:
+            return live_ticks != start_ticks
+    expected = _expected_epoch(proc_start)
+    if expected is None or start_time_is_drift_prone():
+        return False
+    return abs(created - expected) > _EXACT_PROC_START_TOLERANCE
+
+
 def kill_if_match(
     pid: int, proc_start: str | float | None, *, start_ticks: int | None, boot_id: str | None
 ) -> bool:
@@ -1251,15 +1285,66 @@ def _bundle_library_path_var() -> str | None:
 
     macOS rewrites the bundled binaries' load paths instead, and Windows calls
     ``SetDllDirectoryW``, so neither touches an environment variable: an
-    ``LD_LIBRARY_PATH`` there is the user's own and must pass through. (Whether the
-    Windows DLL directory reaches a child is a separate, non-environment question this
-    module does not address.)
+    ``LD_LIBRARY_PATH`` there is the user's own and must pass through. The Windows DLL
+    directory does reach a child, but not through the environment: see
+    :func:`release_bundle_dll_directory`.
     """
     if sys.platform.startswith("aix"):
         return "LIBPATH"
     if sys.platform in ("darwin", "win32"):
         return None
     return "LD_LIBRARY_PATH"
+
+
+# The unpack dir, registered as this process's own DLL directory (TASK-505). Held so the
+# registration lives as long as the process; `close()` on it would remove the directory.
+_bundle_dll_directory: object | None = None
+
+
+def release_bundle_dll_directory() -> bool:
+    """Stop the standalone binary's children from searching its unpack dir for DLLs.
+
+    On Windows the one-file bootloader calls ``SetDllDirectoryW(<unpack dir>)`` in each
+    process of the bundle (``pyi_main.c`` in 6.22.3). Windows applies that directory to
+    every child the process starts, where it is searched before System32 (Microsoft's
+    ``SetDllDirectoryW`` remarks; the bootloader's own comment says the same). So a
+    spawned claude, node or git that finds a DLL in none of its own folders loads the
+    bundle's copy, and holds that file open (TASK-505).
+
+    This first registers the unpack dir with ``os.add_dll_directory``. That keeps it on
+    this process's own search path for extension modules and ``ctypes``, which load with
+    ``LOAD_LIBRARY_SEARCH_DEFAULT_DIRS``, and a child does not get it. Then it resets the
+    inherited directory with ``SetDllDirectoryW("")``. PyInstaller's recipe passes ``NULL``,
+    but ``NULL`` restores the default search order, which puts the current directory (a
+    child's project folder) back in; an empty string drops the unpack dir and keeps the
+    current directory out, as Microsoft's ``SetDllDirectoryW`` page says. Returns whether
+    it reset. Does nothing unless this
+    is the standalone binary on Windows. A failed reset is logged, not raised: the server
+    then runs as it did before.
+    """
+    global _bundle_dll_directory
+    meipass = getattr(sys, "_MEIPASS", None)
+    if sys.platform != "win32" or not deps.is_frozen() or not meipass:
+        return False
+    import ctypes
+
+    try:
+        _bundle_dll_directory = os.add_dll_directory(meipass)
+    except OSError as exc:
+        # Without the registration, a reset would drop the unpack dir from this process's
+        # own search too, so keep the inherited directory and run as before.
+        _log.warning("could not register %s for DLL loads; DLL directory kept (%s)", meipass, exc)
+        return False
+    # use_last_error: the reason is saved at the call, before other code can overwrite it.
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    if not kernel32.SetDllDirectoryW(""):
+        _log.warning(
+            "could not reset the DLL directory; children may search %s for DLLs (%s)",
+            meipass,
+            ctypes.WinError(ctypes.get_last_error()),
+        )
+        return False
+    return True
 
 
 def _drop_frozen_runtime(env: dict[str, str]) -> None:

@@ -191,6 +191,12 @@ def _assert_clean(dumps: list[dict], *, expect_ld: str | None, route: str) -> No
             problems.append("LD_LIBRARY_PATH_ORIG")
         if env.get("LD_LIBRARY_PATH") != expect_ld:
             problems.append(f"LD_LIBRARY_PATH={env.get('LD_LIBRARY_PATH')!r}")
+        # Windows passes the DLL directory outside the environment (TASK-505). The fake
+        # claude records it there, and it must not be the binary's unpack dir.
+        if os.name == "nt" and "dll_directory" not in dump:
+            problems.append("no DLL directory recorded")  # never pass on a missing field
+        elif dump.get("dll_directory"):
+            problems.append(f"DLL directory={dump['dll_directory']!r}")
         if problems:
             raise SystemExit(
                 f"{route}: `claude {' '.join(dump['argv'])}` inherited the binary's runtime "

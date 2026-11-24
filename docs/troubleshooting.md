@@ -792,7 +792,10 @@ directory under `state_dir` for the reason that the daemon gives.
 A card with the orange `orphan` badge instead means that the `claude` process
 still runs, but Clauster could not reattach it. Its text says
 `still running, but Clauster could not reattach it`. The cause can be a daemon
-restart, a dropped connection or a request that timed out.
+restart, a dropped connection or a request that timed out. While the dashboard
+is open, Clauster checks each orphan again on every refresh. If the `claude`
+process exits, the card loses the `orphan` badge and shows
+`the agent exited after Clauster could not reattach it; session lost`.
 
 If only the connection was lost, Clauster reattaches the session again over the
 next daemon connection. If the daemon still has the process, the card shows
@@ -831,10 +834,12 @@ offers **Kill**, the `claude` process may still run and wait on the prompt: kill
 it, then Resume the conversation. After a dropped connection, the next daemon
 connection reattaches the session and opens the prompt again. On an `Error`
 card whose agent may still run, or an `orphan` card, the text comes back after
-each restart until you Resume, Kill or Forget the card. The same text can show
-after a reconnect, with no restart. On a `Crashed` card with no `orphan` badge,
-or a card that reads `claustrum connection dropped and the daemon no longer has
-this session` with no `orphan` badge, the agent is gone, so the text shows once. See
+each restart until you Resume, Kill or Forget the card, or until the agent exits.
+The same text can show after a reconnect, with no restart. On a `Crashed` card
+with no `orphan` badge, or a card that reads `claustrum connection dropped and
+the daemon no longer has this session` with no `orphan` badge, the agent is gone,
+so the text shows once. An `orphan` card whose agent exits shows it once too,
+after `the agent exited after Clauster could not reattach it; session lost`. See
 [A Direct Session's view after a restart](concepts/how-it-works.md#a-direct-sessions-view-after-a-restart).
 
 ## Getting more detail

@@ -877,6 +877,18 @@ def test_recap_hook_subcommand_dispatches(monkeypatch):
     assert called["ran"] is True
 
 
+def test_main_releases_the_bundle_dll_directory_before_any_dispatch(monkeypatch):
+    # TASK-505: every form of the binary, the hidden ones too, resets the DLL directory its
+    # children would inherit, and does so before the subcommand runs.
+    order: list[str] = []
+    monkeypatch.setattr(
+        cli.procutil, "release_bundle_dll_directory", lambda: order.append("release")
+    )
+    monkeypatch.setattr("clauster.hooks.resume_recap.main", lambda: order.append("recap"))
+    assert cli.main(["__recap-hook__"]) == 0
+    assert order == ["release", "recap"]
+
+
 def test_recap_hook_subcommand_swallows_errors(monkeypatch):
     # A hook must never break the session it serves: an error in the recap still exits 0.
     def boom():

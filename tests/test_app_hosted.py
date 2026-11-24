@@ -24,7 +24,7 @@ from clauster import claude_cli
 from clauster.app import create_app
 from clauster.claustrum_client import ClaustrumClient, ClaustrumError
 from clauster.config import CEILING_GATED_MODES, PERMISSION_MODES, ClausterConfig, load_config
-from clauster.hosted import HostedAgentMayBeRunning, HostedSessionError
+from clauster.hosted import HostedAgentMayBeRunning, HostedManager, HostedSessionError
 from clauster.models import InstanceStatus, RemoteControlInstance
 
 _HID = "hid-1"
@@ -72,6 +72,7 @@ class _StubManager:
         # The `connect` each stop, kill_orphan and forget got (TASK-539).
         self.connects: list = []
         self.history_for = None
+        self.rechecks = 0  # recheck_orphans calls (TASK-556)
 
     def seed(self) -> RemoteControlInstance:
         inst = RemoteControlInstance(
@@ -118,6 +119,9 @@ class _StubManager:
 
     async def persist(self):
         pass
+
+    async def recheck_orphans(self):
+        self.rechecks += 1
 
     async def send(self, hosted_id: str, text: str) -> None:
         if self.send_error is not None:
@@ -393,6 +397,32 @@ def test_api_hosted_lists_sessions(write_config, projects_root):
     body = r.json()
     assert [h["claustrum_process_id"] for h in body] == [_HID]
     assert body[0]["channel"] == "hosted" and body[0]["project"] == "alpha"
+
+
+def test_api_hosted_rechecks_orphans_on_each_poll(write_config, projects_root, monkeypatch):
+    """TASK-556: the dashboard's poll is what turns an exited orphan into a lost row."""
+
+    async def _gone(instance):
+        return True
+
+    monkeypatch.setattr(HostedManager, "_agent_gone", staticmethod(_gone))
+    manager = HostedManager()
+    manager._instances[_HID] = RemoteControlInstance(
+        project="alpha",
+        label="hosted:alpha",
+        channel="hosted",
+        claustrum_process_id=_HID,
+        agent_pid=4242,
+        status=InstanceStatus.CRASHED,
+        is_orphan=True,
+        error_detail="still running, but Clauster could not reattach it — Kill to clean up",
+    )
+    app = _app(write_config, manager=manager)
+    with TestClient(app) as client:
+        (row,) = client.get("/api/hosted").json()
+    assert row["is_orphan"] is False
+    assert row["status"] == "crashed"
+    assert "still running" not in row["error_detail"]
 
 
 def test_api_hosted_empty_when_no_sessions(write_config, projects_root):

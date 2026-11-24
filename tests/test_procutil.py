@@ -710,6 +710,209 @@ def test_child_env_frozen_still_scrubs_secrets(monkeypatch):
     assert "CLAUSTER_AUTH_PASSWORD_HASH" not in env
 
 
+def test_hosted_agent_gone_on_a_real_process():
+    """TASK-556, on a real kernel: live and matching is not gone, exited is."""
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])  # noqa: S603
+    try:
+        epoch, ticks = procutil.proc_start_pair(proc.pid)
+        assert procutil.hosted_agent_gone(proc.pid, epoch, start_ticks=ticks) is False
+    finally:
+        proc.kill()
+        proc.wait(timeout=10)
+    assert procutil.hosted_agent_gone(proc.pid, epoch, start_ticks=ticks) is True
+
+
+class _GoneProc:
+    """A ``psutil.Process`` stand-in with a chosen status, create-time, or error."""
+
+    status_value = psutil.STATUS_SLEEPING
+    created = 1000.0
+    error: Exception | None = None
+
+    def __init__(self, pid):
+        if self.error is not None:
+            raise self.error
+
+    def status(self):
+        return self.status_value
+
+    def create_time(self):
+        return self.created
+
+
+def _gone_proc(monkeypatch, **attrs) -> None:
+    monkeypatch.setattr(procutil.psutil, "Process", type("P", (_GoneProc,), attrs))
+
+
+@pytest.mark.parametrize(
+    ("attrs", "gone"),
+    [
+        ({"error": psutil.NoSuchProcess(4242)}, True),
+        ({"status_value": psutil.STATUS_ZOMBIE}, True),
+        # Unknown is not gone: the change it gates drops Kill (TASK-526's second agent).
+        ({"error": psutil.AccessDenied(4242)}, False),
+        ({"error": ValueError("pid must be a positive integer")}, False),
+        ({"error": RuntimeError("couldn't find btime in /proc/stat")}, False),
+    ],
+)
+def test_hosted_agent_gone_reads_the_process_state(monkeypatch, attrs, gone):
+    _gone_proc(monkeypatch, **attrs)
+    assert procutil.hosted_agent_gone(4242, 1000.0, start_ticks=770579) is gone
+
+
+@pytest.mark.parametrize(("ticks_now", "gone"), [(770579, False), (770580, True), (None, False)])
+def test_hosted_agent_gone_trusts_exact_ticks_over_a_drifted_epoch(monkeypatch, ticks_now, gone):
+    # The epoch moved by 4 s (a clock correction): only the ticks can tell, and when they
+    # cannot be read on a drifting host the answer is "not provably gone".
+    _gone_proc(monkeypatch, created=1004.0)
+    monkeypatch.setattr(procutil, "proc_start_ticks", lambda pid: ticks_now)
+    monkeypatch.setattr(procutil, "start_time_is_drift_prone", lambda: True)
+    assert procutil.hosted_agent_gone(4242, 1000.0, start_ticks=770579) is gone
+
+
+@pytest.mark.parametrize(("created", "gone"), [(1000.01, False), (1004.0, True)])
+def test_hosted_agent_gone_compares_a_stable_create_time(monkeypatch, created, gone):
+    # macOS and Windows: no ticks, but the create-time does not drift, so it is conclusive.
+    _gone_proc(monkeypatch, created=created)
+    monkeypatch.setattr(procutil, "proc_start_ticks", lambda pid: None)
+    monkeypatch.setattr(procutil, "start_time_is_drift_prone", lambda: False)
+    assert procutil.hosted_agent_gone(4242, 1000.0, start_ticks=None) is gone
+    assert procutil.hosted_agent_gone(4242, None, start_ticks=None) is False  # nothing to compare
+
+
+class _FakeKernel32:
+    """Record the DLL-directory calls a Windows reset makes, in order."""
+
+    def __init__(self, calls: list, result: int = 1) -> None:
+        self.calls = calls
+        self.result = result
+
+    def SetDllDirectoryW(self, path):  # noqa: N802 - the Win32 name
+        self.calls.append(("SetDllDirectoryW", path))
+        return self.result
+
+
+def _as_frozen_windows(monkeypatch, *, result: int = 1) -> list:
+    """Act as the Windows one-file child; return the list the DLL calls land in."""
+    import ctypes
+
+    calls: list = []
+    _as_frozen(monkeypatch, platform="win32")
+    monkeypatch.setattr(sys, "_MEIPASS", _MEI, raising=False)
+    monkeypatch.setattr(procutil, "_bundle_dll_directory", None)
+    monkeypatch.setattr(
+        os,
+        "add_dll_directory",
+        lambda p: calls.append(("add_dll_directory", p)) or p,
+        raising=False,
+    )
+    kernel32 = _FakeKernel32(calls, result)
+
+    def _win_dll(name, *, use_last_error=False):
+        assert (name, use_last_error) == ("kernel32", True)  # the reason must be kept
+        return kernel32
+
+    monkeypatch.setattr(ctypes, "WinDLL", _win_dll, raising=False)
+    monkeypatch.setattr(ctypes, "get_last_error", lambda: 5, raising=False)
+    monkeypatch.setattr(ctypes, "WinError", lambda code: OSError(code, "denied"), raising=False)
+    return calls
+
+
+def test_release_bundle_dll_directory_keeps_it_here_and_resets_it_for_children(monkeypatch):
+    """TASK-505: register the unpack dir for this process FIRST, then reset the inherited one.
+
+    The other order leaves a window in which an import in this process finds no bundled DLL.
+    """
+    calls = _as_frozen_windows(monkeypatch)
+    assert procutil.release_bundle_dll_directory() is True
+    # An empty string, not NULL: NULL would put a child's current directory back in its
+    # DLL search order (review nit on PR 1954).
+    assert calls == [("add_dll_directory", _MEI), ("SetDllDirectoryW", "")]
+    assert procutil._bundle_dll_directory == _MEI  # held, so the registration stays
+
+
+def test_release_bundle_dll_directory_logs_a_failed_reset(monkeypatch, caplog):
+    _as_frozen_windows(monkeypatch, result=0)
+    with caplog.at_level("WARNING", logger="clauster.procutil"):
+        assert procutil.release_bundle_dll_directory() is False
+    assert "could not reset the DLL directory" in caplog.text and "denied" in caplog.text
+
+
+def test_release_bundle_dll_directory_keeps_the_directory_when_it_cannot_register(
+    monkeypatch, caplog
+):
+    # Review nit on PR 1954: a failed registration is logged, not raised, and the reset is
+    # skipped, since resetting without it would hide the unpack dir from this process too.
+    calls = _as_frozen_windows(monkeypatch)
+
+    def _refuse(path):
+        raise OSError(2, "not found", path)
+
+    monkeypatch.setattr(os, "add_dll_directory", _refuse, raising=False)
+    with caplog.at_level("WARNING", logger="clauster.procutil"):
+        assert procutil.release_bundle_dll_directory() is False
+    assert calls == []  # no SetDllDirectoryW call
+    assert "could not register" in caplog.text
+
+
+@pytest.mark.parametrize("platform", ["linux", "darwin"])
+def test_release_bundle_dll_directory_is_windows_only(monkeypatch, platform):
+    calls = _as_frozen_windows(monkeypatch)
+    monkeypatch.setattr(procutil.sys, "platform", platform)
+    assert procutil.release_bundle_dll_directory() is False
+    assert calls == []
+
+
+def test_release_bundle_dll_directory_skips_a_source_install(monkeypatch):
+    calls = _as_frozen_windows(monkeypatch)
+    _as_source(monkeypatch)
+    assert procutil.release_bundle_dll_directory() is False
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.delattr(sys, "_MEIPASS")  # frozen but no unpack dir: nothing to release
+    assert procutil.release_bundle_dll_directory() is False
+    assert calls == []
+
+
+# Run in a fresh interpreter, so the test process keeps its own DLL directory. It stands in
+# for the one-file child: it sets the DLL directory the way the bootloader does, starts a
+# child, resets through the real function, and starts a second child. Each child prints
+# the DLL directory it got. A source interpreter cannot prove what the BUILT binary does
+# (the build-binaries smoke checks that); this proves the Windows half on a real kernel.
+_DLL_DIR_PARENT = r"""
+import ctypes, subprocess, sys, tempfile
+from clauster import procutil
+
+child = [
+    getattr(sys, "_base_executable", sys.executable),
+    "-c",
+    "import ctypes; b = ctypes.create_unicode_buffer(32768); "
+    "ctypes.windll.kernel32.GetDllDirectoryW(len(b), b); print(repr(b.value))",
+]
+mei = tempfile.mkdtemp(prefix="_MEI")
+sys.frozen, sys._MEIPASS = True, mei
+assert ctypes.windll.kernel32.SetDllDirectoryW(mei)
+print(repr(mei))
+print(subprocess.run(child, capture_output=True, text=True, check=True).stdout.strip())
+assert procutil.release_bundle_dll_directory()
+print(subprocess.run(child, capture_output=True, text=True, check=True).stdout.strip())
+"""
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="SetDllDirectoryW is a Win32 API")
+def test_windows_child_inherits_the_dll_directory_until_it_is_released():
+    result = subprocess.run(
+        [sys.executable, "-c", _DLL_DIR_PARENT],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr  # keep the parent's traceback on CI
+    mei, before, after = (line.strip() for line in result.stdout.split("\n")[:3])
+    assert before == mei  # the control: without the reset a child searches the unpack dir
+    assert after == repr("")
+
+
 def test_keeper_launch_env_is_child_env_on_a_source_install(monkeypatch):
     _as_source(monkeypatch)
     monkeypatch.setenv("LD_LIBRARY_PATH", "/user/lib")

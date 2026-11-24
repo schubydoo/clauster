@@ -40,7 +40,7 @@ import logging
 import uuid
 from collections import deque
 from collections.abc import Awaitable, Callable, Collection, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
@@ -120,6 +120,8 @@ _REATTACH_FAILED_PREFIX = "claustrum connection lost; reattach failed"
 # dropped connection and a timeout all leave an agent that Clauster cannot reattach
 # (TASK-526). The dashboard's orphan tooltip uses the same words.
 _ORPHAN_DETAIL = "still running, but Clauster could not reattach it"
+# The detail of an orphan row whose agent exited after it was classified (TASK-556).
+_ORPHAN_EXITED_DETAIL = "the agent exited after Clauster could not reattach it; session lost"
 
 
 class HostedSessionError(ClaustrumError):
@@ -2500,6 +2502,73 @@ class HostedManager:
             instance.is_orphan = False
             instance.status = lost_status
             instance.error_detail = lost_detail
+
+    async def recheck_orphans(self) -> None:
+        """Re-classify each orphan row whose agent exited since it was judged (TASK-556).
+
+        An orphan row (CL-8) says its agent still runs, but nothing judged it again. An
+        agent that exits on its closed pipes seconds after a reconnect left the row
+        saying "still running" until the operator acted. The dashboard's hosted poll
+        calls this, so each orphan's agent is probed again. Only positive evidence that
+        it ended counts (:func:`procutil.hosted_agent_gone`): the change drops Kill, so
+        a probe that merely cannot read the process must not make it. A row whose agent
+        is gone becomes a lost row: it stays CRASHED, Kill gives way to Forget, and
+        Resume stays offered where the row can be resumed.
+
+        No lock is taken, so the poll never waits behind a Resume, Kill or reattach.
+        The probe runs first. Then, with no await before the change, the row is checked
+        again: still the same orphan, not in ``_sessions``, and its per-id lock not
+        held. A held lock means a lifecycle op owns the row, and the next poll judges
+        it again. An op still queued for the lock runs after the change and finds a
+        lost row, which it handles as one.
+
+        The prompts stored for the agent are named on the row and dropped, as a
+        reattach does for an agent that is gone (TASK-537), also from a retry entry.
+        The entry itself is kept, so a later connection still reattaches the row if
+        the daemon has it. Persists on a change.
+        """
+        changed = False
+        for key in [k for k, i in self._instances.items() if i.is_orphan]:
+            instance = self._instances.get(key)
+            if self._closing or instance is None or instance.agent_pid is None:
+                continue
+            if not await self._agent_gone(instance):
+                continue
+            lock = self._id_locks.get(key)
+            if (
+                self._closing
+                or (lock is not None and lock.locked())
+                or self._instances.get(key) is not instance
+                or not instance.is_orphan
+                or key in self._sessions
+            ):
+                continue
+            logger.info("hosted: orphan %s exited; marking it lost", key)
+            lost = self._reattach_retry.get(key)
+            requests = _merged_requests(
+                lost.requests if lost else (), self._unrestored.pop(key, ())
+            )
+            if lost is not None and lost.requests:
+                self._reattach_retry[key] = replace(lost, requests=())
+            instance.is_orphan = False
+            instance.status = InstanceStatus.CRASHED
+            instance.error_detail = _ORPHAN_EXITED_DETAIL
+            self._name_unrestored(instance, requests)
+            changed = True
+        if changed:
+            await self._persist()
+
+    @staticmethod
+    async def _agent_gone(instance: RemoteControlInstance) -> bool:
+        """Whether an orphan row's agent has provably ended (TASK-556), off the loop."""
+        if instance.agent_pid is None:
+            return False
+        return await asyncio.to_thread(
+            procutil.hosted_agent_gone,
+            instance.agent_pid,
+            instance.agent_proc_start,
+            start_ticks=instance.agent_start_ticks,
+        )
 
     async def rebind_all(self, client: ClaustrumClient) -> None:
         """Reattach every running session over a new daemon connection (TASK-518).

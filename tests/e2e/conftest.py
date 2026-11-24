@@ -22,9 +22,12 @@ import http.client
 import json
 import os
 import re
+import shutil
+import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
 from collections.abc import Iterator
@@ -275,6 +278,70 @@ def hosted_server(tmp_path_factory: pytest.TempPathFactory, projects_tree: Path)
     extra = f"claustrum:\n  enabled: true\n  binary: {missing}\n"
     for server in _start_server(tmp, projects_tree, extra=extra):
         yield server.url
+
+
+class OrphanHosted(NamedTuple):
+    """A clauster whose one restored hosted row is an orphan, and that row's live agent."""
+
+    url: str
+    agent: subprocess.Popen
+
+
+@pytest.fixture
+def orphan_hosted_server(
+    tmp_path_factory: pytest.TempPathFactory, projects_tree: Path
+) -> Iterator[OrphanHosted]:
+    """A loopback clauster that restores one hosted row as an orphan (TASK-556).
+
+    The stored row names a live stand-in agent: a sleeping process whose argv carries
+    the ``claude`` and ``stream-json`` tokens the hosted cmdline gate reads, and whose
+    start identity is recorded exactly. The fake claustrum daemon answers
+    ``found: false`` for every reattach, so startup classifies the row as an orphan.
+    The test then ends the agent and watches the row change. POSIX only: the fake
+    daemon is the extensionless script, and the start ticks are read from ``/proc``.
+    """
+    from clauster import procutil
+    from clauster.hosted_state import HostedStateStore
+
+    tmp = tmp_path_factory.mktemp("e2e-orphan")
+    agent = subprocess.Popen(  # noqa: S603 - fixed argv, this interpreter
+        [sys.executable, "-c", "import time; time.sleep(600)", "claude", "stream-json"]
+    )
+    # A short socket dir: the AF_UNIX path limit is about 108 characters.
+    sock_dir = Path(tempfile.mkdtemp(prefix="cle-"))
+    try:
+        epoch, ticks = procutil.proc_start_pair(agent.pid)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+        # The legacy JSON store: the first start imports it into the database.
+        HostedStateStore(state_dir).save(
+            {
+                "01JE2EORPHAN0000000000000": {
+                    "project": "alpha",
+                    "label": "hosted:alpha",
+                    "agent_pid": agent.pid,
+                    "agent_proc_start": epoch,
+                    "agent_start_ticks": ticks,
+                    "agent_boot_id": procutil.proc_boot_id(),
+                    "claude_session_uuid": "55600000-0000-4000-8000-000000000556",
+                }
+            }
+        )
+        fake = FIXTURES / "fake_claustrum_bin.py"
+        extra = (
+            f"claustrum:\n  enabled: true\n  binary: {fake.as_posix()}\n"
+            f"  socket_path: {(sock_dir / 'd.sock').as_posix()}\n"
+        )
+        for server in _start_server(tmp, projects_tree, extra=extra):
+            yield OrphanHosted(server.url, agent)
+    finally:
+        agent.kill()
+        agent.wait(timeout=5)
+        # The fake daemon detaches and outlives the server: end it by the pid it recorded.
+        for pid_file in sock_dir.glob("*.pid"):
+            with contextlib.suppress(ValueError, OSError):
+                os.kill(int(pid_file.read_text(encoding="utf-8")), signal.SIGTERM)
+        shutil.rmtree(sock_dir, ignore_errors=True)
 
 
 @pytest.fixture

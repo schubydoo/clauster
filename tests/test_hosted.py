@@ -3886,6 +3886,179 @@ async def test_manager_kill_orphan_without_pid_skips_kill(monkeypatch):
     assert result.is_orphan is False
 
 
+async def test_recheck_marks_an_orphan_lost_once_its_agent_exits(
+    fake_claustrum, tmp_path, monkeypatch
+):
+    """TASK-556: the agent exits after a reattach judged the row an orphan.
+
+    The row said "still running" for as long as nothing acted on it. The recheck probes the
+    agent again, so the row turns into a lost row: no orphan badge, no "still running"
+    text, and Resume still on offer (the row keeps its project and uuid).
+    """
+    monkeypatch.setattr("clauster.procutil.is_live_process", lambda *a, **k: True)
+    gone = False
+    probes: list[tuple] = []
+
+    def _gone(pid, proc_start, *, start_ticks):
+        probes.append((pid, proc_start, start_ticks))
+        return gone
+
+    monkeypatch.setattr("clauster.procutil.hosted_agent_gone", _gone)
+    mgr, inst = await _reattach_row(fake_claustrum, tmp_path, {"agent_start_ticks": 770579})
+    assert inst.is_orphan is True
+    await mgr.recheck_orphans()  # still alive: nothing changes
+    assert inst.is_orphan is True and "still running" in (inst.error_detail or "")
+    assert probes == [(4242, 1000.0, 770579)]  # both halves of the identity reach the probe
+    gone = True
+    await mgr.recheck_orphans()
+    assert inst.is_orphan is False
+    assert inst.status is InstanceStatus.CRASHED
+    assert inst.error_detail == hosted._ORPHAN_EXITED_DETAIL
+    assert inst.project and inst.claude_session_uuid  # what the Resume gate reads
+
+
+async def test_recheck_names_and_drops_the_prompts_stored_for_an_exited_orphan(
+    tmp_path, monkeypatch
+):
+    """An exited agent waits on nothing, so its stored prompts go, named once (TASK-537)."""
+    monkeypatch.setattr(HostedManager, "_agent_gone", staticmethod(_always_gone))
+    store = HostedStateStore(tmp_path)
+    mgr = HostedManager(store)
+    mgr._restored = True
+    inst = _orphan_instance()
+    key = inst.claustrum_process_id
+    mgr._instances[key] = inst
+    request = hosted._ControlRequest("perm-1", "can_use_tool", {"tool_name": "Bash"})
+    mgr._unrestored[key] = (request,)
+    await mgr.persist()
+    assert store.load()[key]["parked_requests"]  # kept while the agent may wait on it
+    await mgr.recheck_orphans()
+    assert key not in mgr._unrestored
+    assert inst.error_detail.startswith(hosted._ORPHAN_EXITED_DETAIL)
+    assert "Bash (request perm-1)" in inst.error_detail
+    assert store.load()[key]["parked_requests"] is None  # and the recheck persisted the drop
+
+
+async def test_recheck_keeps_the_retry_entry_but_drops_its_prompts(tmp_path, monkeypatch):
+    """A later connection may still reattach the row (TASK-526), but no prompt is kept.
+
+    The retry entry is what ``_parked_for`` persists for a row lost to the connection, so
+    keeping its prompts would write the tool input back to the store on every persist.
+    """
+    monkeypatch.setattr(HostedManager, "_agent_gone", staticmethod(_always_gone))
+    store = HostedStateStore(tmp_path)
+    mgr = HostedManager(store)
+    mgr._restored = True
+    inst = _orphan_instance()
+    key = inst.claustrum_process_id
+    mgr._instances[key] = inst
+    request = hosted._ControlRequest("perm-2", "can_use_tool", {"tool_name": "Edit"})
+    client = object()
+    mgr._reattach_retry[key] = hosted._LostRow(client, (request,), 7)
+    await mgr.persist()
+    assert store.load()[key]["parked_requests"]
+    await mgr.recheck_orphans()
+    entry = mgr._reattach_retry[key]
+    assert (entry.client, entry.requests, entry.event_seq) == (client, (), 7)
+    assert inst.is_orphan is False
+    assert "Edit (request perm-2)" in (inst.error_detail or "")
+    assert store.load()[key]["parked_requests"] is None
+
+
+async def test_recheck_keeps_an_orphan_without_proof_its_agent_ended(monkeypatch):
+    """An unreadable process is not a gone one: the row keeps Kill (TASK-526's hazard)."""
+    monkeypatch.setattr("clauster.procutil.hosted_agent_gone", lambda *a, **k: False)
+    mgr = HostedManager()
+    inst = _orphan_instance()
+    mgr._instances[inst.claustrum_process_id] = inst
+    await mgr.recheck_orphans()
+    assert inst.is_orphan is True
+
+
+@pytest.mark.parametrize("case", ["no-pid", "closing"])
+async def test_recheck_never_probes_a_row_with_no_pid_or_while_closing(monkeypatch, case):
+    """With no pid there is nothing to probe, and a closing manager changes no row."""
+    probed: list[object] = []
+
+    async def _probe(instance):
+        probed.append(instance)
+        return True
+
+    monkeypatch.setattr(HostedManager, "_agent_gone", staticmethod(_probe))
+    mgr = HostedManager()
+    inst = _orphan_instance(pid=None) if case == "no-pid" else _orphan_instance()
+    mgr._instances[inst.claustrum_process_id] = inst
+    mgr._closing = case == "closing"
+    await mgr.recheck_orphans()
+    assert probed == []
+    assert inst.is_orphan is True
+
+
+async def test_recheck_never_waits_for_a_row_a_lifecycle_op_owns(monkeypatch):
+    """The poll must not wait behind a Resume or Kill, held or queued for the lock."""
+    monkeypatch.setattr(HostedManager, "_agent_gone", staticmethod(_always_gone))
+    mgr = HostedManager()
+    inst = _orphan_instance()
+    key = inst.claustrum_process_id
+    mgr._instances[key] = inst
+    lock = mgr._lock_for(key)
+    async with lock:
+        # Bounded: a recheck that waited for the lock would hang the dashboard's poll.
+        await asyncio.wait_for(mgr.recheck_orphans(), timeout=5)
+        assert inst.is_orphan is True  # owned: judged on a later poll
+        waiter = asyncio.create_task(lock.acquire())
+        await asyncio.sleep(0)
+    # The lock is free but the queued waiter has not run yet: still no wait. A timeout
+    # scope, not wait_for: on Python 3.11 wait_for runs the call in a new task, so the
+    # queued waiter takes the lock first and the recheck rightly skips the owned row.
+    async with asyncio.timeout(5):
+        await mgr.recheck_orphans()
+    await waiter
+    lock.release()
+    assert inst.is_orphan is False
+    assert set(mgr._id_locks) == {key}  # no lock minted for the poll
+
+
+async def test_recheck_skips_rows_retired_or_reattached_during_the_probe(monkeypatch):
+    """A Resume, a reattach or a Kill that lands during the probe wins over it."""
+    mgr = HostedManager()
+    rows = [_orphan_instance() for _ in range(4)]
+    resumed, revived, killed, closed = rows
+    for n, inst in enumerate(rows):
+        inst.claustrum_process_id = f"01ORPHAN{n:016d}"
+        mgr._instances[inst.claustrum_process_id] = inst
+
+    async def _probe(instance):
+        if instance is resumed:
+            mgr._instances.pop(instance.claustrum_process_id)
+        elif instance is revived:
+            mgr._sessions[instance.claustrum_process_id] = object()
+        elif instance is killed:
+            # kill_orphan changes the same object in place, and its lock is free again.
+            instance.is_orphan = False
+            instance.status = InstanceStatus.STOPPED
+            instance.error_detail = None
+        else:
+            mgr._closing = True
+        return True
+
+    monkeypatch.setattr(HostedManager, "_agent_gone", staticmethod(_probe))
+    await mgr.recheck_orphans()
+    assert resumed.is_orphan and revived.is_orphan and closed.is_orphan
+    # A clean stop stays one: not rewritten as "the agent exited ... session lost".
+    assert (killed.status, killed.error_detail) == (InstanceStatus.STOPPED, None)
+    assert mgr._id_locks == {}
+
+
+async def test_agent_gone_needs_a_pid():
+    inst = _orphan_instance(pid=None)
+    assert await HostedManager._agent_gone(inst) is False
+
+
+async def _always_gone(instance):
+    return True
+
+
 async def test_manager_kill_orphan_unknown_raises():
     mgr = HostedManager()
     with pytest.raises(HostedSessionError):

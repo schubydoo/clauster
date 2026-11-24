@@ -108,6 +108,14 @@ def _make_handler(token: str, version: str):
                     "id": rid,
                     "result": {"version": version, "platform": sys.platform, "arch": "amd64"},
                 }
+            elif method == "process.reattach":
+                # This daemon runs no processes, so it never knows the one asked for: a
+                # restored hosted row is classified as lost or orphaned (TASK-556 E2E).
+                resp = {
+                    "jsonrpc": "2.0",
+                    "id": rid,
+                    "result": {"found": False, "running": False, "firstSeq": 0, "lastSeq": 0},
+                }
             elif method == "server.shutdown":
                 os._exit(0)
             else:
@@ -212,6 +220,11 @@ def main() -> None:
     """Read the token, self-daemonize, and serve (honoring the env knobs)."""
     socket_path = _arg_value("-socket") or ""
     version = os.environ.get("FAKE_CLAUSTRUM_VERSION", "fake-claustrum-bin-0")
+    if "--version" in sys.argv:
+        # The doctor probe, in the real daemon's shape. Without it the fake would start a
+        # daemon with no socket and leave ``.pid`` in the caller's directory.
+        print(f"claustrum {version} (built unknown)")
+        return
 
     # Second entry point: we are the re-exec'd Windows child; the token is in the env.
     if os.environ.get(_WIN_CHILD_ENV) == "1":
