@@ -3667,6 +3667,8 @@ async def test_watch_reconciles_an_expected_startup_exit_without_a_crash(
     events = _lifecycle_events(runner, monkeypatch)
     inst = await runner.spawn("alpha", spawn_mode="session")
     assert inst.status is InstanceStatus.STARTING
+    await runner.poll_once()  # this runner is the one that announces crashes
+    assert runner._poll_loop.reports_crashes
     runner._procs[inst.instance_id].kill()
     await runner._startup_watches[inst.instance_id]
     assert inst.status is InstanceStatus.STOPPED
