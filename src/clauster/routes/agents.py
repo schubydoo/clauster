@@ -271,7 +271,7 @@ async def _resume_within_limit(
     loop = asyncio.get_running_loop()
     outcome: asyncio.Future[str] = loop.create_future()
 
-    def _settle(result: str, error: BaseException | None) -> None:
+    def _settle(result: str, error: Exception | None) -> None:
         """Hand the thread's result or error to the waiting request, once."""
         if outcome.done():
             return
@@ -283,12 +283,18 @@ async def _resume_within_limit(
     def _run() -> None:
         """Run ``work`` and pass its outcome back to the event loop."""
         result = ""
-        error: BaseException | None = None
+        error: Exception | None = None
         try:
             result = work(gate)
         # Any exception, so that a request waiting on a dispatch that started never hangs.
         except BaseException as exc:  # raised again in the request by ``await outcome``
-            error = exc
+            # SystemExit, KeyboardInterrupt and CancelledError would stop the event loop or
+            # read as a cancel of the request there, so they go back as a RuntimeError.
+            if isinstance(exc, Exception):
+                error = exc
+            else:
+                error = RuntimeError(f"background resume thread raised {type(exc).__name__}")
+                error.__cause__ = exc
         try:
             loop.call_soon_threadsafe(_settle, result, error)
         except RuntimeError:
@@ -313,9 +319,13 @@ async def _resume_within_limit(
         if not limit.expired():
             raise  # a TimeoutError from the work itself, not the limit
         if not gate.abandon():
-            # The dispatch started first: wait for it. A cancel during this unshielded wait
-            # cancels ``outcome`` itself, so ``_settle`` drops the late hand-back.
-            return await outcome
+            # The dispatch started first: wait for it. A cancel during this wait leaves the
+            # dispatch running; its failure is then logged, as in the branch above.
+            try:
+                return await asyncio.shield(outcome)
+            except asyncio.CancelledError:
+                outcome.add_done_callback(_log_unreported_failure(job_id))
+                raise
         outcome.cancel()  # nothing waits for the thread now: drop what it hands back
         raise HTTPException(
             status_code=504,

@@ -2344,13 +2344,67 @@ class _Abort(BaseException):
     """A BaseException that is not SystemExit or KeyboardInterrupt."""
 
 
-async def test_resume_within_limit_hands_back_a_base_exception():
+@pytest.mark.parametrize(
+    "raised", [_Abort("stop"), SystemExit(3), KeyboardInterrupt(), asyncio.CancelledError()]
+)
+async def test_resume_within_limit_hands_back_a_base_exception_as_an_error(raised):
     # The request waits for a dispatch that claimed the gate with no limit of its own, so the
-    # thread must hand back any exception, or the request would wait forever.
+    # thread must hand back any exception, or the request would wait forever. One that is
+    # not an Exception goes back as a RuntimeError: SystemExit or KeyboardInterrupt would
+    # stop the event loop, and a CancelledError would read as a cancel of the request.
     def _work(gate):
         gate.commit()
-        raise _Abort("stop")
+        raise raised
 
     async with asyncio.timeout(30):  # only reached when the hand-back is missing
-        with pytest.raises(_Abort, match="stop"):
+        with pytest.raises(RuntimeError) as info:
             await agents._resume_within_limit(_work, job_id="0000d012")
+    assert str(info.value) == f"background resume thread raised {type(raised).__name__}"
+    assert info.value.__cause__ is raised
+
+
+async def test_resume_within_limit_cancel_while_waiting_for_a_claimed_dispatch_logs_it(
+    caplog, monkeypatch
+):
+    # The limit passed after the dispatch claimed the gate, so the request waits for it. A
+    # cancel then (a shutdown, say) leaves the dispatch running, and its failure is logged.
+    monkeypatch.setattr(agents, "_RESUME_TIME_LIMIT", 0.05)
+    loop_errors: list[dict] = []
+    asyncio.get_running_loop().set_exception_handler(lambda loop, ctx: loop_errors.append(ctx))
+    committed = threading.Event()
+    waiting = threading.Event()
+    release = threading.Event()
+    real_abandon = supervisor.ResumeGate.abandon
+
+    def _abandon(self):
+        assert committed.wait(30)
+        try:
+            return real_abandon(self)  # False: the dispatch claimed the gate first
+        finally:
+            waiting.set()  # the request now goes straight on to wait for the dispatch
+
+    monkeypatch.setattr(supervisor.ResumeGate, "abandon", _abandon)
+
+    def _work(gate):
+        gate.commit()
+        committed.set()
+        release.wait(30)
+        raise supervisor.DispatchError("`claude --bg` failed (exit 1): /secret/path")
+
+    task = asyncio.create_task(agents._resume_within_limit(_work, job_id="0000d013"))
+    with caplog.at_level(logging.WARNING, logger="clauster.routes.agents"):
+        try:
+            assert await asyncio.to_thread(waiting.wait, 30)
+            worker = _worker("0000d013")  # found while it is surely still blocked
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        finally:
+            release.set()
+        await asyncio.to_thread(worker.join, 30)
+        for _ in range(3):
+            await asyncio.sleep(0)  # run the hand-back the thread scheduled
+    gc.collect()
+    assert loop_errors == []
+    assert "0000d013 failed after its request ended: DispatchError" in caplog.text
+    assert "/secret/path" not in caplog.text
