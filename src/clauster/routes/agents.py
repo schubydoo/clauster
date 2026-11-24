@@ -15,8 +15,11 @@ before it leaves the process on the ``bg-settled`` event (invariant 4).
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import stat
+import threading
+from collections.abc import Callable
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
@@ -29,7 +32,17 @@ from ..models import BackgroundJob
 from ..redact import redact_for_disk
 from ._common import enforce_bypass_ceiling
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter()
+
+# The time limit for the folder checks of a background resume (TASK-487): reading the job,
+# resolving its directory, the ceiling check, the trust write. On a healthy disk they take
+# milliseconds, so 20 s means a folder that hangs, for example on a network mount that went
+# away. It is shorter than the 30 to 60 s that a reverse proxy usually waits, so the caller
+# gets this error and not the proxy's. The dispatch process itself, once it started, keeps
+# its own limit (``supervisor._DISPATCH_TIMEOUT``).
+_RESUME_TIME_LIMIT = 20.0
 
 
 @router.get("/api/agents")
@@ -134,6 +147,7 @@ async def api_dispatch_agent(body: dict, config: ConfigDep, runner: RunnerDep) -
             permission_mode=pm,
             binary=config.claude.binary,
             claude_json=runner.claude_json,
+            before_spawn=None,
         )
     except claude_cli.ClaudeNotFound as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -204,18 +218,25 @@ async def api_resume_agent(job_id: str, config: ConfigDep, runner: RunnerDep) ->
     The resume runs in the configured default permission mode, like a dispatch that
     names none, and that mode faces the ceiling of the project holding the job's
     directory (403 when refused, TASK-335).
+
+    The folder checks run under one time limit (:data:`_RESUME_TIME_LIMIT`, TASK-487).
+    Past it the request gets a 504 and the job is not resumed, also when the blocked
+    check finishes later (:func:`_resume_within_limit`).
     """
     if not supervisor.valid_job_id(job_id):
         raise HTTPException(status_code=422, detail="invalid job id")
     pm = config.instance_defaults.permission_mode
     try:
-        new_id = await asyncio.to_thread(
-            supervisor.resume_background_job,
-            job_id,
-            permission_mode=pm,
-            refuse_cwd=lambda cwd: _resume_ceiling_refusal(config, cwd, pm),
-            binary=config.claude.binary,
-            claude_json=runner.claude_json,
+        new_id = await _resume_within_limit(
+            lambda gate: supervisor.resume_background_job(
+                job_id,
+                permission_mode=pm,
+                refuse_cwd=lambda cwd: _resume_ceiling_refusal(config, cwd, pm),
+                gate=gate,
+                binary=config.claude.binary,
+                claude_json=runner.claude_json,
+            ),
+            job_id=job_id,
         )
     except claude_cli.ClaudeNotFound as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -226,6 +247,67 @@ async def api_resume_agent(job_id: str, config: ConfigDep, runner: RunnerDep) ->
     except supervisor.DispatchError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return {"id": new_id}
+
+
+async def _resume_within_limit(
+    work: Callable[[supervisor.ResumeGate], str], *, job_id: str
+) -> str:
+    """Run ``work`` on its own thread and give it :data:`_RESUME_TIME_LIMIT` to dispatch.
+
+    A thread blocked on a hung mount cannot be stopped, so past the limit the request
+    abandons the :class:`~clauster.supervisor.ResumeGate` and returns a 504. The thread can
+    stay blocked, but when it wakes up its claim on the gate fails and it dispatches
+    nothing. When the thread claimed the gate first, the dispatch process already started:
+    the request then waits for it, under the dispatch's own time limit.
+
+    The thread is a daemon thread of its own, not one from the shared ``to_thread`` pool,
+    so a hung resume cannot take a pool worker from the other routes for good.
+    """
+    gate = supervisor.ResumeGate()
+    loop = asyncio.get_running_loop()
+    outcome: asyncio.Future[str] = loop.create_future()
+
+    def _settle(result: str, error: Exception | None) -> None:
+        """Hand the thread's result or error to the waiting request, once."""
+        if outcome.done():
+            return
+        if error is not None:
+            outcome.set_exception(error)
+        else:
+            outcome.set_result(result)
+
+    def _run() -> None:
+        """Run ``work`` and pass its outcome back to the event loop."""
+        result = ""
+        error: Exception | None = None
+        try:
+            result = work(gate)
+        except Exception as exc:  # raised again in the request by ``await outcome``
+            error = exc
+        try:
+            loop.call_soon_threadsafe(_settle, result, error)
+        except RuntimeError:
+            # The event loop closed while this thread was blocked: no request waits.
+            logger.debug("background resume of %s finished after its event loop closed", job_id)
+
+    threading.Thread(target=_run, name=f"clauster-resume-{job_id}", daemon=True).start()
+    limit = asyncio.timeout(_RESUME_TIME_LIMIT)
+    try:
+        async with limit:
+            return await asyncio.shield(outcome)
+    except TimeoutError:
+        if not limit.expired():
+            raise  # a TimeoutError from the work itself, not the limit
+        if not gate.abandon():
+            return await outcome  # the dispatch started first: wait for its own limit
+        outcome.cancel()  # nothing waits for the thread now: drop what it hands back
+        raise HTTPException(
+            status_code=504,
+            detail=(
+                f"job {job_id!r} was not resumed: checking its working directory took longer "
+                f"than {_RESUME_TIME_LIMIT:g} s. A network mount may be hung; try again later."
+            ),
+        ) from None
 
 
 def _resume_ceiling_refusal(config: ClausterConfig, cwd: Path, permission_mode: str) -> str | None:
@@ -297,7 +379,8 @@ def _projects_holding(config: ClausterConfig, cwd: Path) -> list[str]:
     covers, and resolving it would touch it: a hung network mount there would block the
     check. This bounds only the unconfigured plain-directory entries: ``projects_root``,
     ``cwd``, every symlink entry and every configured key are still resolved, so a hung
-    mount there can still block. A listing failure raises
+    mount there can still block this thread. The resume route bounds the request with
+    :data:`_RESUME_TIME_LIMIT` instead (TASK-487). A listing failure raises
     :class:`_ProjectsRootUnlistable` so the refusal can name it.
     """
     found: set[str] = set()

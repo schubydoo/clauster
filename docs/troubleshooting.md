@@ -427,6 +427,32 @@ file stays byte-identical.
 3. Run the command from step 1 again. No output means that Clauster can read the file.
 4. Do the action again.
 
+### A background agent's Resume fails with "checking its working directory took longer than 20 s"
+
+**What you see:** you click **Resume** on an ended background agent, or send
+`POST /api/agents/<id>/resume`, and the request fails with a `504`:
+
+```text
+job '<id>' was not resumed: checking its working directory took longer than 20 s.
+A network mount may be hung; try again later.
+```
+
+**Cause:** before it resumes a job, Clauster reads the job's record, resolves its
+working directory, lists `projects_root` for the permission check and trusts the
+directory. On a healthy disk these steps take milliseconds. They took more than 20
+seconds, so a folder on the way did not answer. This is usually a network mount
+(NFS, SMB, sshfs) that hangs. Clauster did not resume the job, and it does not resume
+it later when the folder answers again. The blocked check can stay in the background
+until the mount answers.
+
+**Fix:**
+
+1. On the Clauster host, run `ls` on the job's directory and on `projects_root` as
+   the user that runs Clauster. A command that does not return names the folder
+   that hangs.
+2. Repair or remount that folder.
+3. Click **Resume** again.
+
 ## Claude itself is the problem
 
 ### "not logged in" / "access token has expired; re-authenticate with `claude`"

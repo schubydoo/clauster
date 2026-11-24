@@ -37,7 +37,7 @@ changed.
 | GET | `/agents` | List `claude --bg` background sessions |
 | POST | `/agents` | Dispatch a background session |
 | DELETE | `/agents/{job_id}` | Stop a background session |
-| POST | `/agents/{job_id}/resume` | Resume an ended background session, in `instance_defaults.permission_mode` (`403` when the [bypass ceiling](security.md#bypasspermissions-footgun-gate) refuses that mode; `409` when the job does not exist, the session is still live, has no resumable session id, has no valid recorded directory that can be resolved, or its directory no longer exists as a folder or cannot be checked) |
+| POST | `/agents/{job_id}/resume` | Resume an ended background session, in `instance_defaults.permission_mode` (`403` when the [bypass ceiling](security.md#bypasspermissions-footgun-gate) refuses that mode; `409` when the job does not exist, the session is still live, has no resumable session id, has no valid recorded directory that can be resolved, or its directory no longer exists as a folder or cannot be checked; `504` when the directory checks take longer than 20 seconds, for example on a hung network mount, and the job is not resumed) |
 
 A request to a route not on this list (e.g. `GET /api/v1/widget`) 404s — the
 internal surface was never aliased, by design.
