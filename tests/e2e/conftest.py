@@ -504,6 +504,19 @@ def config_mgmt_plugins_server(
 
 
 @pytest.fixture
+def config_mgmt_hostile_marketplace_server(
+    tmp_path_factory: pytest.TempPathFactory, mutable_projects_tree: Path
+) -> Iterator[Server]:
+    """The plugins server, plus listed marketplace names that hold shell syntax (TASK-514)."""
+    tmp = tmp_path_factory.mktemp("e2e-configmgmt-plugins-hostile")
+    hostile = [
+        {"name": "x; touch /tmp/p", "source": "directory", "path": "/srv/a"},
+        {"name": "y`id`$(id)", "source": "directory", "path": "/srv/b"},
+    ]
+    yield from _start_plugins_server(tmp, mutable_projects_tree, extra_marketplaces=hostile)
+
+
+@pytest.fixture
 def config_mgmt_plugins_alias_server(
     tmp_path_factory: pytest.TempPathFactory, mutable_projects_tree: Path
 ) -> Iterator[Server]:
@@ -529,8 +542,10 @@ def _write_declared(settings: Path, marketplaces: dict) -> None:
     settings.write_bytes((json.dumps(doc, indent=2) + "\n").encode())
 
 
-def _start_plugins_server(tmp: Path, mutable_projects_tree: Path) -> Iterator[Server]:
-    """Start the server both plugins fixtures share (see :func:`config_mgmt_plugins_server`)."""
+def _start_plugins_server(
+    tmp: Path, mutable_projects_tree: Path, *, extra_marketplaces: list[dict] | None = None
+) -> Iterator[Server]:
+    """Start the server the plugins fixtures share (see :func:`config_mgmt_plugins_server`)."""
     alpha = (mutable_projects_tree / "alpha").resolve()  # the CLI records the real path
     plugin_list = [
         {
@@ -576,6 +591,7 @@ def _start_plugins_server(tmp: Path, mutable_projects_tree: Path) -> Iterator[Se
         {"name": "market", "source": "github", "repo": "owner/repo"},
         {"name": "empty", "source": "directory", "path": "/srv/empty"},
         {"name": "loose", "source": "github", "repo": "owner/loose"},
+        *(extra_marketplaces or []),
     ]
     # TASK-527: `market` is declared in alpha's Project settings and `empty` in the User
     # settings, so each scope can remove only its own. No settings file declares `loose`.

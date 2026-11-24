@@ -3171,7 +3171,14 @@
       _configMgmtRevealResult(origin) {
         const c = this.configMgmt;
         if (!(c.error || c.saved) || !this._focusIsFree(origin)) return;
-        this.revealFeedback(c.error ? '[data-test="cm-error"]' : '[data-test="cm-saved"]');
+        this.revealFeedback(this._configMgmtResultSelector());
+      },
+      // A warning sits under the banner and can hold the next step (TASK-514): show it.
+      _configMgmtResultSelector() {
+        const c = this.configMgmt;
+        if (c.error) return '[data-test="cm-error"]';
+        return c.saved && c.warnings.length
+          ? '[data-test="cm-save-warnings"]' : '[data-test="cm-saved"]';
       },
       // A write that threw. Reloads catch their own errors, so this is mostly a request that
       // never reached the server; when the write already landed (`saved`), say that rather
@@ -4349,7 +4356,7 @@
           // The banners sit above the panel and Save sits at its foot (#1031). Skip the
           // scroll when the operator is working elsewhere, so it does not pull them away.
           if (live && (c.error || c.saved) && this._skillOvFocusIsFree()) {
-            this.revealFeedback(c.error ? '[data-test="cm-error"]' : '[data-test="cm-saved"]');
+            this.revealFeedback(this._configMgmtResultSelector());
           }
         }
       },
@@ -4574,13 +4581,16 @@
           if (res.ok) {
             // An update returns what it changed (TASK-517); every other action has no
             // `message`, and the banner falls back to "Saved.".
-            const d = await res.json().catch(() => ({}));
+            const d = await res.clone().json().catch(() => ({}));
             if (c.gen !== gen) return;
             pl.result = d && typeof d.message === "string" ? d.message : "";
             // Enable, Disable and a plugin Update cannot change what a marketplace offers.
             const refresh = url.includes("/marketplaces/")
               ? body.op === "update" : body.op === "install" || body.op === "uninstall";
-            c.saved = true; c.warnings = []; await this._loadPlugins(gen, body.op, refresh);
+            c.saved = true;
+            // A marketplace Remove warns when Claude Code still lists the name (TASK-514).
+            if (!(await this._configMgmtTakeWarnings(res, () => c.gen === gen))) return;
+            await this._loadPlugins(gen, body.op, refresh);
           }
           else await this._configMgmtWriteErr(res);
         } catch (e) { this._configMgmtWriteFailed(e, gen, "Action failed."); }
@@ -4868,7 +4878,13 @@
           return "Declared at " + there.join(" and ") + scopes + ", not at " + here + " scope. Remove it there.";
         }
         const none = "Not declared at " + here + " scope, so Remove is not offered here.";
-        if (c.scope === "user") return none + " A project can declare it at Project or Local scope.";
+        // TASK-514: the same manual step and cost as the server's Remove warning. A listed
+        // name comes from a file on disk, so only the server's validated command is shown.
+        const how = typeof m.removeCommand === "string" && m.removeCommand
+          ? " To drop it from the list, run `" + m.removeCommand + "` in a terminal."
+          : " Clauster shows no command for this name, because the name is not safe in a shell command. To drop it from the list, use Claude Code's plugin marketplace command in a terminal, and quote the name.";
+        const manual = how + " That command also uninstalls its plugins in every scope and project, and can delete their saved options, secrets and data.";
+        if (c.scope === "user") return none + " A project can declare it at Project or Local scope." + manual;
         // Name what this editor did not read, so the note never claims a scope it skipped.
         const read = this._configMgmtDeclaredScopes();
         const failed = read.filter((s) => s !== c.scope && !Array.isArray(c.plugins.declared[s]));
@@ -4876,10 +4892,10 @@
         if (failed.length) {
           const words = failed.map((s) => this._configMgmtScopeWord(s)).join(" and ");
           tail = " No other scope that Clauster could read declares it. Clauster could not read "
-            + words + (failed.length === 1 ? " scope." : " scopes.");
+            + words + (failed.length === 1 ? " scope." : " scopes.") + " Check there first.";
         }
         if (!read.includes("user")) tail += " User scope can declare it, and this editor does not open User scope.";
-        return none + tail;
+        return none + tail + manual;
       },
       configMgmtMarketScopeLink(m) {
         const [s] = this._configMgmtMarketScopesElsewhere(m);

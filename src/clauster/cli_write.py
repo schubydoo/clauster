@@ -13,9 +13,10 @@ stop's id-resolve both read it), prints the resulting instance (or ``--json``) t
 Exit codes mirror the read commands and the route's HTTP mapping: ``0`` ok, ``2``
 for a request that can't be attempted (unknown project, untrusted directory, bad
 option — the caller must change the request), ``1`` for a spawn clauster attempted
-but could not complete (capacity cap, launch failure). ``send`` (a hosted turn) is
-not here — see the module docstring of :mod:`clauster.engine`. Lazy-imported by
-``__main__`` so the hot ``run`` path never pays for it.
+but could not complete (capacity cap, launch failure, or a new bridge that ended in
+``error``). ``send`` (a hosted turn) is not here — see the module docstring of
+:mod:`clauster.engine`. Lazy-imported by ``__main__`` so the hot ``run`` path never
+pays for it.
 """
 
 from __future__ import annotations
@@ -28,6 +29,7 @@ from typing import TYPE_CHECKING, Any
 from .cli_read import ambiguous_id_message
 from .config import removed_sandbox_note
 from .engine import ClausterEngine
+from .models import InstanceStatus
 from .runner import (
     InvalidSpawnOption,
     NotTrusted,
@@ -45,6 +47,29 @@ if TYPE_CHECKING:
 def _print_json(obj: Any) -> None:
     """Dump ``obj`` as indented JSON to stdout (``Path``/enum coerced via ``str``)."""
     print(json.dumps(obj, indent=2, default=str))
+
+
+def _print_start_failure(instance: RemoteControlInstance) -> None:
+    """Print why a new bridge ended in ``error`` to stderr, on one line (TASK-515).
+
+    ``error_detail`` is already redacted and bounded where it is stored. It can hold several
+    lines of bridge output, so its whitespace is collapsed for a single diagnostic line.
+    The ``clauster logs`` hint prints only when the log has content: a launch that failed
+    before the process ran wrote none, and the hint would lead to empty output.
+    """
+    short_id = instance.instance_id[:8]
+    reason = " ".join((instance.error_detail or "").split()) or "no reason was captured"
+    print(
+        f"clauster: bridge {short_id} ({instance.project}) failed to start: {reason}",
+        file=sys.stderr,
+    )
+    log_path = instance.bridge_raw_log_path or instance.bridge_debug_log_path
+    try:
+        has_log = log_path is not None and log_path.stat().st_size > 0
+    except OSError:
+        has_log = False
+    if has_log:
+        print(f"clauster: read its log with: clauster logs {short_id}", file=sys.stderr)
 
 
 def cmd_start(
@@ -101,6 +126,8 @@ def cmd_start(
         return 1
 
     instance = outcome.instance
+    # The restart route's test for a failed launch: a NEW row that ended in ERROR.
+    failed = outcome.created and instance.status is InstanceStatus.ERROR
     if as_json:
         _print_json(
             {
@@ -110,8 +137,15 @@ def cmd_start(
                 "warnings": outcome.warnings,
             }
         )
-        return 0
-    if outcome.created:
+        if failed:
+            _print_start_failure(instance)
+        return 1 if failed else 0
+    if failed:
+        print(
+            f"failed to start {instance.instance_id[:8]} ({instance.project}) "
+            f"mode={instance.resume_mode} status={instance.status.value}"
+        )
+    elif outcome.created:
         print(
             f"started {instance.instance_id[:8]} ({instance.project}) "
             f"mode={instance.resume_mode} status={instance.status.value}"
@@ -126,7 +160,9 @@ def cmd_start(
         )
     for warning in outcome.warnings:
         print(f"warning: {warning}", file=sys.stderr)
-    return 0
+    if failed:
+        _print_start_failure(instance)
+    return 1 if failed else 0
 
 
 def cmd_stop(config: ClausterConfig, identity: str, *, as_json: bool) -> int:

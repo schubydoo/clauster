@@ -299,8 +299,8 @@ Headless **write** commands spawn and stop bridges through that same engine —
 identical mode policy, singleton cap, and option validation to the dashboard. Both
 take `--json`; `start` exits non-zero on failure (`2` = bad request — unknown
 project, untrusted directory, invalid option; `1` = clauster tried and could not —
-bridge cap or launch failure). They are meant for driving clauster with **no
-server running**, but a concurrent live server is safe: the two processes
+bridge cap, launch failure, or a new bridge that ended in `error`). They are meant
+for driving clauster with **no server running**, but a concurrent live server is safe: the two processes
 serialize their per-project spawn/stop sections on a cross-process file lock in
 the deployment state dir, the spawn re-checks the on-disk bridge record under
 that lock (a bridge the server already started is handed back or reattached,
@@ -315,6 +315,16 @@ clauster start <project> [--mode standard|pty] [--spawn-mode …] [--permission-
                [--name NAME] [--trust] [--json]
 clauster stop  <instance> [--json]        # stop a bridge by id / unique prefix / identity
 ```
+
+When a new bridge ends in `error`, `clauster start` exits `1` and prints the reason
+on stderr. With `--json`, stdout still holds the instance, with `"status": "error"`.
+Use this exit code to detect the failed start. A later `clauster status` can show
+that bridge as `stopped` or `starting`.
+
+A bridge that is still coming up reports `starting`, and `clauster start` exits `0`
+without waiting for it. After the command exits, no process applies a startup
+deadline to that bridge, so it does not move to `error`. Run `clauster status`
+later, and treat a bridge that stays in `starting` as not ready.
 
 `<instance>` resolves the same way as for the read commands above — full id, unique
 prefix, or project name — and an ambiguous reference (a prefix, or a project name with

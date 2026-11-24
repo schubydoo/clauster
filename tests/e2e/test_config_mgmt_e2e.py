@@ -2991,6 +2991,11 @@ def test_config_mgmt_marketplaces_remove_only_where_the_scope_declares(
     browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
     removes = [a for a in _plugin_calls(server, "marketplace") if a[1:2] == ["remove"]]
     assert removes == [["marketplace", "remove", "empty", "--scope", "user"]]
+    # TASK-514: this fake's list still holds `empty`, as the real CLI's can after an exit 0.
+    browser.expect_text('[data-test="cm-save-warnings"]', "Claude Code still lists 'empty'.")
+    browser.expect_text(
+        '[data-test="cm-save-warnings"]', "`claude plugin marketplace remove empty`"
+    )
 
     # Local scope of alpha declares neither: both rows link to the scope that does.
     browser.click('[data-test="cm-scope-local"]')
@@ -3004,6 +3009,25 @@ def test_config_mgmt_marketplaces_remove_only_where_the_scope_declares(
     browser.click('[data-test="cm-market-switch-scope-market"]')
     browser.expect_attr('[data-test="cm-scope-project"]', "aria-pressed", "true")
     browser.expect_visible('[data-test="cm-market-remove-market"]')
+
+
+def test_config_mgmt_marketplace_note_shows_no_command_for_a_hostile_name(
+    browser: AgentBrowser, config_mgmt_hostile_marketplace_server: Server
+) -> None:
+    """A listed name that holds shell syntax never reaches a command to copy (TASK-514)."""
+    _open_modal(browser, config_mgmt_hostile_marketplace_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-plugins"]')
+    browser.expect_text(
+        '[data-test="cm-market-readonly-loose"]',
+        "run `claude plugin marketplace remove loose` in a terminal",
+    )
+    for name in ("x; touch /tmp/p", "y`id`$(id)"):
+        selector = f"[data-test='cm-market-readonly-{name}']"
+        browser.expect_text(selector, "Clauster shows no command for this name")
+        text = browser.get_text(selector)  # get_text returns "" on an error: prove this read
+        assert "Clauster shows no command for this name" in text
+        assert "claude plugin marketplace remove" not in text
 
 
 def test_config_mgmt_marketplaces_unreadable_declarations_offer_no_remove(

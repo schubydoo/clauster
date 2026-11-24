@@ -23,7 +23,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException
 
-from ... import config_write, config_write_plugins
+from ... import claude_cli, config_write, config_write_plugins
 from ...config_write_hooks import mask_url
 from ...dependencies import ConfigDep, RunnerDep, RunnerOrNoneDep
 from . import _base
@@ -50,7 +50,11 @@ async def api_config_write_marketplaces_list(
     except config_write.ConfigWriteError as exc:
         raise _base.map_config_write_error(exc) from exc
     # Omit `project` for user scope (a meaningless "") to match the sibling routes.
-    result: dict[str, Any] = {"scope": scope, "marketplaces": marketplaces}
+    # `removeCommand` is built here so the browser holds no second copy of the name rule.
+    result: dict[str, Any] = {
+        "scope": scope,
+        "marketplaces": config_write_plugins.with_remove_commands(marketplaces),
+    }
     if scope != "user":
         result["project"] = project
     return result
@@ -201,12 +205,15 @@ async def api_config_write_marketplaces_action(
         except config_write.ConfigWriteError as exc:
             raise _base.map_config_write_error(exc) from exc
 
+    uninstalled: str | None = None
+
     def _work() -> None:
         """Run the requested marketplace verb through the CLI."""
+        nonlocal uninstalled
         if op == "add":
             config_write_plugins.cli_marketplace_add(binary, cwd, source, scope)  # type: ignore[arg-type]
         elif op == "remove":
-            config_write_plugins.cli_marketplace_remove(binary, cwd, name, scope)  # type: ignore[arg-type]
+            uninstalled = config_write_plugins.cli_marketplace_remove(binary, cwd, name, scope)  # type: ignore[arg-type]
         else:
             config_write_plugins.cli_marketplace_update(binary, cwd, name)
 
@@ -248,11 +255,26 @@ async def api_config_write_marketplaces_action(
                 config_write_plugins.marketplace_plugin_names, binary, cwd, name
             )
             live |= live_after
-        except config_write.ConfigWriteError:
+        except (config_write.ConfigWriteError, claude_cli.ClaudeNotFound):
             after = None
         result["message"] = config_write_plugins.describe_marketplace_update(
             name, before, after, live=live
         )
+    if op == "remove" and name is not None:
+        # TASK-514: the CLI can exit 0 and keep the name in its merged list, or drop it and
+        # uninstall plugins. The removal committed, so a failed read is reported in the
+        # warning and is never an error response.
+        listed: bool | None
+        try:
+            listed = await asyncio.to_thread(
+                config_write_plugins.marketplace_is_listed, binary, cwd, name
+            )
+        except (config_write.ConfigWriteError, claude_cli.ClaudeNotFound):
+            listed = None
+        still_listed = config_write_plugins.describe_marketplace_remove(name, listed=listed)
+        warnings = [w for w in (uninstalled, still_listed) if w is not None]
+        if warnings:
+            result["warnings"] = warnings
     if name is not None:
         result["name"] = name
     if source is not None:

@@ -101,7 +101,14 @@ against the current docs (``code.claude.com/docs/en/plugins/cli-reference``,
   ``--scope`` is always passed explicitly here, matching the confirm token's own
   scope. Removing an unknown name is an error ("not found"), and so is a name that
   the chosen scope does not declare ("is not declared in user settings"); both
-  map to a 404.
+  map to a 404. An exit 0 does not prove that the name left the merged list. Confirmed
+  on 2.1.328 and 2.1.330: run from the home directory, where the user settings file is
+  also the project settings file, ``--scope user`` clears the declaration but keeps the
+  ``known_marketplaces.json`` entry and the plugins. Run from any other directory, the
+  same command drops the entry and uninstalls the marketplace's plugins, **including
+  another project's project-scope install**, and so does an unscoped remove. So this
+  module never finishes a removal by changing the directory or dropping ``--scope``:
+  the route reads the list afterward and tells the operator what is left (TASK-514).
 * ``claude plugin marketplace list --json`` / ``claude plugin marketplace update
   [name]`` — **neither takes ``--scope``**: confirmed live that ``list`` reflects
   ``~/.claude/plugins/known_marketplaces.json``, a single merged pool independent
@@ -135,6 +142,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
@@ -161,6 +169,10 @@ _NOT_FOUND_RE = re.compile(r"not found|not installed", re.IGNORECASE)
 #: does not declare (``Marketplace 'x' is not declared in user settings``, confirmed on
 #: 2.1.318): absent at that scope, so a 404 like "not found" — for that verb only.
 _NOT_DECLARED_RE = re.compile(r"not declared", re.IGNORECASE)
+
+#: The line ``marketplace remove`` prints above the plugins it uninstalled, one id per line
+#: after it (confirmed on 2.1.330).
+_UNINSTALLED_RE = re.compile(r"Also uninstalled (\d+) plugins? from this marketplace")
 
 #: Verbs whose failure is never a 404, whatever the message says. ``marketplace-add``
 #: fetches its source, so "not found" there is a git/network failure. The two reads
@@ -437,8 +449,8 @@ def _raise_for_failure(op: str, ident: str, proc: subprocess.CompletedProcess) -
     A "not found"/"not installed" message maps to the appropriate typed 404 — but
     **only for the verbs where "not found" means the named entity is genuinely
     absent** (uninstall/update/enable/disable of an absent id, install of a plugin
-    absent from its marketplace, marketplace remove/update of an unknown name, and
-    marketplace remove at a scope that does not declare the name).
+    absent from its marketplace, marketplace remove/update of an unknown name).
+    :func:`cli_marketplace_remove` handles a name that the scope does not declare.
     An ``add`` (``marketplace-add``) is deliberately **excluded**: its ``source``
     is a URL/path/repo the CLI must fetch, so a failed add commonly reports
     ``fatal: repository '…' not found`` — a git/network *failure*, not an absent
@@ -457,10 +469,7 @@ def _raise_for_failure(op: str, ident: str, proc: subprocess.CompletedProcess) -
     shown = _shown_source(ident)
     raw = (proc.stderr or proc.stdout or "").strip()
     detail = cw.redact_secret_lines(raw.replace(ident, shown) if ident else raw)
-    absent = (op not in _NEVER_NOT_FOUND_OPS and bool(_NOT_FOUND_RE.search(detail))) or (
-        op == "marketplace-remove" and bool(_NOT_DECLARED_RE.search(detail))
-    )
-    if absent:
+    if op not in _NEVER_NOT_FOUND_OPS and _NOT_FOUND_RE.search(detail):
         if op.startswith("marketplace"):
             raise MarketplaceNotFoundError(detail)
         raise PluginNotFoundError(detail)
@@ -651,19 +660,135 @@ def cli_marketplace_add(
 
 def cli_marketplace_remove(
     binary: str, cwd: Path, name: str, scope: cw.Scope, *, run: RunFn = subprocess.run
-) -> None:
-    """Remove the marketplace declared as ``name`` at ``scope``.
+) -> str | None:
+    """Remove the marketplace declared as ``name`` at ``scope``; return a warning, if any.
 
     ``--scope`` is **always** passed explicitly (never omitted): the CLI itself
     treats an omitted ``--scope`` as "remove from every scope it appears in"
     (confirmed via ``--help``), which would let a single project-scope-confirmed
     request reach into another scope's settings file — this module never does
-    that; every mutation stays confined to the one scope its confirm token named.
-    Removing an unknown name raises :class:`MarketplaceNotFoundError` (→ 404).
+    that. The settings write stays in the one scope its confirm token named, but when
+    the name leaves the merged list, the CLI also uninstalls the marketplace's plugins,
+    another project's included. The returned warning names them (TASK-514).
+    Removing an unknown name raises :class:`MarketplaceNotFoundError` (→ 404). So does a
+    name this scope does not declare, with Clauster's own text: the CLI's says "Omit
+    --scope", which the dashboard cannot do. The CLI also says "not declared" for a
+    settings file it cannot read, so the text does not claim that the scope is clean.
     """
     validate_marketplace_name(name)
     proc = _run(binary, ["marketplace", "remove", name, "--scope", scope], cwd=cwd, run=run)
+    if proc.returncode != 0 and _NOT_DECLARED_RE.search(f"{proc.stderr}\n{proc.stdout}"):
+        raise MarketplaceNotFoundError(
+            f"Claude Code reports that marketplace {name!r} is not declared at "
+            f"{scope.capitalize()} scope. Make sure that the settings file at that scope is "
+            "readable. If it is and Claude Code still lists the marketplace, to drop it from "
+            f"the list, {_marketplace_cli_step(name)}"
+        )
     _raise_for_failure("marketplace-remove", name, proc)
+    return _describe_uninstalled(proc.stdout or "", name)
+
+
+def _describe_uninstalled(stdout: str, marketplace: str) -> str | None:
+    """Return a warning for the plugins a ``marketplace remove`` uninstalled, if any.
+
+    The ids come from CLI output, so only a valid id of this ``marketplace`` is named: a
+    wrapped line cannot pass as one. When the lines do not match the count, the warning
+    gives the count alone.
+    """
+    lines = stdout.splitlines()
+    for index, line in enumerate(lines):
+        match = _UNINSTALLED_RE.search(line)
+        if match is None:
+            continue
+        count = int(match.group(1))
+        ids: list[str] = []
+        for entry in lines[index + 1 : index + 1 + count]:
+            candidate = entry.strip()
+            try:
+                validate_plugin_id(candidate)
+            except cw.InvalidCandidateError:
+                break
+            if not candidate.endswith(f"@{marketplace}"):
+                break
+            ids.append(candidate)
+        noun = "plugin" if count == 1 else "plugins"
+        named = f": {', '.join(ids)}" if len(ids) == count else ""
+        return (
+            f"Claude Code also uninstalled {count} {noun} from this marketplace{named}. This "
+            "can include installs in other projects. Claude Code says that the removal also "
+            "deletes their saved options, secrets and data where it can."
+        )
+    return None
+
+
+def marketplace_remove_command(name: Any) -> str | None:
+    """Return the shell command that removes ``name``, or ``None`` for an unsafe name.
+
+    A listed name comes from a file on disk, so it can hold shell syntax. Only a name that
+    passes :func:`validate_marketplace_name` gets a command for an operator to copy. That
+    charset needs no quoting, and :func:`shlex.quote` is the second layer.
+    """
+    try:
+        validate_marketplace_name(name)
+    except cw.InvalidCandidateError:
+        return None
+    return f"claude plugin marketplace remove {shlex.quote(name)}"
+
+
+def with_remove_commands(rows: list[Any]) -> list[Any]:
+    """Return ``rows`` with each row's server-built ``removeCommand`` (string or ``None``)."""
+    return [
+        {**row, "removeCommand": marketplace_remove_command(row.get("name"))}
+        if isinstance(row, dict)
+        else row
+        for row in rows
+    ]
+
+
+def _marketplace_cli_step(name: str) -> str:
+    """Return the manual way to drop ``name`` from the CLI's list, and what it also removes.
+
+    Clauster never runs this command: it reaches past the one scope the operator confirmed.
+    """
+    command = marketplace_remove_command(name)
+    how = (
+        f"run `{command}` in a terminal"
+        if command is not None
+        else "use Claude Code's plugin marketplace command in a terminal, and quote the name"
+    )
+    return (
+        f"{how}. That command also uninstalls its plugins in every scope and project, and "
+        "can delete their saved options, secrets and data."
+    )
+
+
+def marketplace_is_listed(
+    binary: str, cwd: Path, name: str, *, run: RunFn = subprocess.run
+) -> bool:
+    """Return whether ``claude plugin marketplace list`` still holds ``name``."""
+    entries = _list_marketplaces_raw(binary, cwd, run=run)
+    return any(isinstance(entry, dict) and entry.get("name") == name for entry in entries)
+
+
+def describe_marketplace_remove(name: str, *, listed: bool | None) -> str | None:
+    """Return the warning for a Remove that exited 0, or ``None`` when the name is gone.
+
+    ``listed`` is the read of the merged list after the removal, ``None`` when that read
+    failed. The declaration is gone either way, so neither case is an error (TASK-514).
+    """
+    if listed is None:
+        return (
+            "Clauster could not read the marketplace list, so it cannot say whether "
+            f"Claude Code still lists {name!r}."
+        )
+    if not listed:
+        return None
+    return (
+        f"Claude Code still lists {name!r}. Another scope can still declare it, or Claude "
+        "Code can keep the entry after the removal. Any plugins installed from it stay "
+        "installed. If another scope declares it, remove it there. Otherwise, to drop it "
+        f"from the list, {_marketplace_cli_step(name)}"
+    )
 
 
 def cli_marketplace_update(
@@ -712,9 +837,10 @@ def cli_list_marketplaces(
 def _list_marketplaces_raw(binary: str, cwd: Path, *, run: RunFn) -> list[Any]:
     """Return the UNREDACTED ``marketplace list --json`` entries, for this module's own use.
 
-    Only :func:`cli_list_marketplaces` (which redacts) and :func:`marketplace_plugin_names`
-    (which reads each ``installLocation`` and returns plugin names only) call this; the raw
-    entries never leave the module.
+    Only :func:`cli_list_marketplaces` (which redacts), :func:`marketplace_plugin_names`
+    (which reads each listed location and returns marketplace and plugin names only), and
+    :func:`marketplace_is_listed` (which returns only whether the name is present) call this;
+    the raw entries never leave the module.
     """
     proc = _run(binary, ["marketplace", "list", "--json"], cwd=cwd, run=run)
     _raise_for_failure("marketplace-list", "", proc)

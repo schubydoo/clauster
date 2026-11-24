@@ -1051,6 +1051,23 @@ The scope rules and the update results below were checked against Claude Code
   declares has no link. The User file is read from Project and Local scope only
   when `config_write.allow_user_scope` is on. Update stays on every row, because
   `marketplace update` takes no scope.
+- **Remove reports what Claude Code did beyond the scope you chose.** Remove
+  clears the declaration at that scope. Clauster then reads the list again and
+  shows a warning under the result in two cases:
+  - Claude Code still lists the marketplace. Another scope can still declare it,
+    or Claude Code can keep the entry after a User scope Remove (seen on 2.1.328
+    and 2.1.330). Its plugins stay installed. If another scope declares it,
+    remove it there. Otherwise, the warning gives the
+    `claude plugin marketplace remove <name>` command to run in a terminal. Run
+    it only if you want the plugins gone too. It uninstalls the marketplace's
+    plugins in every scope and project, and can delete their saved options,
+    secrets and data. Clauster does not run it for you, because it reaches past
+    the scope that you confirmed. Clauster shows the command only for a name
+    that is safe in a shell command.
+  - Claude Code dropped the marketplace and uninstalled its plugins. This can
+    happen even when another project still declares the marketplace, and it can
+    remove that project's installs. When Claude Code reports the uninstalled
+    plugins, the warning names them or gives their number.
 - **Show plugins lists the plugins that a marketplace offers.** Clauster runs
   `claude plugin list --available --json` from the directory of the scope that
   you chose. At User scope, that is the home directory of the user that runs
@@ -1419,7 +1436,7 @@ space at the start or the end is part of the name.
 | A subagent has no description and won't edit | It is built-in, or a plugin owns it — the **Source** badge says which | Built-in: nothing to do, there is no file. Plugin: change the plugin, not Clauster |
 | A plugin install or update fails and the message names a command | The marketplace entry runs a command, and Clauster never accepts one for you | Read the command, then run `claude plugin install` from a terminal on the host |
 | Enable or Disable fails with "is already enabled" or "is installed at project scope, not user" | The badge is the merged state, and the chosen scope already has that value or cannot override it | Pick the scope that the message names, or use the Local scope to override a project setting for yourself |
-| Removing a marketplace returns `404` with "is not declared in user settings" | A different scope declares it | Switch to the scope that declares it and remove it there |
+| Removing a marketplace returns `404` with "is not declared at … scope" | A different scope declares it, or Claude Code cannot read that scope's settings file | Make sure that the file is readable. Switch to the scope that declares it and remove it there. If no scope declares it, follow the command in the message |
 | A Settings save returns `422` with "Claude Code reads … only from" | The file holds a key (or a `true` value) that Claude Code ignores at this scope | Remove the key (in Rows mode or Raw JSON), or save it at the scope that the message names. For a `true` value, set it to `false` |
 | The Plugins tab shows `Failed to load (400).`, and the response names "returned output nested too deeply (more than 64 levels)" | The `claude plugin list --json` or `claude plugin marketplace list --json` output nests objects and lists more than 64 levels deep. Clauster reads no output nested deeper than 64 levels | Find the plugin or marketplace entry with the deep value in the output of that command on the host, and fix or remove it |
 
