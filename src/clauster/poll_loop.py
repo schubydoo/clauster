@@ -740,6 +740,8 @@ class PollLoop:
         # is pid DESCENT, #820), so project liveness never tested the prune's premise — "the
         # bridge IS alive, just unmanaged" — and the stricter guard below does: the external
         # session must actually BE a bridge.
+        # A row with a linked survivor is a proven crash, not a phantom (TASK-562).
+        proven = {s.parent_instance for s in reconciled if s.attribution is Attribution.ORPHANED}
         candidates: dict[str, list[str]] = {}
         for n, inst in list(self._registry._instances.items()):
             # Only prune non-live (STOPPED/CRASHED) phantoms. A RUNNING/STARTING instance
@@ -766,6 +768,8 @@ class PollLoop:
                 )
                 continue
             n = ids[0]
+            if n in proven:
+                continue
             cwd = cwd_of_project[project]
             # INFO, not debug: this DELETES a resumable card, and the row it leaves behind
             # is only re-materialized by `rediscover` — i.e. on restart, not next tick. The
@@ -910,6 +914,8 @@ class PollLoop:
                 # Never let an unexpected error kill the daemon's poll loop, but make
                 # it observable — a silent `pass` here hid status-reconcile failures.
                 _log.exception("poll_once failed; continuing")
+                # As on a failed cross-check: a tick that died cannot support "still running".
+                inspector.clear_orphan_links(self._sessions)
             await asyncio.sleep(interval)
 
     async def start_poll_loop(self) -> None:

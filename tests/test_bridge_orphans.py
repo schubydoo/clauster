@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import subprocess
+import sys
+import time
 from pathlib import Path
 
 import psutil
@@ -389,6 +391,87 @@ async def test_shared_pid_labels_only_the_eligible_entry(runner_config, monkeypa
 
     assert holder["s"][0].attribution is Attribution.ORPHANED
     assert holder["s"][1].attribution is Attribution.UNTRACKED
+
+
+def test_session_worker_is_not_its_own_bridge_when_the_project_name_matches():
+    argv = [
+        "-c",
+        "import time; time.sleep(30)",
+        "--print",
+        "--sdk-url",
+        "https://example.invalid/x",
+        "--session-id",
+        "s",
+        "--debug-file",
+        "/logs/claude-remote-control-app-1-1-s.log",
+    ]
+    child = subprocess.Popen([sys.executable, *argv])
+    try:
+        deadline = time.monotonic() + 10
+        while "--sdk-url" not in psutil.Process(child.pid).cmdline():
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        # The control: without the `--sdk-url` rule this argv does read as a bridge.
+        assert procutil.is_bridge_cmdline(psutil.Process(child.pid).cmdline())
+        assert procutil.bridge_ancestor(child.pid, max_depth=0) is None
+    finally:
+        child.kill()
+        child.wait(timeout=5)
+
+
+async def test_prune_keeps_a_crashed_row_with_a_linked_survivor(
+    runner_config, monkeypatch, children
+):
+    holder = {}
+    runner, inst = _runner(runner_config, monkeypatch, lambda *a, **k: holder["s"])
+    alpha = runner._discovered()["alpha"].path
+    holder["s"] = [_session(cwd=str(alpha)), _session(pid=600, cwd=str(alpha))]
+    children[600] = None
+    # Pid 600 has a live unmanaged bridge above it, which is the prune's evidence.
+    monkeypatch.setattr(procutil, "bridge_ancestor", lambda pid: 77 if pid == 600 else None)
+
+    await runner.poll_once()
+
+    assert holder["s"][0].attribution is Attribution.ORPHANED
+    assert inst.instance_id in runner._instances
+
+
+async def test_tick_that_dies_withdraws_the_still_running_claim(runner_config, monkeypatch):
+    runner, inst = _runner(runner_config, monkeypatch, lambda *a, **k: [])
+    inst.status = InstanceStatus.CRASHED
+    orphan = _session(attribution=Attribution.ORPHANED, parent=inst.instance_id)
+    runner._sessions = [orphan]
+
+    async def _die(**kwargs):
+        raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "bad output")
+
+    async def _stop(_seconds):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(runner._poll_loop, "poll_once", _die)
+    monkeypatch.setattr("clauster.poll_loop.asyncio.sleep", _stop)
+
+    with pytest.raises(asyncio.CancelledError):
+        await runner._poll_loop._poll_forever()
+
+    assert orphan.attribution is Attribution.EXTERNAL
+    assert runner.orphaned_sessions_by_instance() == {}
+
+
+async def test_no_argv_read_while_no_row_is_crashed(runner_config, monkeypatch, children):
+    holder = {}
+    runner, inst = _runner(runner_config, monkeypatch, lambda *a, **k: [holder["s"]])
+    holder["s"] = _alpha_session(runner)
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
+    calls = []
+    monkeypatch.setattr(
+        "clauster.poll_loop.inspector.link_orphans", lambda *a: calls.append(a) or {}
+    )
+
+    await runner.poll_once()
+
+    assert inst.status is InstanceStatus.RUNNING
+    assert calls == []
 
 
 def test_clear_orphan_links_touches_only_orphaned_sessions():

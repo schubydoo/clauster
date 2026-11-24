@@ -87,6 +87,7 @@ _V1_PUBLIC_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("GET", "/api/projects"),
         ("GET", "/api/sessions"),
         ("GET", "/api/sessions/tracked"),
+        ("GET", "/api/sessions/orphaned"),
         ("GET", "/api/sessions/adoptable"),
         ("GET", "/api/instances"),
         ("POST", "/api/instances"),

@@ -615,6 +615,12 @@
     [
       "GET"
     ],
+    "/api/v1/sessions/orphaned"
+  ],
+  [
+    [
+      "GET"
+    ],
     "/api/v1/sessions/tracked"
   ],
   [

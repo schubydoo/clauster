@@ -896,7 +896,14 @@ def bridge_ancestor(pid: int, *, max_depth: int = _MAX_BRIDGE_ANCESTRY) -> int |
             # both predicates.
             if is_keeper_cmdline(cmdline):
                 return None
-            if proc.status() != psutil.STATUS_ZOMBIE and is_bridge_cmdline(cmdline):
+            # `--sdk-url` marks a session worker, which is never a bridge. The match is a
+            # substring test and the worker's --debug-file starts with the project name, so
+            # a project called `my-remote-control-app` read as its own bridge (TASK-562).
+            if (
+                proc.status() != psutil.STATUS_ZOMBIE
+                and "--sdk-url" not in cmdline
+                and is_bridge_cmdline(cmdline)
+            ):
                 return proc.pid
             parent = proc.parent()
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, RuntimeError):
