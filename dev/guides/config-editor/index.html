@@ -2053,7 +2053,8 @@ on; the User scope additionally requires <code>config_write.allow_user_scope</co
   mask secret-shaped values on read. The MCP surface also masks every <code>env</code>
   and <code>headers</code> value, the <code>headersHelper</code> command, and the strings in
   <code>oauth</code>, whatever their key names. It also masks the query values, the fragment and the token-like path
-  segments of a server <code>url</code>. A masked value left untouched keeps the stored
+  segments of a server <code>url</code>, and the value of a secret-named flag in <code>args</code>
+  (best effort, see <a href="#mcp-server-definitions">MCP server definitions</a>). A masked value left untouched keeps the stored
   secret on write. If
   Clauster cannot match a mask to its stored value, it refuses the save and
   writes nothing. The CLAUDE.md surface and the <code>permissions</code> rules return the
@@ -2172,11 +2173,34 @@ keys stay visible, for example <code>https://mcp.example.com/v1?key=********</co
 or a <code>${...}</code> reference, shows as one <code>********</code>. A URL path segment or query
 key shorter than 20 characters is not masked if it has fewer than 8 letters and
 digits, or only letters, or only digits. Do not put a secret there.</p>
+<p>The value of a secret-named flag in <code>args</code> shows as <code>********</code>. A flag is
+secret-named when its name holds <code>token</code>, <code>secret</code>, <code>password</code>, <code>passwd</code>,
+<code>api-key</code>, <code>api_key</code>, <code>apikey</code>, <code>auth</code> (but not <code>author</code> or <code>authors</code>),
+<code>credential</code> or <code>bearer</code>, in any letter case. For example, <code>--api-key=abc</code> shows
+as <code>--api-key=********</code>. If the flag and its value are two items (<code>--token</code>,
+<code>abc</code>), the second item shows as <code>********</code>.</p>
+<p>This masking is best effort, because Clauster reads only the flag name. These
+cases show in clear. Put a secret in <code>env</code>, which is always masked.</p>
+<ul>
+<li>A secret after a flag with another name, or in an item with no flag.</li>
+<li>A separate value that starts with <code>-</code>, because it reads as the next flag.</li>
+<li>The item after a <code>--no-...</code> flag, because such a flag takes no value.</li>
+<li>A flag and its value in one item, separated by a space, such as <code>--token abc</code>.</li>
+</ul>
+<p>A flag that is not a credential can also show a mask. For example, the value of
+<code>--max-tokens</code> shows as <code>********</code>.</p>
+<p>This masking applies to the editor views only. In tests with Claude Code
+2.1.330, the debug log did not hold the <code>args</code> of a server when the server
+connected, failed to start, exited, or sent invalid output. The log did hold
+what the server printed to stderr. If a server prints its own <code>args</code>, the value
+can show in the bridge log stream in the dashboard.</p>
 <p>If you leave the mask in place, the save keeps the stored value. A <code>url</code> that
 holds a mask keeps the stored URL only when every visible character of it is
 unchanged. Clauster compares the text exactly. If you change any part of such a
 URL, for example the host, the path, or a query key, the save is refused
-(<code>422</code>). Type the full URL again. If you change the <code>type</code> or a URL of a
+(<code>422</code>). Type the full URL again. An <code>args</code> item that holds a mask keeps the
+stored item only at the same place and with every visible character unchanged.
+If you change the <code>type</code> or a URL of a
 remote server, or the <code>command</code> or <code>args</code> of a stdio server, the save cannot
 keep a masked value (see the list below). The save also cannot keep a mask that
 has no stored value behind it, for example in a row that you renamed. In both
@@ -2497,8 +2521,10 @@ Each field is masked as the tab that owns its shape masks it:</p>
 <li>In an inline <code>mcpServers</code> definition, every <code>env</code> and <code>headers</code> value, a
   <code>headersHelper</code> command, a URL with a user name or password, and the query
   values and token-like path segments of a <code>url</code> are masked, as on the MCP
-  tab. A server name is not a secret, so a server called <code>oauth-gw</code> keeps its
-  <code>type</code> and the plain parts of its <code>url</code> visible.</li>
+  tab. The value of a
+  <a href="#mcp-server-definitions">secret-named flag in <code>args</code></a> is masked too, with
+  the same limits. A server name is not a secret, so a server called <code>oauth-gw</code>
+  keeps its <code>type</code> and the plain parts of its <code>url</code> visible.</li>
 <li>In <code>hooks</code>, the parts of a hook URL and the <code>headers</code> values that the
   <a href="#the-hooks-tab">Hooks tab</a> masks are masked.</li>
 <li>Every non-empty <code>env</code> value is masked.</li>
@@ -2507,9 +2533,13 @@ Each field is masked as the tab that owns its shape masks it:</p>
 </ul>
 <p>The Markdown body after the frontmatter is never masked or changed. Comments in
 the frontmatter are not masked either. Do not put a secret in the body or in a
-comment. If the frontmatter is not valid YAML, the editor cannot read its
-fields. It then masks the frontmatter line by line, as the Skills editor does,
-and that misses a secret under a key that does not look secret. A masked value
+comment. If the
+<a href="#subagent-frontmatter-checks">subagent frontmatter checks</a> refuse the
+frontmatter, for example because it is not valid YAML, the editor cannot read
+its fields. It then masks the frontmatter as the Skills editor masks the
+frontmatter of <code>SKILL.md</code> (see below). Claude Code can still read some of these
+files. So if Clauster cannot be sure that it reads the YAML as Claude Code
+does, every line that is not blank shows as <code>********</code>. A masked value
 in such a file cannot be kept, so type the real values when you repair it. If
 the file holds masked values and its frontmatter is valid YAML only after Claude
 Code adds quotes to some values, the editor shows those values with the quotes,
@@ -2527,14 +2557,15 @@ refused, and nothing is written, in these cases:</p>
 <li>A masked value in an <code>http</code>, <code>sse</code> or <code>ws</code> server when you changed its <code>type</code>
   or any character of a URL in it. Clauster compares the URL text exactly and
   never parses it.</li>
-<li>A masked <code>env</code> value in a stdio server when you changed its <code>command</code> or any
-  element of its <code>args</code>.</li>
+<li>A masked <code>env</code> value or <code>args</code> item in a stdio server when you changed its
+  <code>command</code> or any element of its <code>args</code>.</li>
 <li>A masked hook value when the <a href="#the-hooks-tab">Hooks tab</a> rules cannot keep it.</li>
 </ul>
 <p>Type the real value again to save the change. If a secret is on a value with a
 YAML anchor, an alias, or a merge key, or inside an ordered map or a set, the
 editor cannot mask it in place. It then shows a note and not the file. Edit
-that file on the host.</p>
+that file on the host. This also applies to a value that is masked only because
+of its flag name, such as the value of <code>--max-tokens</code> in a shared <code>args</code> list.</p>
 <p>The Skills editor masks each file line by line: a <code>key: value</code> line with a
 secret-shaped key, also as a list item (<code>- token: ...</code>), a <code>${...}</code> reference,
 or a URL with a user name or password. In a flow mapping or list, such as
@@ -2581,18 +2612,21 @@ detected and shows in clear.</p>
 the MCP and Hooks tabs mask, whatever its key name. In <code>mcpServers</code>, every
 <code>headers</code> and <code>env</code> value and a <code>headersHelper</code> command show as <code>********</code>. For
 example, <code>headers: {X-Custom: abc}</code> shows as <code>headers: {X-Custom: ********}</code>.
-An <code>args</code> item is not masked by its place in the file. It shows in clear unless
-the line masking above masks it, for example a <code>${...}</code> reference, a URL with a
-user name or password, or a list item such as <code>- --token=abc</code>. In a flow list,
-<code>[--token=abc]</code> shows in clear, as it does on the MCP tab. In <code>hooks</code>, every
-<code>headers</code> value shows as <code>********</code>.
+In <code>mcpServers</code>, the value of a
+<a href="#mcp-server-definitions">secret-named flag in <code>args</code></a> is masked as on the
+MCP tab, with the same limits, in a block list, a flow list and a quoted item.
+For example, <code>args: ["--token=abc"]</code> shows as <code>args: ["--token=********"]</code>. Any
+other <code>args</code> item shows in clear unless the line masking above masks it, for
+example a <code>${...}</code> reference or a URL with a user name or password. In <code>hooks</code>,
+every <code>headers</code> value shows as <code>********</code>.
 The editor also reads each frontmatter value as YAML loads it, as the MCP and
 Hooks tabs do. A value that is written with an escape (such as <code>\x40</code> for <code>@</code>
 or <code>\x2d</code> for <code>-</code>, also an escaped line break) or as <code>!!binary</code> is masked when
 its loaded text, read on its own, holds what the line masking above masks: a
 <code>${...}</code> reference, a URL with a user name or password, or a line such as
-<code>--api-key=abc</code>. Such a value can therefore be masked where the same text,
-written without the escape, shows in clear, such as <code>[--token=abc]</code> above.
+<code>--api-key=abc</code>. Outside <code>mcpServers</code>, such a value can therefore be masked
+where the same text, written without the escape, shows in clear, such as a flow
+list <code>[--token=abc]</code>.
 A <code>url</code> value written as <code>!!binary</code> shows
 as <code>********</code>. In <code>mcpServers</code> and <code>hooks</code>, a
 value under a key that looks secret shows as <code>********</code>, also when the key looks
