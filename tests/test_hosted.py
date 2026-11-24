@@ -4008,8 +4008,11 @@ async def test_recheck_never_waits_for_a_row_a_lifecycle_op_owns(monkeypatch):
         assert inst.is_orphan is True  # owned: judged on a later poll
         waiter = asyncio.create_task(lock.acquire())
         await asyncio.sleep(0)
-    # The lock is free but the queued waiter has not run yet: still no wait.
-    await asyncio.wait_for(mgr.recheck_orphans(), timeout=5)
+    # The lock is free but the queued waiter has not run yet: still no wait. A timeout
+    # scope, not wait_for: on Python 3.11 wait_for runs the call in a new task, so the
+    # queued waiter takes the lock first and the recheck rightly skips the owned row.
+    async with asyncio.timeout(5):
+        await mgr.recheck_orphans()
     await waiter
     lock.release()
     assert inst.is_orphan is False
