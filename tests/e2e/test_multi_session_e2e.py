@@ -169,7 +169,7 @@ def test_two_interactive_sessions_plus_standard_bridge_stop_and_resume(
     browser.expect_visible(resume_btn)
 
     # --- 5: Resume it from Recent → back to 3 concurrent rows, same identity ---
-    launches = len(launch_argv_files(multi_session_server.state_dir, "alpha"))
+    launches = set(launch_argv_files(multi_session_server.state_dir, "alpha"))
     browser.click(resume_btn)
     browser.expect_count(_ACTIVE_ROWS, 3, timeout_ms=STATUS_TIMEOUT)
     browser.expect_hidden(_PENDING_ROW, timeout_ms=STATUS_TIMEOUT)

@@ -74,25 +74,26 @@ _CLICK_VISIBLE_TIMEOUT_MS = 5_000
 # is about to hide moves AFTER the read and the click lands on the container (TASK-553).
 # The Node launcher hid this until 0.43.0: it added about 30 ms per command, and the native
 # binary takes about 2 ms. :meth:`click` and :meth:`check` therefore wait until the target's
-# box is unchanged across two animation frames, like Playwright's "stable" actionability
-# check. The timer is a fallback for a page that produces no frames.
+# box is non-empty and unchanged across two animation frames, like Playwright's "stable"
+# actionability check. On a visible page, a frame that does not arrive counts as not stable:
+# the pending ``x-show`` has not run yet. Only a hidden page, which produces no frames, may
+# pass on the timer.
 _STABLE_TIMEOUT_MS = 5_000
 _STABLE_BOX_JS = """(async () => {
   const el = document.querySelector(%s);
   if (!el) return true;
   const box = () => {
     const r = el.getBoundingClientRect();
-    return [r.x, r.y, r.width, r.height].join();
+    return r.width && r.height ? [r.x, r.y, r.width, r.height].join() : null;
   };
   const frame = () => new Promise((done) => {
-    requestAnimationFrame(done);
-    setTimeout(done, 100);
+    requestAnimationFrame(() => done(true));
+    setTimeout(() => done(document.visibilityState !== 'visible'), 1000);
   });
   const first = box();
-  await frame();
-  const second = box();
-  await frame();
-  return el.isConnected && second === first && box() === first;
+  if (!first || !(await frame())) return false;
+  if (box() !== first || !(await frame())) return false;
+  return box() === first;
 })()"""
 
 # agent-browser ≥ 0.34 races its own daemon startup: the FIRST command after a
@@ -287,7 +288,7 @@ class AgentBrowser:
         self._poll(
             lambda: self._run("eval", script).stdout.strip() == "true",
             _STABLE_TIMEOUT_MS,
-            f"{selector} stable (before click)",
+            f"{selector} stable (before click or check)",
         )
 
     def click_role(self, role: str, name: str) -> None:

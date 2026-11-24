@@ -51,8 +51,8 @@ def launch_argv_files(state_dir: Path, project: str) -> list[Path]:
     return sorted((state_dir / "logs").glob(f"{project}-*.log.argv.json"))
 
 
-def wait_new_launch_argv(state_dir: Path, project: str, *, seen: int) -> list[str]:
-    """Wait for a spawn after the first ``seen`` and return the argv of the newest one.
+def wait_new_launch_argv(state_dir: Path, project: str, *, seen: set[Path]) -> list[str]:
+    """Wait for a sidecar that is not in ``seen`` and return the argv of the newest one.
 
     A row count cannot gate this read when other sessions of the project stay live: the
     row can render before the fake ``claude`` writes its sidecar, and the newest file is
@@ -61,14 +61,14 @@ def wait_new_launch_argv(state_dir: Path, project: str, *, seen: int) -> list[st
     """
     deadline = time.monotonic() + STATUS_TIMEOUT / 1000
     while time.monotonic() < deadline:
-        argv_files = launch_argv_files(state_dir, project)
-        if len(argv_files) > seen:
+        new_files = [p for p in launch_argv_files(state_dir, project) if p not in seen]
+        if new_files:
             try:
-                return json.loads(argv_files[-1].read_text())
+                return json.loads(new_files[-1].read_text())
             except json.JSONDecodeError:
                 pass  # The fake is still writing; the next pass reads the whole file.
         time.sleep(0.1)
-    raise AssertionError(f"no launch of {project} after the first {seen} under {state_dir}")
+    raise AssertionError(f"no new launch of {project} under {state_dir}")
 
 
 def open_desktop_launch(browser: AgentBrowser, project: str) -> None:
