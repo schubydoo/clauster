@@ -566,6 +566,10 @@ class PollLoop:
             # The type only: the walk reads argvs, which hold the session URL. The list still
             # publishes unlinked, so one bad read cannot freeze a stale "still running".
             _log.warning("could not link surviving sessions: %s", type(exc).__name__)
+            # No prune this tick: it deletes a card, and nothing now says which crashed row
+            # still has a survivor.
+            self._sessions = reconciled
+            return
         self._sessions = reconciled
         # Drop a non-live managed instance whose project has a live EXTERNAL session:
         # the bridge IS alive, just unmanaged (flag-form/tmux), so the persisted record
@@ -906,6 +910,7 @@ class PollLoop:
         """Run ``poll_once`` on the configured interval, logging and continuing on error."""
         interval = self._config.claude.agents_json_poll_interval_seconds
         while True:
+            published = self._sessions
             try:
                 await self.poll_once()
             except asyncio.CancelledError:
@@ -914,8 +919,10 @@ class PollLoop:
                 # Never let an unexpected error kill the daemon's poll loop, but make
                 # it observable — a silent `pass` here hid status-reconcile failures.
                 _log.exception("poll_once failed; continuing")
-                # As on a failed cross-check: a tick that died cannot support "still running".
-                inspector.clear_orphan_links(self._sessions)
+                # As on a failed cross-check: a tick that died before it published a fresh
+                # list cannot support "still running".
+                if self._sessions is published:
+                    inspector.clear_orphan_links(self._sessions)
             await asyncio.sleep(interval)
 
     async def start_poll_loop(self) -> None:

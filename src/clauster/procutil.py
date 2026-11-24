@@ -838,18 +838,27 @@ def is_bridge_process(pid: int) -> bool:
 _MAX_BRIDGE_ANCESTRY = 1
 
 
+def _is_session_worker(argv: list[str]) -> bool:
+    """Whether an argv is a bridge's session child: ``--print`` and ``--sdk-url`` together.
+
+    Both, because a project may be named ``--sdk-url``, and a bridge carries its name as a
+    value of ``--name``.
+    """
+    return "--print" in argv and "--sdk-url" in argv
+
+
 def session_child_debug_file(pid: int) -> tuple[str, Path] | None:
     """Return a bridge session child's ``(session id, --debug-file)``, or ``None``.
 
-    Only a process with ``--sdk-url`` is a bridge session child. The argv also holds that
-    URL, so this returns the two values and nothing else, and a caller must never log the
-    argv. Fails closed on a gone, denied or zombie process and on a missing flag.
+    The argv of a session child also holds its session URL, so this returns the two values
+    and nothing else, and a caller must never log the argv. Fails closed on a gone, denied
+    or zombie process and on a missing flag.
     """
     try:
         argv = psutil.Process(pid).cmdline()
     except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, ValueError, OSError):
         return None
-    if "--sdk-url" not in argv:
+    if not _is_session_worker(argv):
         return None
     values = []
     for flag in ("--session-id", "--debug-file"):
@@ -896,12 +905,12 @@ def bridge_ancestor(pid: int, *, max_depth: int = _MAX_BRIDGE_ANCESTRY) -> int |
             # both predicates.
             if is_keeper_cmdline(cmdline):
                 return None
-            # `--sdk-url` marks a session worker, which is never a bridge. The match is a
-            # substring test and the worker's --debug-file starts with the project name, so
-            # a project called `my-remote-control-app` read as its own bridge (TASK-562).
+            # A session worker is never a bridge. The match is a substring test and the
+            # worker's --debug-file starts with the project name, so a project called
+            # `my-remote-control-app` read as its own bridge (TASK-562).
             if (
                 proc.status() != psutil.STATUS_ZOMBIE
-                and "--sdk-url" not in cmdline
+                and not _is_session_worker(cmdline)
                 and is_bridge_cmdline(cmdline)
             ):
                 return proc.pid

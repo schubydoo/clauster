@@ -22,6 +22,7 @@ SESSION_ID = "cse_01VxAGVrNRB2vvCQwQziTr4a"
 LOG_DIR = Path("/logs")
 BRIDGE_LOG = LOG_DIR / "alpha-1795127464176-1.log"
 CHILD_LOG = LOG_DIR / f"alpha-1795127464176-1-{SESSION_ID}.log"
+_WORKER = ["claude", "--print", "--sdk-url", "u"]
 
 
 def _session(pid=500, cwd="/projects/alpha", attribution=Attribution.EXTERNAL, parent=None):
@@ -59,16 +60,14 @@ class _Proc:
 @pytest.mark.parametrize(
     ("argv", "expected"),
     [
-        (
-            ["claude", "--sdk-url", "u", "--session-id", "s", "--debug-file", "/l/a.log"],
-            ("s", Path("/l/a.log")),
-        ),
+        ([*_WORKER, "--session-id", "s", "--debug-file", "/l/a.log"], ("s", Path("/l/a.log"))),
         # A hand-run session with a debug file is not a bridge child.
-        (["claude", "--session-id", "s", "--debug-file", "/l/a.log"], None),
-        (["claude", "--sdk-url", "u", "--debug-file", "/l/a.log"], None),
-        (["claude", "--sdk-url", "u", "--session-id", "s"], None),
-        (["claude", "--sdk-url", "u", "--session-id", "s", "--debug-file"], None),
-        (["claude", "--sdk-url", "u", "--session-id", "", "--debug-file", "/l/a.log"], None),
+        (["claude", "--print", "--session-id", "s", "--debug-file", "/l/a.log"], None),
+        (["claude", "--sdk-url", "u", "--session-id", "s", "--debug-file", "/l/a.log"], None),
+        ([*_WORKER, "--debug-file", "/l/a.log"], None),
+        ([*_WORKER, "--session-id", "s"], None),
+        ([*_WORKER, "--session-id", "s", "--debug-file"], None),
+        ([*_WORKER, "--session-id", "", "--debug-file", "/l/a.log"], None),
     ],
 )
 def test_session_child_debug_file_reads_only_a_complete_child_argv(monkeypatch, argv, expected):
@@ -417,6 +416,79 @@ def test_session_worker_is_not_its_own_bridge_when_the_project_name_matches():
     finally:
         child.kill()
         child.wait(timeout=5)
+
+
+def test_bridge_for_a_project_named_like_the_worker_flag_is_still_a_bridge():
+    argv = ["-c", "import time; time.sleep(30)", "claude", "remote-control", "--name", "--sdk-url"]
+    child = subprocess.Popen([sys.executable, *argv])
+    try:
+        deadline = time.monotonic() + 10
+        while "--sdk-url" not in psutil.Process(child.pid).cmdline():
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        assert procutil.bridge_ancestor(child.pid, max_depth=0) == child.pid
+    finally:
+        child.kill()
+        child.wait(timeout=5)
+
+
+async def test_prune_counts_a_proven_row_and_keeps_its_stopped_sibling(
+    runner_config, monkeypatch, children
+):
+    holder = {}
+    runner, inst = _runner(runner_config, monkeypatch, lambda *a, **k: holder["s"])
+    sibling = RemoteControlInstance(project="alpha", label="old", status=InstanceStatus.STOPPED)
+    runner._instances[sibling.instance_id] = sibling
+    alpha = runner._discovered()["alpha"].path
+    holder["s"] = [_session(cwd=str(alpha)), _session(pid=600, cwd=str(alpha))]
+    children[600] = None
+    monkeypatch.setattr(procutil, "bridge_ancestor", lambda pid: 77 if pid == 600 else None)
+
+    await runner.poll_once()
+
+    assert {inst.instance_id, sibling.instance_id} <= set(runner._instances)
+
+
+async def test_failed_link_step_does_not_prune_the_crashed_row(
+    runner_config, monkeypatch, children
+):
+    holder = {}
+    runner, inst = _runner(runner_config, monkeypatch, lambda *a, **k: holder["s"])
+    alpha = runner._discovered()["alpha"].path
+    holder["s"] = [_session(cwd=str(alpha)), _session(pid=600, cwd=str(alpha))]
+    children[600] = None
+    monkeypatch.setattr(procutil, "bridge_ancestor", lambda pid: 77 if pid == 600 else None)
+
+    def _fail(sessions, logs):
+        raise OSError(24, "too many open files")
+
+    monkeypatch.setattr("clauster.poll_loop.inspector.link_orphans", _fail)
+
+    await runner.poll_once()
+
+    assert inst.instance_id in runner._instances
+    assert runner._sessions == holder["s"]
+
+
+async def test_tick_that_dies_after_publishing_keeps_its_fresh_links(runner_config, monkeypatch):
+    runner, inst = _runner(runner_config, monkeypatch, lambda *a, **k: [])
+    inst.status = InstanceStatus.CRASHED
+    fresh = _session(attribution=Attribution.ORPHANED, parent=inst.instance_id)
+
+    async def _publish_then_die(**kwargs):
+        runner._poll_loop._sessions = [fresh]
+        raise OSError("later step failed")
+
+    async def _stop(_seconds):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(runner._poll_loop, "poll_once", _publish_then_die)
+    monkeypatch.setattr("clauster.poll_loop.asyncio.sleep", _stop)
+
+    with pytest.raises(asyncio.CancelledError):
+        await runner._poll_loop._poll_forever()
+
+    assert fresh.attribution is Attribution.ORPHANED
 
 
 async def test_prune_keeps_a_crashed_row_with_a_linked_survivor(
