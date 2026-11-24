@@ -176,7 +176,8 @@ Common mechanics across the modal:
   mask secret-shaped values on read. The MCP surface also masks every `env`
   and `headers` value, the `headersHelper` command, and the strings in
   `oauth`, whatever their key names. It also masks the query values, the fragment and the token-like path
-  segments of a server `url`. A masked value left untouched keeps the stored
+  segments of a server `url`, and the value of a secret-named flag in `args`
+  (best effort, see [MCP server definitions](#mcp-server-definitions)). A masked value left untouched keeps the stored
   secret on write. If
   Clauster cannot match a mask to its stored value, it refuses the save and
   writes nothing. The CLAUDE.md surface and the `permissions` rules return the
@@ -272,11 +273,35 @@ or a `${...}` reference, shows as one `********`. A URL path segment or query
 key shorter than 20 characters is not masked if it has fewer than 8 letters and
 digits, or only letters, or only digits. Do not put a secret there.
 
+The value of a secret-named flag in `args` shows as `********`. A flag is
+secret-named when its name holds `token`, `secret`, `password`, `passwd`,
+`api-key`, `api_key`, `apikey`, `auth`, `credential` or `bearer`, in any letter
+case. For example, `--api-key=abc` shows as `--api-key=********`. If the flag
+and its value are two items (`--token`, `abc`), the second item shows as
+`********`.
+
+This masking is best effort, because Clauster reads only the flag name. These
+values show in clear, so put a secret in `env`, which is always masked:
+
+- A secret after a flag with another name, or in an item with no flag.
+- A separate value that starts with `-`, because it reads as the next flag.
+- The item after a `--no-...` flag, because such a flag takes no value.
+
+A flag that is not a credential can match too. For example, the value of
+`--max-tokens` also shows as `********`.
+
+This masking applies to the editor views only. Claude Code 2.1.330 does not
+write the `args` of a server to its debug log, but it does write what the server
+prints to stderr. If a server prints its own `args`, the value can show in the
+bridge log stream in the dashboard.
+
 If you leave the mask in place, the save keeps the stored value. A `url` that
 holds a mask keeps the stored URL only when every visible character of it is
 unchanged. Clauster compares the text exactly. If you change any part of such a
 URL, for example the host, the path, or a query key, the save is refused
-(`422`). Type the full URL again. If you change the `type` or a URL of a
+(`422`). Type the full URL again. An `args` item that holds a mask keeps the
+stored item only at the same place and with every visible character unchanged.
+If you change the `type` or a URL of a
 remote server, or the `command` or `args` of a stdio server, the save cannot
 keep a masked value (see the list below). The save also cannot keep a mask that
 has no stored value behind it, for example in a row that you renamed. In both
@@ -597,8 +622,10 @@ Each field is masked as the tab that owns its shape masks it:
 - In an inline `mcpServers` definition, every `env` and `headers` value, a
   `headersHelper` command, a URL with a user name or password, and the query
   values and token-like path segments of a `url` are masked, as on the MCP
-  tab. A server name is not a secret, so a server called `oauth-gw` keeps its
-  `type` and the plain parts of its `url` visible.
+  tab. The value of a
+  [secret-named flag in `args`](#mcp-server-definitions) is masked too, with
+  the same limits. A server name is not a secret, so a server called `oauth-gw`
+  keeps its `type` and the plain parts of its `url` visible.
 - In `hooks`, the parts of a hook URL and the `headers` values that the
   [Hooks tab](#the-hooks-tab) masks are masked.
 - Every non-empty `env` value is masked.
@@ -686,18 +713,21 @@ In the frontmatter of `SKILL.md`, the Skills editor also masks each value that
 the MCP and Hooks tabs mask, whatever its key name. In `mcpServers`, every
 `headers` and `env` value and a `headersHelper` command show as `********`. For
 example, `headers: {X-Custom: abc}` shows as `headers: {X-Custom: ********}`.
-An `args` item is not masked by its place in the file. It shows in clear unless
-the line masking above masks it, for example a `${...}` reference, a URL with a
-user name or password, or a list item such as `- --token=abc`. In a flow list,
-`[--token=abc]` shows in clear, as it does on the MCP tab. In `hooks`, every
-`headers` value shows as `********`.
+In `mcpServers`, the value of a
+[secret-named flag in `args`](#mcp-server-definitions) is masked as on the
+MCP tab, with the same limits, in a block list, a flow list and a quoted item.
+For example, `args: ["--token=abc"]` shows as `args: ["--token=********"]`. Any
+other `args` item shows in clear unless the line masking above masks it, for
+example a `${...}` reference or a URL with a user name or password. In `hooks`,
+every `headers` value shows as `********`.
 The editor also reads each frontmatter value as YAML loads it, as the MCP and
 Hooks tabs do. A value that is written with an escape (such as `\x40` for `@`
 or `\x2d` for `-`, also an escaped line break) or as `!!binary` is masked when
 its loaded text, read on its own, holds what the line masking above masks: a
 `${...}` reference, a URL with a user name or password, or a line such as
-`--api-key=abc`. Such a value can therefore be masked where the same text,
-written without the escape, shows in clear, such as `[--token=abc]` above.
+`--api-key=abc`. Outside `mcpServers`, such a value can therefore be masked
+where the same text, written without the escape, shows in clear, such as a flow
+list `[--token=abc]`.
 A `url` value written as `!!binary` shows
 as `********`. In `mcpServers` and `hooks`, a
 value under a key that looks secret shows as `********`, also when the key looks

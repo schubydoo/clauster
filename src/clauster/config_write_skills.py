@@ -1949,8 +1949,9 @@ def _url_nodes(root: yaml.Node) -> list[yaml.ScalarNode]:
 #: for each, the keys anywhere under it whose values are masked whole. The MCP tab masks
 #: every ``env`` and ``headers`` value and a ``headersHelper`` (``_redact_entry``), and the
 #: Hooks tab every hook ``headers`` value (TASK-529). ``args`` is not here: an ``args`` item
-#: is masked only when its loaded value is secret-shaped, as the MCP tab shows it
-#: (:func:`_secret_shaped_nodes`, TASK-535).
+#: is masked only when its loaded value is secret-shaped (:func:`_secret_shaped_nodes`,
+#: TASK-535) or is the value of a secret-named flag (:func:`_secret_arg_views`, TASK-558),
+#: as the MCP tab shows it.
 _MASKED_UNDER = {
     "mcpServers": frozenset({"env", "headers", "headersHelper"}),
     "hooks": frozenset({"headers"}),
@@ -2108,6 +2109,43 @@ def _secret_shaped_nodes(root: yaml.Node, source: str) -> list[tuple[yaml.Scalar
     return list(found.values())
 
 
+def _secret_arg_views(root: yaml.Node) -> list[tuple[yaml.ScalarNode, str]]:
+    """Return each ``args`` item of an ``mcpServers`` field to mask, with its view.
+
+    Every ``args`` sequence at any depth under the field is read as the MCP tab reads it
+    (:func:`~clauster.config_write.mask_secret_args`, TASK-558), from its loaded text, so
+    the block, flow and quoted forms give one result. A sequence reached through an alias
+    or a merge key is read once. Iterative, with a visited set, so a cyclic graph ends.
+    """
+    wanted = _MASKED_UNDER["mcpServers"]
+    stack: list[yaml.Node] = [value for value, keys in _field_values(root) if keys == wanted]
+    seen: set[int] = set()
+    found: dict[int, tuple[yaml.ScalarNode, str]] = {}
+    while stack:
+        node = stack.pop()
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        if isinstance(node, yaml.SequenceNode):
+            stack += node.value
+        elif isinstance(node, yaml.MappingNode):
+            for key, value in node.value:
+                stack.append(value)
+                if (
+                    isinstance(key, yaml.ScalarNode)
+                    and key.value == "args"
+                    and isinstance(value, yaml.SequenceNode)
+                ):
+                    texts = [
+                        n.value if isinstance(n, yaml.ScalarNode) else None for n in value.value
+                    ]
+                    shown = cw.mask_secret_args(texts)
+                    for item, text, view in zip(value.value, texts, shown, strict=True):
+                        if view != text:
+                            found[id(item)] = (item, view)
+    return list(found.values())
+
+
 def _shaped(text: str) -> bool:
     """Whether the line masker masks ``text``, read as lines or as one whole text.
 
@@ -2186,7 +2224,9 @@ def _mask_header_values(header: str, *, readable: bool) -> str:
     anywhere whose loaded text the line masker masks, a value under a secret key in those
     fields, a ``!!binary`` ``url``) is masked as well: as the sentinel under a key that looks
     secret and for such a ``url``, else in place as the line masker masks it
-    (:func:`_shape_view`, TASK-535). Each is found by its node in the composed YAML, so a
+    (:func:`_shape_view`, TASK-535). So is the value of a secret-named flag in an
+    ``mcpServers`` ``args`` list (:func:`_secret_arg_views`, TASK-558). Each is found by its
+    node in the composed YAML, so a
     value in a flow mapping, behind an alias, or under a merge key is found as well as a
     plain ``key: value`` line. Where the value's source text is one line and reads as the
     value (a plain scalar, or a quoted one with no escape), only that text is replaced: for
@@ -2251,6 +2291,10 @@ def _mask_header_values(header: str, *, readable: bool) -> str:
         if id(node) not in taken:
             taken.add(id(node))
             views.append((node, cw.REDACTION_SENTINEL if by_key else _shape_view(node.value)))
+    for node, shown in _secret_arg_views(root):
+        if id(node) not in taken:
+            taken.add(id(node))
+            views.append((node, shown))
     for node in _url_nodes(root):
         if id(node) not in taken:
             views.append((node, mask_url(node.value)))
