@@ -3141,8 +3141,9 @@ whole save:</p>
   <code>async: yes</code>, <code>timeout: 1_000</code> or <code>timeout: 010</code> inside <code>hooks</code>, and
   <code>DEBUG: yes</code> inside an MCP server's <code>env</code>. Other examples are <code>1:30</code>,
   <code>0b101</code>, <code>1e3</code>, <code>0o17</code>, and a tagged value such as <code>!!int "10"</code>, which the
-  two read differently. Write <code>true</code>, <code>false</code> or a plain decimal. If the value
-  must stay text, quote it.</li>
+  two read differently. A number past the range of a JavaScript number (about
+  1.8e308) is refused too. Write <code>true</code>, <code>false</code> or a plain decimal inside that
+  range. If the value must stay text, quote it.</li>
 <li>A <code>#</code> with no space before it, right after a quoted value or a bracket, such
   as <code>"a"#b</code>, <code>[x]#b</code> or <code>[a,#c</code>. YAML 1.2 refuses it, so Claude Code reads a
   changed copy of the frontmatter, or none of it. Put a space before the <code>#</code>.</li>
