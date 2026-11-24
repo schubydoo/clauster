@@ -15,6 +15,8 @@ before it leaves the process on the ``bg-settled`` event (invariant 4).
 from __future__ import annotations
 
 import asyncio
+import os
+import stat
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
@@ -234,11 +236,18 @@ def _resume_ceiling_refusal(config: ClausterConfig, cwd: Path, permission_mode: 
     job's real directory (:func:`_projects_holding`), so overlapping project
     directories (one symlinked inside another) can only make the gate stricter, never
     depend on the order of the ``projects:`` keys. A job in no project has no ceiling
-    and is refused (fail closed).
+    and is refused (fail closed). When ``projects_root`` cannot be listed, the refusal
+    names the listing error instead (TASK-487): the job may well be in a project.
     """
     if permission_mode not in CEILING_GATED_MODES:
         return None
-    projects = _projects_holding(config, cwd)
+    try:
+        projects = _projects_holding(config, cwd)
+    except _ProjectsRootUnlistable as exc:
+        return (
+            f"{permission_mode} is not enabled for this background job: Clauster could not "
+            f"list projects_root to find the project that holds its directory ({exc})."
+        )
     if not projects:
         return (
             f"{permission_mode} is not enabled for this background job: its directory is in "
@@ -251,18 +260,45 @@ def _resume_ceiling_refusal(config: ClausterConfig, cwd: Path, permission_mode: 
     return None
 
 
+class _ProjectsRootUnlistable(Exception):
+    """``projects_root`` could not be listed; the message names the error, not the path."""
+
+
+def _is_link_entry(entry: os.DirEntry[str]) -> bool:
+    """Return whether ``entry`` is a symlink, or a junction or other reparse point on Windows.
+
+    Both come from the directory listing itself, with no call that touches the entry's
+    target on Windows, or on POSIX when the file system reports the entry type. On Windows
+    a junction is not a symlink to ``is_symlink()``, so the reparse-point attribute decides.
+    """
+    if entry.is_symlink():
+        return True
+    if os.name != "nt":
+        return False
+    attributes = getattr(entry.stat(follow_symlinks=False), "st_file_attributes", 0)
+    return bool(attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+
+
 def _projects_holding(config: ClausterConfig, cwd: Path) -> list[str]:
     """Return every project whose directory holds ``cwd``, sorted; empty if none.
 
     The candidates are every entry directly under ``projects_root``, configured or not
-    and symlinked or not (an entry with no config entry has no ceiling), the first path
-    part of the resolved ``cwd`` under the resolved ``projects_root``, and each valid
-    ``config.projects`` key (which can point outside the root through a symlink).
-    Both sides are compared after ``resolve()``, so ``..`` and symlinks cannot move a
-    job into a project it does not run in, a symlink alias under ``projects_root`` (one
-    project directory reached under two names) brings in the alias's own ceiling, and a
-    directory name is never matched by name alone: ``/tmp/<name>`` does not borrow
-    ``<name>``'s ceiling. An unresolvable ``cwd`` matches nothing (fail closed).
+    (an entry with no config entry has no ceiling), the first path part of the resolved
+    ``cwd`` under the resolved ``projects_root``, and each valid ``config.projects`` key
+    (which can point outside the root through a symlink). Both sides are compared after
+    ``resolve()``, so ``..`` and symlinks cannot move a job into a project it does not run
+    in, a symlink alias under ``projects_root`` (one project directory reached under two
+    names) brings in the alias's own ceiling, and a directory name is never matched by name
+    alone: ``/tmp/<name>`` does not borrow ``<name>``'s ceiling. An unresolvable ``cwd``
+    matches nothing (fail closed).
+
+    Only an entry that is a symlink or junction is resolved (TASK-487). A plain directory
+    resolves to ``<resolved projects_root>/<name>``, which the first-part check already
+    covers, and resolving it would touch it: a hung network mount there would block the
+    check. This bounds only the unconfigured plain-directory entries: ``projects_root``,
+    ``cwd``, every symlink entry and every configured key are still resolved, so a hung
+    mount there can still block. A listing failure raises
+    :class:`_ProjectsRootUnlistable` so the refusal can name it.
     """
     found: set[str] = set()
     # A NUL byte is never a real directory. POSIX resolve() raises ValueError on it, but
@@ -274,9 +310,19 @@ def _projects_holding(config: ClausterConfig, cwd: Path) -> list[str]:
         root = config.projects_root.resolve()
         if root in resolved.parents:
             found.add(resolved.relative_to(root).parts[0])
-        for entry in config.projects_root.iterdir():
+        try:
+            with os.scandir(config.projects_root) as listing:
+                entries = list(listing)
+        except OSError as exc:
+            # The class and the OS reason only: str(exc) also names the path.
+            raise _ProjectsRootUnlistable(
+                f"{type(exc).__name__}: {exc.strerror or 'no reason given'}"
+            ) from exc
+        for entry in entries:
+            if not _is_link_entry(entry):
+                continue
             try:
-                base = entry.resolve()
+                base = Path(entry.path).resolve()
             except RuntimeError:
                 # A symlink loop (3.11/3.12 raise) leads to no directory, so it cannot
                 # hold the job. Any other resolve error refuses the resume (outer except).

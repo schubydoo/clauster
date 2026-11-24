@@ -1246,8 +1246,9 @@ whole save:
   `async: yes`, `timeout: 1_000` or `timeout: 010` inside `hooks`, and
   `DEBUG: yes` inside an MCP server's `env`. Other examples are `1:30`,
   `0b101`, `1e3`, `0o17`, and a tagged value such as `!!int "10"`, which the
-  two read differently. Write `true`, `false` or a plain decimal. If the value
-  must stay text, quote it.
+  two read differently. A number past the range of a JavaScript number (about
+  1.8e308) is refused too. Write `true`, `false` or a plain decimal inside that
+  range. If the value must stay text, quote it.
 - A `#` with no space before it, right after a quoted value or a bracket, such
   as `"a"#b`, `[x]#b` or `[a,#c`. YAML 1.2 refuses it, so Claude Code reads a
   changed copy of the frontmatter, or none of it. Put a space before the `#`.

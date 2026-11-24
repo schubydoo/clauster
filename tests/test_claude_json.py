@@ -81,6 +81,13 @@ UNPARSEABLE = [
     pytest.param(b'"' + _SECRET.encode() + b'"', id="string-root"),
     pytest.param(b"5", id="number-root"),
     pytest.param(b"null", id="null-root"),
+    # Python's parser accepts these bare words, JSON and the CLI's JSON.parse do not (TASK-484).
+    pytest.param(b'{"n": Infinity, "token": "' + _SECRET.encode() + b'"}', id="infinity"),
+    pytest.param(b'{"n": [-Infinity]}', id="minus-infinity"),
+    pytest.param(b'{"n": NaN}', id="nan"),
+    # Valid JSON, but float() reads it as inf, and the old render wrote it back as the bare
+    # word Infinity: a trust write broke the file for the CLI.
+    pytest.param(b'{"n": 1e400, "m": -2.5E+999}', id="past-double-range"),
 ]
 
 
@@ -117,6 +124,9 @@ def test_update_claude_json_unparseable_leaves_an_existing_backup_alone(tmp_path
     assert backup.read_bytes() == b'{"older": true}'
 
 
+_NON_FINITE_REASON = r"\(it holds Infinity, NaN or a number too large for Clauster to write back\)"
+
+
 @pytest.mark.parametrize(
     ("content", "reason"),
     [
@@ -128,10 +138,20 @@ def test_update_claude_json_unparseable_leaves_an_existing_backup_alone(tmp_path
         # fails at end of input instead. The RecursionError arm is pinned in the next test.
         (b"[" * 100_000, "nested too deeply|invalid JSON at line 1 column 100001"),
         (b"[]", "the top level is not a JSON object"),
+        (b'{"a": {"b": NaN}}', _NON_FINITE_REASON),
+        (b'{"a": [1.5, 1e400]}', _NON_FINITE_REASON),
     ],
     # Explicit ids: pytest puts the test id in PYTEST_CURRENT_TEST, and a 100,000-byte
     # payload id exceeds the 32,767-character Windows limit for one environment variable.
-    ids=["malformed", "non-utf8", "oversized-int", "deeply-nested", "array-root"],
+    ids=[
+        "malformed",
+        "non-utf8",
+        "oversized-int",
+        "deeply-nested",
+        "array-root",
+        "nan",
+        "past-double-range",
+    ],
 )
 def test_unparseable_reason_names_the_failure(tmp_path: Path, content: bytes, reason: str) -> None:
     f = tmp_path / "claude.json"
@@ -145,12 +165,54 @@ def test_recursion_error_names_the_nesting(tmp_path: Path, monkeypatch) -> None:
     f = tmp_path / "claude.json"
     f.write_bytes(b"{}")
 
-    def _overflow(_text: str) -> None:
+    def _overflow(_text: str, **_kwargs) -> None:
         raise RecursionError("maximum recursion depth exceeded")
 
     monkeypatch.setattr(cj.json, "loads", _overflow)
     with pytest.raises(cj.ClaudeJsonUnparseable, match="nested too deeply"):
         cj.update_claude_json(f, lambda data: None)
+    assert f.read_bytes() == b"{}"
+
+
+@pytest.mark.parametrize("value", [float("inf"), float("-inf"), float("nan")])
+@pytest.mark.parametrize("existing", [True, False], ids=["existing-file", "new-file"])
+def test_update_claude_json_refuses_to_write_a_non_finite_number(
+    tmp_path: Path, value: float, existing: bool
+) -> None:
+    # TASK-484: json.dumps wrote the bare word Infinity, which is not JSON, so the next read
+    # by Clauster or by Claude Code would refuse the whole file. Now nothing is written.
+    f = tmp_path / "claude.json"
+    content = b'{"keep": 1}'
+    if existing:
+        f.write_bytes(content)
+
+    with pytest.raises(cj.ClaudeJsonNotFinite) as info:
+        cj.update_claude_json(f, lambda data: data.__setitem__("n", {"deep": [value]}))
+
+    if existing:
+        assert f.read_bytes() == content  # byte-identical
+    else:
+        assert not f.exists()
+    assert not f.with_suffix(f.suffix + ".bak").exists()  # refused before the backup, too
+    assert list(tmp_path.glob("claude.json.*.tmp")) == []
+    assert str(info.value) == (
+        f"Clauster did not change {f}: the update holds a number that JSON cannot store "
+        "(Infinity or NaN)."
+    )
+    assert isinstance(info.value, ValueError)
+
+
+def test_update_claude_json_circular_reference_is_not_called_non_finite(tmp_path: Path) -> None:
+    # json.dumps raises ValueError for a circular reference as well: it is not mislabelled.
+    f = tmp_path / "claude.json"
+    f.write_bytes(b"{}")
+    loop: list = []
+    loop.append(loop)
+
+    with pytest.raises(ValueError, match="Circular reference") as info:
+        cj.update_claude_json(f, lambda data: data.__setitem__("loop", loop))
+
+    assert not isinstance(info.value, cj.ClaudeJsonNotFinite)
     assert f.read_bytes() == b"{}"
 
 
@@ -162,6 +224,23 @@ def test_update_claude_json_valid_object_still_writes(tmp_path: Path) -> None:
     assert cj.update_claude_json(f, lambda data: data.__setitem__("k", 1)) is True
 
     assert json.loads(f.read_text(encoding="utf-8")) == {"keep": 1, "k": 1}
+
+
+def test_update_claude_json_keeps_finite_floats(tmp_path: Path) -> None:
+    # Positive control for the parse_float hook: an ordinary or huge-but-finite float reads
+    # and writes back as the same number.
+    f = tmp_path / "claude.json"
+    f.write_bytes(b'{"a": 1.5, "b": 1e308, "c": -0.0, "d": 5e-324}')
+
+    assert cj.update_claude_json(f, lambda data: data.__setitem__("k", 1)) is True
+
+    assert json.loads(f.read_text(encoding="utf-8")) == {
+        "a": 1.5,
+        "b": 1e308,
+        "c": -0.0,
+        "d": 5e-324,
+        "k": 1,
+    }
 
 
 def test_update_claude_json_unreadable_propagates_not_clobbered(

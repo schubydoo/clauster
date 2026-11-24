@@ -53,9 +53,11 @@ import datetime
 import fnmatch
 import hashlib
 import json
+import logging
 import math
 import re
 import sys
+import traceback
 from collections.abc import Callable, Iterable, Iterator
 from decimal import Decimal
 from pathlib import Path
@@ -67,9 +69,16 @@ from yaml.composer import ComposerError
 from yaml.parser import ParserError
 from yaml.scanner import ScannerError
 
-from .claude_json import ClaudeJsonUnparseable, locked_replace_json_file, update_claude_json
+from .claude_json import (
+    ClaudeJsonNotFinite,
+    ClaudeJsonUnparseable,
+    locked_replace_json_file,
+    update_claude_json,
+)
 from .config import ClausterConfig
 from .discovery import is_valid_project_name
+
+_log = logging.getLogger("clauster.config_write")
 
 Scope = Literal["project", "user", "local"]
 
@@ -1237,11 +1246,13 @@ def update_claude_json_or_invalid(claude_json: Path, apply: Callable[[dict], obj
     The config-write entry to the shared ``~/.claude.json`` transaction. A file that
     exists but is not a JSON object is left unchanged and surfaces as
     :class:`InvalidCandidateError` (→ 422), the same error :func:`read_nested_subtree`
-    raises for it, instead of escaping the routes' ``ConfigWriteError`` guard as a 500.
+    raises for it, instead of escaping the routes' ``ConfigWriteError`` guard as a 500. An
+    update that would write ``Infinity`` or ``NaN`` (:class:`ClaudeJsonNotFinite`) is the
+    same 422, with the file unchanged, as :func:`render_json` gives the other config files.
     """
     try:
         update_claude_json(claude_json, apply)
-    except ClaudeJsonUnparseable as exc:
+    except (ClaudeJsonUnparseable, ClaudeJsonNotFinite) as exc:
         raise InvalidCandidateError(str(exc)) from exc
 
 
@@ -2163,8 +2174,9 @@ def _yaml12_scalar(node: yaml.ScalarNode) -> Any:
     if _YAML12_OCT_RE.fullmatch(text) or _YAML12_HEX_RE.fullmatch(text):
         sign = -1 if text.startswith("-") else 1
         digits = text.lstrip("+-")
-        # Bases 8 and 16 have no digit limit, but past the double range JavaScript
-        # holds Infinity, and every later reader of this value assumes a double.
+        # Bases 8 and 16 have no digit limit. Past the double range a JavaScript number is
+        # Infinity, and every later reader of this value assumes a double. That Bun.YAML
+        # builds a number here, not a BigInt or a string, is an assumption: nobody probed it.
         value = sign * int(digits[2:], 8 if digits[1] == "o" else 16)
         try:
             float(value)
@@ -2178,8 +2190,10 @@ def _yaml12_scalar(node: yaml.ScalarNode) -> Any:
     return text
 
 
-def _yaml12_node(root: yaml.Node) -> Any:
+def _yaml12_node(root: yaml.Node, *, what: str) -> Any:
     """Build the YAML 1.2 value of ``root``, one value per composed node, iteratively.
+
+    ``what`` names the document in a refusal, as in the seam (``SKILL.md frontmatter``).
 
     Two passes, neither recursive, so a 1500-link ``<<`` chain or a deep nesting adds no
     stack frames: a depth-first walk lists every collection node once, children before
@@ -2237,7 +2251,7 @@ def _yaml12_node(root: yaml.Node) -> Any:
                 # PyYAML's load refuses such a key in a plain mapping, but `!!omap` and
                 # `!!pairs` build their pairs without hashing it (review on PR 1810).
                 raise InvalidCandidateError(
-                    "frontmatter has a list or a mapping as a key, which Claude Code "
+                    f"{what} has a list or a mapping as a key, which Claude Code "
                     "reads differently. Use a plain key"
                 )
             own[key] = value_of(value_node)
@@ -2623,7 +2637,7 @@ def cli_frontmatter_text(header: str) -> str:
     return retry
 
 
-def yaml12_view(header: str) -> Any:
+def yaml12_view(header: str, *, what: str) -> Any:
     """Return ``header`` as Claude Code's YAML 1.2 loader reads it, for comparison only.
 
     Clauster loads frontmatter with PyYAML, which reads YAML 1.1. The CLI (2.1.318) loads it
@@ -2642,13 +2656,14 @@ def yaml12_view(header: str) -> Any:
     anything. ``RecursionError`` is mapped to :class:`InvalidCandidateError` like the seam's,
     and so is a list or mapping key. A caller runs it inside :func:`refuse_check_failures`,
     so a node shape this view reads differently from PyYAML is a refusal, never a crash.
-    The header goes through :func:`cli_frontmatter_text` first, as in the seam.
+    The header goes through :func:`cli_frontmatter_text` first, as in the seam. ``what``
+    names the document in those refusals, as the seam's ``what`` does.
     """
     try:
         root = yaml.compose(cli_frontmatter_text(header), Loader=FrontmatterLoader)
-        return None if root is None else _yaml12_node(root)
+        return None if root is None else _yaml12_node(root, what=what)
     except RecursionError as exc:
-        raise InvalidCandidateError("frontmatter is nested too deeply to parse") from exc
+        raise InvalidCandidateError(f"{what} is nested too deeply to parse") from exc
 
 
 def _yaml_error_where(exc: yaml.YAMLError, line_offset: int = 0, *, block_name: str) -> str:
@@ -2836,7 +2851,9 @@ def refuse_check_failures(what: str) -> Iterator[None]:
     file (three rounds of Greptile on PR 1810). Every such check runs inside this, and
     :class:`InvalidCandidateError` passes through unchanged. Fails closed: it only turns a
     crash into a refusal. The message names the class only, never the payload, which can
-    quote the document (invariant 4).
+    quote the document (invariant 4). A WARNING log line records the class and the stack
+    frames, so a real bug in a check leaves a trace; it leaves out the exception message
+    for the same reason.
     """
     try:
         yield
@@ -2845,6 +2862,13 @@ def refuse_check_failures(what: str) -> Iterator[None]:
     except RecursionError as exc:
         raise InvalidCandidateError(f"{what} is nested too deeply to check") from exc
     except _CHECK_FAILURES as exc:
+        # format_tb gives the frames only (file, line, code), never str(exc).
+        _log.warning(
+            "a check of %s raised %s and was refused; stack:\n%s",
+            what,
+            type(exc).__name__,
+            "".join(traceback.format_tb(exc.__traceback__)).rstrip(),
+        )
         raise InvalidCandidateError(
             f"{what} has YAML this editor cannot compare with what Claude Code reads "
             f"({type(exc).__name__}). Quote the unusual keys and values, or remove them"
@@ -2907,8 +2931,9 @@ def _refuse_after_load(
                 f"{what} has a nested value at line {mark.line + 1 + line_offset}, column "
                 f"{mark.column + 1} that YAML 1.1 reads as a boolean or a number and the YAML "
                 "1.2 that Claude Code reads does not, or not as the same number (yes, on, "
-                "010, 0b101, 1_000 and 1:30 are such spellings). Quote it, or write true, "
-                "false or a plain decimal"
+                "010, 0b101, 1_000 and 1:30 are such spellings, and so is a number past "
+                "the range of a JavaScript number, about 1.8e308). Quote it, or write true, "
+                "false or a plain decimal inside that range"
             )
 
 

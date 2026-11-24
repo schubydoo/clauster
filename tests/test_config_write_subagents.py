@@ -437,7 +437,7 @@ def test_quoted_yaml_keyword_name_saves_and_reads_back_as_the_name(
     assert doc["exists"] is True and doc["editable"] is True
     assert doc["frontmatter"]["name"] == name
     assert yaml.safe_load(header)["name"] == name
-    assert cw.yaml12_view(header)["name"] == name
+    assert cw.yaml12_view(header, what="frontmatter")["name"] == name
 
 
 @pytest.mark.parametrize("name", _YAML_KEYWORD_NAMES)

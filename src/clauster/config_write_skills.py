@@ -1109,7 +1109,7 @@ def _check_skill_md(content: str) -> dict[str, Any]:
     if header is None:
         return validate_frontmatter({})
     with cw.refuse_check_failures(f"{SKILL_FILENAME} frontmatter"):
-        view = cw.yaml12_view(header)
+        view = cw.yaml12_view(header, what=f"{SKILL_FILENAME} frontmatter")
         readings = validate_frontmatter({} if view is None else _js_keys(view))
         pyyaml_readings = _field_readings(frontmatter)
     differing = sorted(
@@ -1171,7 +1171,7 @@ def _ignorable_keys(text: str) -> list[str] | None:
     try:
         _frontmatter, header, _ = _split_skill_md(text)
         with cw.refuse_check_failures(f"{SKILL_FILENAME} frontmatter"):
-            view = cw.yaml12_view(header) if header else None
+            view = cw.yaml12_view(header, what=f"{SKILL_FILENAME} frontmatter") if header else None
             mapping = _js_keys(view) if isinstance(view, dict) else {}
             readings = _field_readings(mapping)
     except cw.InvalidCandidateError:

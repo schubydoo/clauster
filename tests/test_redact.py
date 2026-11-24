@@ -9,6 +9,12 @@ import pytest
 from _growth import assert_linear_time
 from clauster import redact
 
+#: Units for the linear-time checks below: 16 of them make 100k repeats of each test's unit
+#: (200k to 2.5M characters). At 1,250 a part
+#: took about 0.1 ms, so one scheduling stall on a shared macOS runner decided the ratio
+#: (a strip_ansi run failed there at 8.1x while it is linear, 2x per doubling).
+_LINEAR_UNIT = 6_250
+
 
 def test_strip_ansi():
     assert redact.strip_ansi("\x1b[31mred\x1b[0m text") == "red text"
@@ -56,7 +62,7 @@ def test_strip_ansi_is_linear_on_osc():
         hostile = "\x1b]" * units
         return lambda: redact.strip_ansi(hostile)
 
-    assert_linear_time(strip, unit=1_250)
+    assert_linear_time(strip, unit=_LINEAR_UNIT)
 
 
 def test_strip_ansi_keeps_an_osc8_label_that_is_itself_the_url():
@@ -1132,7 +1138,7 @@ def test_strip_ansi_is_linear_on_the_c1_string_introducers():
         hostile = "\x1b_" * units
         return lambda: redact.strip_ansi(hostile)
 
-    assert_linear_time(strip, unit=1_250)
+    assert_linear_time(strip, unit=_LINEAR_UNIT)
 
 
 def test_strip_ansi_leaves_bare_control_characters_alone():
@@ -1257,7 +1263,7 @@ def test_sanitize_line_is_linear_in_the_number_of_cuts():
         hostile = ("env_01ABCDEFGH\x07" + "x" * 10) * units
         return lambda: redact.sanitize_line(hostile)
 
-    assert_linear_time(sanitize, unit=1_250)
+    assert_linear_time(sanitize, unit=_LINEAR_UNIT)
 
 
 @pytest.mark.parametrize(
@@ -1347,7 +1353,7 @@ def test_a_cut_at_every_greedy_match_start_stays_linear():
         hostile = ("\x01sk-" + "A" * 16) * units
         return lambda: redact.sanitize_line(hostile)
 
-    assert_linear_time(sanitize, unit=2_500)
+    assert_linear_time(sanitize, unit=_LINEAR_UNIT)
 
 
 def _cut_spans_anchoring_every_cut(visible, cuts, opened, closed, keeps_prefix, _single_run):
