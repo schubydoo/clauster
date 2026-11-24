@@ -408,6 +408,25 @@ def test_transcript_viewer_has_sort_toggle_and_search(write_config):
     assert 'class="transcript-content small" x-text="t.content"' in page
 
 
+def test_transcript_error_is_announced_and_empty_text_names_the_applied_term(write_config):
+    # TASK-477: the error alert sits in a role=alert region that is mounted with the
+    # modal, outside every x-show, so filling it later is announced.
+    page = _client(write_config).get("/").text
+    region = page.index('<div role="alert">\n              <div class="alert alert-danger py-2"')
+    assert region < page.index('data-test="transcript-error"') < region + 120
+    # The empty-search text names appliedQ (the term the list on screen used), never the
+    # box text, which runs ahead of the list while a new term waits on the debounce.
+    no_match = page[page.index('data-test="transcript-no-matches"') :]
+    no_match = no_match[: no_match.index("</div>")]
+    assert "transcripts.appliedQ !== ''" in no_match
+    assert '<span x-text="transcripts.appliedQ"></span>' in no_match
+    assert "transcripts.q" not in no_match.replace("transcripts.queryTooShort", "")
+    no_turns = page[page.index('data-test="transcript-no-turns"') :]
+    no_turns = no_turns[: no_turns.index("</div>")]
+    assert "transcripts.appliedQ === ''" in no_turns
+    assert "transcripts.q" not in no_turns.replace("transcripts.queryTooShort", "")
+
+
 def test_clone_progressbar_exposes_aria_value_attributes(write_config):
     # #607 (a11y): the New-project clone bar is a real ARIA progressbar. It carries
     # role + min/max always, binds aria-valuenow during the determinate phase, and

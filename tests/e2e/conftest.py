@@ -294,6 +294,24 @@ def bypass_server(
 
 
 @pytest.fixture
+def inherit_default_server(
+    tmp_path_factory: pytest.TempPathFactory, mutable_projects_tree: Path
+) -> Iterator[Server]:
+    """Like ``bypass_server``, with ``instance_defaults.permission_mode: inherit`` (TASK-480).
+
+    ``inherit`` is a ceiling-gated mode, so only ``gamma`` (the ceiling is on) offers it.
+    Function-scoped for the same reason as ``bypass_server``: the typed-confirm flow
+    trusts ``gamma``.
+    """
+    tmp = tmp_path_factory.mktemp("e2e-inherit")
+    extra = (
+        "instance_defaults:\n  permission_mode: inherit\n"
+        "projects:\n  gamma:\n    allow_bypass_permissions: true\n"
+    )
+    yield from _start_server(tmp, mutable_projects_tree, extra)
+
+
+@pytest.fixture
 def bridge_server(
     tmp_path_factory: pytest.TempPathFactory, mutable_projects_tree: Path
 ) -> Iterator[Server]:

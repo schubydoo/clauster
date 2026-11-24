@@ -9,10 +9,15 @@
    zone avoids). WCAG 2.4.3 note: visual order diverges from DOM/tab order only on opt-in
    non-default sorts; all interactive controls are self-contained within each row so
    keyboard navigation is coherent regardless of visual position. #}
+          {# TASK-480: a gated default mode (instance_defaults.permission_mode is
+             bypassPermissions or inherit) on a project without allow_bypass_permissions has
+             no <option> here, so the select showed blank and the launch failed with a 403.
+             Such a row starts at "default" (Ask each time) and says why, under the select. #}
+          {% set perm_default_gated = default_permission_mode in ceiling_gated_modes and not p.allow_bypass_permissions %}
           <div class="list-group-item" data-project="{{ p.name }}"
                x-show="projectVisible('{{ p.name }}', {{ idx }})" x-cloak
                :style="projectSort !== 'name' ? { order: projectOrderRank('{{ p.name }}') } : {}"
-               x-data="projectRow('{{ p.name }}')"
+               x-data="projectRow('{{ p.name }}', '{{ 'default' if perm_default_gated else default_permission_mode }}')"
                @launch-pop-close.window="onLaunchPopClose($event)">
             <div class="d-flex align-items-center flex-wrap gap-2">
               <svg class="ico text-success" role="img" aria-label="Directory trusted" x-cloak
@@ -158,7 +163,7 @@
                            so a bypassPermissions default in user/managed settings would take
                            effect) is gated by the same ceiling (TASK-335, config.CEILING_GATED_MODES). #}
                         <select id="perm-{{ p.name }}" class="form-select form-select-sm" x-model="lperm"
-                                aria-describedby="perm-effect-{{ p.name }}"
+                                aria-describedby="perm-effect-{{ p.name }}{% if perm_default_gated %} perm-gated-{{ p.name }}{% endif %}"
                                 {# Lead each rendered item with the separator (not trailing it) so a
                                    filtered-out bypassPermissions tail never leaves a dangling " · ".
                                    Each effect string already ends with its own period — don't append
@@ -179,6 +184,13 @@
                            visible on touch — the riskiest per-launch choice shouldn't hide in a tooltip. #}
                         <p id="perm-effect-{{ p.name }}" class="form-hint text-secondary small mt-1 mb-0"
                            x-text="permissionEffect(lperm)"></p>
+                        {% if perm_default_gated %}
+                        <p id="perm-gated-{{ p.name }}" class="form-hint text-secondary small mt-1 mb-0"
+                           data-test="perm-default-gated">The configured default,
+                          {{ permission_labels[default_permission_mode].short }}, needs
+                          <code>allow_bypass_permissions</code> for this project, so it starts
+                          at {{ permission_labels['default'].short }}.</p>
+                        {% endif %}
                       </div>
                       {# "More options" — a single disclosure (#686) holding the ADVANCED choices
                          for the Desktop/bridge launch: the Mode selector (Server Mode / Interactive
@@ -329,18 +341,28 @@
                         </div>
                       </div>
 
-                      <!-- bypassPermissions typed-confirm -->
+                      <!-- bypassPermissions / inherit typed-confirm -->
+                      {# inherit (No forced mode) gets the same typed confirm (TASK-480): with no
+                         flag passed, a bypassPermissions default in a settings file takes effect.
+                         Both are offered only where the per-project ceiling is on. #}
                       <div class="alert alert-danger mt-2 mb-0" data-test="bypass-confirm" x-show="confirmBypass['{{ p.name }}']" x-cloak role="group" aria-labelledby="bypass-head-{{ p.name }}"
                            x-effect="focusBypassInput(confirmBypass['{{ p.name }}'], $refs)">
-                        <p id="bypass-head-{{ p.name }}" class="mb-2"><svg class="ico me-1 text-warning" aria-hidden="true"><use href="#ic-alert"/></svg><strong>bypassPermissions</strong> lets sessions in <code>{{ p.name }}</code>
-                          run tools without asking. Type the project name to confirm.</p>
+                        <p id="bypass-head-{{ p.name }}" class="mb-2"><svg class="ico me-1 text-warning" aria-hidden="true"><use href="#ic-alert"/></svg><span
+                           x-show="permMode['{{ p.name }}'] !== 'inherit'"><strong>bypassPermissions</strong> lets sessions in <code>{{ p.name }}</code>
+                          run tools without asking.</span><span data-test="inherit-confirm-text"
+                           x-show="permMode['{{ p.name }}'] === 'inherit'" x-cloak><strong>{{ permission_labels['inherit'].short }}</strong>
+                          starts sessions in <code>{{ p.name }}</code> in the mode that Claude Code's own
+                          settings set. If that is bypassPermissions, they run tools without asking.</span>
+                          Type the project name to confirm.</p>
                         <div class="input-group">
                           <input type="text" class="form-control" x-ref="bypassInput" x-model="bypassTyped['{{ p.name }}']" placeholder="{{ p.name }}"
                                  id="bypass-typed-{{ p.name }}" name="bypass-typed-{{ p.name }}"
                                  aria-label="Type the project name to confirm bypassPermissions"
+                                 :aria-label="permMode['{{ p.name }}'] === 'inherit' ? 'Type the project name to confirm {{ permission_labels['inherit'].short }}' : 'Type the project name to confirm bypassPermissions'"
                                  @keyup.enter="confirmBypassStart('{{ p.name }}')" {{ NO_AUTOFILL }}>
                           <button type="button" class="btn btn-danger" data-test="bypass-start-go" @click="confirmBypassStart('{{ p.name }}')"
-                                  :disabled="(bypassTyped['{{ p.name }}'] || '') !== '{{ p.name }}'">Start with bypass</button>
+                                  :disabled="(bypassTyped['{{ p.name }}'] || '') !== '{{ p.name }}'"
+                                  x-text="permMode['{{ p.name }}'] === 'inherit' ? 'Start with no forced mode' : 'Start with bypass'">Start with bypass</button>
                           <button type="button" class="btn" @click="cancelBypass('{{ p.name }}')">Cancel</button>
                         </div>
                       </div>

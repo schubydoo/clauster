@@ -108,6 +108,75 @@ def test_transcript_modal_shows_empty_state_without_transcripts(
     browser.expect_text('[data-test="transcript-empty"]', "No transcripts for this project yet.")
 
 
+def test_transcript_load_failure_fills_a_mounted_alert_region(
+    browser: AgentBrowser, usage_server: Server, mutable_projects_tree: Path
+) -> None:
+    """A failed transcript load fills a role=alert region that was already mounted (TASK-477).
+
+    A screen reader announces an alert region when its content changes. A region that
+    appears already holding its text is not announced reliably, so the region must be
+    in the page, empty, before the error text arrives.
+    """
+    from clauster.pointers import sanitize_cwd
+
+    home = usage_server.state_dir.parent / "home"
+    project = (mutable_projects_tree / "beta").resolve()
+    _seed_session(home, project, "sess-gone.jsonl")
+
+    browser.goto(usage_server.url)
+    browser.expect_visible('[data-project="beta"]')
+    browser.click('[data-project="beta"] [data-test="transcript-trigger"]')
+    browser.expect_count('[data-test="transcript-session"]', 1, timeout_ms=STATUS_TIMEOUT)
+    region = '[data-test="transcript-modal"] [role="alert"]'
+    browser.expect_count(region, 1)
+    assert browser.get_text(region) == ""
+    browser.expect_hidden('[data-test="transcript-error"]')
+
+    # The session is listed, then its file goes away, so opening it fails.
+    (home / ".claude" / "projects" / sanitize_cwd(project) / "sess-gone.jsonl").unlink()
+    browser.click('[data-test="transcript-session"]')
+    browser.expect_visible('[data-test="transcript-error"]', timeout_ms=STATUS_TIMEOUT)
+    browser.expect_text(region, "Failed to load transcript.")
+    browser.expect_count(f'{region} [data-test="transcript-error"]', 1)
+
+
+def test_transcript_empty_search_text_waits_for_the_new_results(
+    browser: AgentBrowser, usage_server: Server, mutable_projects_tree: Path
+) -> None:
+    """While a new term waits on the 250 ms debounce, the text names the old term (TASK-477).
+
+    The list on screen is still the empty result for the old term, so the text must not
+    name the new term until its own search has run.
+    """
+    home = usage_server.state_dir.parent / "home"
+    _seed_session(home, (mutable_projects_tree / "beta").resolve(), "sess-477.jsonl")
+
+    browser.goto(usage_server.url)
+    browser.expect_visible('[data-project="beta"]')
+    browser.click('[data-project="beta"] [data-test="transcript-trigger"]')
+    browser.expect_count('[data-test="transcript-session"]', 1, timeout_ms=STATUS_TIMEOUT)
+    browser.click('[data-test="transcript-session"]')
+    browser.expect_count('[data-test="transcript-turn"]', 2, timeout_ms=STATUS_TIMEOUT)
+
+    search = '[data-test="transcript-search"]'
+    no_match = '[data-test="transcript-no-matches"]'
+    browser.fill(search, "zzz")
+    browser.expect_text(no_match, "No messages match “zzz”.", timeout_ms=STATUS_TIMEOUT)
+
+    # Type a new term and read the text 50 ms later, inside the debounce window. Page
+    # timers run in deadline order, so this read always lands before the 250 ms search.
+    during = browser.eval_json(
+        "(async () => { const box = document.querySelector('[data-test=\"transcript-search\"]');"
+        " box.value = 'qqq'; box.dispatchEvent(new Event('input', { bubbles: true }));"
+        " await new Promise((r) => setTimeout(r, 50));"
+        " const el = document.querySelector('[data-test=\"transcript-no-matches\"]');"
+        " return [el.textContent.replace(/\\s+/g, ' ').trim(), el.getClientRects().length > 0];"
+        " })()"
+    )
+    assert during == ["No messages match “zzz”.", True], during
+    browser.expect_text(no_match, "No messages match “qqq”.", timeout_ms=STATUS_TIMEOUT)
+
+
 def _seed_long_session(home: Path, project_path: Path, name: str, turns: int) -> None:
     """Write a ``turns``-long transcript: even turns say ``even``, every tenth ``needle``."""
     from clauster.pointers import sanitize_cwd  # pure cwd→dirname mapping

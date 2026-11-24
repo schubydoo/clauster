@@ -119,6 +119,52 @@ def test_bypass_requires_typed_confirmation_before_spawn(
     browser.expect_enabled(start_bypass)
 
 
+def test_gated_default_mode_starts_at_ask_where_the_ceiling_is_off(
+    browser: AgentBrowser, inherit_default_server: Server
+) -> None:
+    """A row whose default mode is gated for it starts at Ask each time and says why.
+
+    TASK-480: with ``instance_defaults.permission_mode: inherit``, ``alpha`` has no
+    inherit option, so its select used to show blank and Run sent a mode the server
+    refuses. It now starts at ``default``, and a hint names the reason.
+    """
+    browser.goto(inherit_default_server.url)
+    browser.expect_visible('[data-project="alpha"]')
+    open_desktop_launch(browser, "alpha")
+    browser.expect_value("#perm-alpha", "default")
+    note = '[data-project="alpha"] [data-test="perm-default-gated"]'
+    browser.expect_visible(note)
+    browser.expect_text(note, "needs allow_bypass_permissions for this project")
+    browser.expect_text('[data-project="alpha"] [data-test="launch-run-go"]', "Ask each time")
+
+
+def test_inherit_requires_typed_confirmation_before_spawn(
+    browser: AgentBrowser, inherit_default_server: Server
+) -> None:
+    """Where the ceiling allows inherit, it takes the same typed confirm as bypass.
+
+    TASK-480: with no flag passed, a bypassPermissions default in a settings file takes
+    effect, so ``gamma`` (the ceiling is on) starts at inherit and Run asks for the typed
+    project name. We stop before a spawn, as the bypass test does.
+    """
+    browser.goto(inherit_default_server.url)
+    browser.expect_visible('[data-project="gamma"]')
+    open_desktop_launch(browser, "gamma")
+    browser.expect_value("#perm-gamma", "inherit")
+    browser.expect_count('[data-project="gamma"] [data-test="perm-default-gated"]', 0)
+    trust_and_start(browser, "gamma")
+    confirm = '[data-project="gamma"] [data-test="bypass-confirm"]'
+    browser.expect_visible(confirm, timeout_ms=STATUS_TIMEOUT)
+    browser.expect_visible(f'{confirm} [data-test="inherit-confirm-text"]')
+    browser.expect_text(confirm, "If that is bypassPermissions, they run tools without asking.")
+    start_go = f'{confirm} [data-test="bypass-start-go"]'
+    browser.expect_text(start_go, "Start with no forced mode")
+    browser.fill(f'{confirm} input[type="text"]', "not-gamma")
+    browser.expect_disabled(start_go)
+    browser.fill(f'{confirm} input[type="text"]', "gamma")
+    browser.expect_enabled(start_go)
+
+
 def test_reaper_panel_present_when_enabled(browser: AgentBrowser, reaper_server: str) -> None:
     """With ``reaper.ui_enabled: true``, the Maintenance panel reveals the reaper title."""
     browser.goto(reaper_server)
