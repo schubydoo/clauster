@@ -111,13 +111,13 @@ async def _project_by_name(name: str, engine: ClausterEngine) -> Project:
 
 
 def _bridge_running(runner: SessionRunner, name: str) -> bool:
-    """Return whether ANY bridge or external session is running for ``name``."""
+    """Return whether ANY bridge, external or orphaned session is running for ``name``."""
     # Any-RUNNING scan, not the canonical-instance resolver: with N instances per
     # project (#778) the canonical pick can transiently be a STARTING standard
     # bridge while a pty session is already RUNNING -- this flag must not miss it.
     if runner.has_running_instance(name):
         return True
-    return name in runner.external_sessions_by_project()
+    return name in runner.external_sessions_by_project() or runner.has_orphaned_session(name)
 
 
 # ----- projects: discovery, preflight, sort metadata, row fragments --------------------------

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from collections import Counter
 from pathlib import Path
 
 from . import procutil
@@ -294,3 +295,56 @@ def reconcile(
             continue
         s.attribution = Attribution.EXTERNAL
     return sessions
+
+
+def may_link(session: WorkingSession, crashed_logs: dict[str, Path]) -> bool:
+    """Whether a session is one that :func:`link_orphans` may relabel.
+
+    TRACKED too: a lone worktree bridge claims by containment, even a crashed one that a
+    live sibling keeps in the candidate list.
+    """
+    return session.attribution is Attribution.EXTERNAL or (
+        session.attribution is Attribution.TRACKED and session.parent_instance in crashed_logs
+    )
+
+
+def link_orphans(sessions: list[WorkingSession], crashed_logs: dict[str, Path]) -> dict[int, str]:
+    """Map the pid of each session that outlived a crashed bridge to that bridge's id.
+
+    ``crashed_logs`` maps a crashed standard bridge's instance id to the path it gave the
+    bridge as ``--debug-file``. The bridge gives each session child the same path with
+    ``-<session id>`` before the extension, so the child's own argv names its bridge. That
+    name is the only link: after the crash the child's parent is PID 1 (or a subreaper), and
+    a cwd cannot tell the child from a ``claude`` run by hand in the same folder (#820).
+
+    A false link is worse than a missing one, so a session stays as it was when its argv
+    cannot be read or does not match, when two rows claim one log, or when a live bridge is
+    still above it. Blocking (psutil): call it off-loop. It reads processes and signals none.
+    """
+    claims = Counter(crashed_logs.values())
+    instance_of = {log: iid for iid, log in crashed_logs.items() if claims[log] == 1}
+    links: dict[int, str] = {}
+    for s in sessions:
+        if not may_link(s, crashed_logs):
+            continue
+        child = procutil.session_child_debug_file(s.pid)
+        if child is None:
+            continue
+        session_id, debug_file = child
+        suffix = f"-{session_id}"
+        if not debug_file.stem.endswith(suffix):
+            continue
+        bridge_stem = debug_file.stem.removesuffix(suffix)
+        # Not `with_name`: the argv is outside input, and it raises on an empty name.
+        iid = instance_of.get(debug_file.parent / f"{bridge_stem}{debug_file.suffix}")
+        if iid is not None and procutil.bridge_ancestor(s.pid) is None:
+            links[s.pid] = iid
+    return links
+
+
+def clear_orphan_links(sessions: list[WorkingSession]) -> None:
+    """Return every ORPHANED session to EXTERNAL, when the evidence for it is no longer fresh."""
+    for s in sessions:
+        if s.attribution is Attribution.ORPHANED:
+            s.attribution = Attribution.EXTERNAL
+            s.parent_instance = None

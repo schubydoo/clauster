@@ -1215,7 +1215,7 @@
       </div>
 
       <!-- Compact idle strip: Active keeps its fixed top spot, no zone reorder. -->
-      <div class="text-secondary small px-1 py-2" x-show="!hasLive()" x-cloak>
+      <div class="text-secondary small px-1 py-2" x-show="!hasLive() && !survivingCount()" x-cloak>
         Nothing running yet — launch one from a project below.
       </div>
 
@@ -1225,7 +1225,7 @@
       <div class="mt-2" x-show="hasRecent()" x-cloak>
         <button type="button" class="btn btn-sm btn-ghost-secondary px-1" data-test="recent-toggle" @click="recentOpen = !recentOpen"
                 :aria-expanded="recentOpen"><svg class="ico me-1" aria-hidden="true" x-show="recentOpen"><use href="#ic-caret-down"/></svg><svg class="ico me-1" aria-hidden="true" x-show="!recentOpen"><use href="#ic-caret-right"/></svg><span
-                x-text="'Recent' + (hasResumable() ? ' / resumable' : '') + ' (' + recentCount() + ')'"></span></button>
+                x-text="'Recent' + (hasResumable() ? ' / resumable' : '') + ' (' + recentCount() + ')' + (survivingCount() ? ' · ' + survivingCount() + ' still running' : '')"></span></button>
         <div class="card mt-1" x-show="recentOpen" x-cloak>
           <div class="list-group list-group-flush">
             {% if claustrum_enabled %}
@@ -1247,6 +1247,12 @@
                   <span class="text-danger small ms-1" data-test="bridge-task-limit-note"
                         x-show="displayStatus(i.rk) === 'crashed' && taskLimitNoteOf(i.rk)" x-cloak
                         x-text="taskLimitNoteOf(i.rk)"></span>
+                  {# The bridge died but its session did not (TASK-562). `-emphasis` for the
+                     same contrast reason as connect-notice. Plain text, readable at any time. #}
+                  <span class="text-warning-emphasis small ms-1" data-test="bridge-survivor-note"
+                        :id="'survivor-note-' + i.rk"
+                        x-show="survivorNoteOf(i.rk)" x-cloak
+                        x-text="survivorNoteOf(i.rk)"></span>
                   {# A restart that stopped this row and could not start it again (TASK-459):
                      its error follows the row from Active into Recent. #}
                   {# Hidden only while bridge-error-detail above shows the same cause; an
@@ -1283,7 +1289,7 @@
                             @click="refuseResume(i.rk) || resume(i.rk)"
                             :aria-disabled="!!resumeBlockedReason(i.rk)"
                             :class="{ disabled: !!resumeBlockedReason(i.rk) }"
-                            :aria-describedby="resumeBlockedReason(i.rk) ? ('resume-blocked-' + i.rk) : null"
+                            :aria-describedby="resumeDescribedBy(i.rk)"
                             :title="'Resume — reconnects the prior session (keeps ' + (resumeModeOf(i.rk) || 'standard') + ' mode).'">
                       <svg class="ico me-1" aria-hidden="true"><use href="#ic-restart"/></svg>Resume</button>
                     {# `!!` coercion: a busy-map key absent on first paint renders this DISABLED

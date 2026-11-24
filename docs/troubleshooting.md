@@ -571,6 +571,8 @@ Three probes, from cheapest to most direct:
 2. **Card status** — `crashed`/`error` mean the bridge is gone (the status
    table is in
    [Reading the bridge debug log](operations.md#reading-the-bridge-debug-log)).
+   A session of a crashed standard bridge can still run. The same section says
+   what Resume does to it.
 3. **Process there?** `pgrep -a -f 'claude.*remote-control'` — a live process
    with a dead card usually means an orphaned keeper (previous section).
 

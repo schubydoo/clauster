@@ -25,8 +25,9 @@ changed.
 | Method | Path (bare `/api/...` and `/api/v1/...`) | What |
 | --- | --- | --- |
 | GET | `/projects` | List projects |
-| GET | `/sessions` | External (unmanaged) working sessions, by project |
+| GET | `/sessions` | External (unmanaged) working sessions, by project. Leaves out a session linked to a Crashed standard bridge. |
 | GET | `/sessions/tracked` | Live sessions owned by a managed bridge, by instance |
+| GET | `/sessions/orphaned` | Sessions still running after their standard bridge crashed, by instance |
 | GET | `/sessions/adoptable` | Project names whose live external session is adoptable |
 | GET | `/instances` | Every managed bridge/hosted instance |
 | POST | `/instances` | Spawn a bridge/session |

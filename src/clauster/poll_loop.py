@@ -195,6 +195,36 @@ class PollLoop:
             self._warn_if_refresh_slow(time.monotonic() - started)
             await asyncio.sleep(self._config.metrics.poll_seconds)
 
+    async def _link_orphans(self, sessions: list[WorkingSession]) -> None:
+        """Mark each session that outlived its crashed standard bridge as ORPHANED (TASK-562).
+
+        This only labels the session. Clauster never signals or changes the process.
+        """
+        logs = {
+            i.instance_id: log
+            for i in self._registry._instances.values()
+            if i.status is InstanceStatus.CRASHED
+            and i.resume_mode == "standard"
+            and (log := i.bridge_raw_log_path or i.bridge_debug_log_path) is not None
+        }
+        if not logs:
+            return
+        links = await asyncio.to_thread(inspector.link_orphans, sessions, logs)
+        for s in sessions:
+            iid = links.get(s.pid)
+            # `may_link` again: the map is by pid, and two entries can share one.
+            if iid is None or not inspector.may_link(s, logs):
+                continue
+            inst = self._registry._instances.get(iid)
+            # Judged again after the await: a Resume may have replaced this bridge meanwhile.
+            if (
+                inst is not None
+                and inst.status is InstanceStatus.CRASHED
+                and (inst.bridge_raw_log_path or inst.bridge_debug_log_path) == logs[iid]
+            ):
+                s.parent_instance = iid
+                s.attribution = Attribution.ORPHANED
+
     async def poll_once(self, *, side_effects: bool = True) -> None:
         """Reconcile bridge liveness and cross-check `claude agents --json`.
 
@@ -386,6 +416,8 @@ class PollLoop:
             # Cross-check is best-effort — keep the loop alive, but log so a degraded
             # `agents --json` probe is observable instead of silently freezing sessions.
             _log.warning("agents --json cross-check failed (continuing): %s", exc)
+            # "Still running" is a claim about now, and this tick cannot support it.
+            inspector.clear_orphan_links(self._sessions)
             return
         discovered = self._discovered()
 
@@ -524,9 +556,21 @@ class PollLoop:
         owned_pids_by_instance = await asyncio.to_thread(
             lambda: {iid: procutil.owned_pids(roots) for iid, roots in roots_by_instance.items()}
         )
-        self._sessions = inspector.reconcile(
+        reconciled = inspector.reconcile(
             sessions, managed, hosted_pids, hosted_cwds, worktree_roots, owned_pids_by_instance
         )
+        # Before the list is published, so a reader never sees a survivor flash EXTERNAL.
+        try:
+            await self._link_orphans(reconciled)
+        except Exception as exc:
+            # The type only: the walk reads argvs, which hold the session URL. The list still
+            # publishes unlinked, so one bad read cannot freeze a stale "still running".
+            _log.warning("could not link surviving sessions: %s", type(exc).__name__)
+            # No prune this tick: it deletes a card, and nothing now says which crashed row
+            # still has a survivor.
+            self._sessions = reconciled
+            return
+        self._sessions = reconciled
         # Drop a non-live managed instance whose project has a live EXTERNAL session:
         # the bridge IS alive, just unmanaged (flag-form/tmux), so the persisted record
         # is a phantom. Showing it as a Stopped/Resume card is misleading and invites a
@@ -568,7 +612,6 @@ class PollLoop:
         # `agents --json` happened to list last would decide: a managed owner landing last hid
         # the live unmanaged bridge and left its phantom card up with a Resume that spawns a
         # duplicate. Order of an external list is not a fact about ownership.
-        reconciled = list(self._sessions)
 
         def _owners_by_cwd() -> dict[Path, set[int]]:
             """Map each external session's resolved cwd to the bridge pids that own it."""
@@ -701,6 +744,8 @@ class PollLoop:
         # is pid DESCENT, #820), so project liveness never tested the prune's premise — "the
         # bridge IS alive, just unmanaged" — and the stricter guard below does: the external
         # session must actually BE a bridge.
+        # A row with a linked survivor is a proven crash, not a phantom (TASK-562).
+        proven = {s.parent_instance for s in reconciled if s.attribution is Attribution.ORPHANED}
         candidates: dict[str, list[str]] = {}
         for n, inst in list(self._registry._instances.items()):
             # Only prune non-live (STOPPED/CRASHED) phantoms. A RUNNING/STARTING instance
@@ -727,6 +772,8 @@ class PollLoop:
                 )
                 continue
             n = ids[0]
+            if n in proven:
+                continue
             cwd = cwd_of_project[project]
             # INFO, not debug: this DELETES a resumable card, and the row it leaves behind
             # is only re-materialized by `rediscover` — i.e. on restart, not next tick. The
@@ -863,6 +910,7 @@ class PollLoop:
         """Run ``poll_once`` on the configured interval, logging and continuing on error."""
         interval = self._config.claude.agents_json_poll_interval_seconds
         while True:
+            published = self._sessions
             try:
                 await self.poll_once()
             except asyncio.CancelledError:
@@ -871,6 +919,10 @@ class PollLoop:
                 # Never let an unexpected error kill the daemon's poll loop, but make
                 # it observable — a silent `pass` here hid status-reconcile failures.
                 _log.exception("poll_once failed; continuing")
+                # As on a failed cross-check: a tick that died before it published a fresh
+                # list cannot support "still running".
+                if self._sessions is published:
+                    inspector.clear_orphan_links(self._sessions)
             await asyncio.sleep(interval)
 
     async def start_poll_loop(self) -> None:

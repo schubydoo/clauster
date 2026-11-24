@@ -190,6 +190,13 @@ async def gather_sessions(config: ClausterConfig) -> list[dict[str, Any]]:
             summary["project"] = project
             sessions.append(summary)
 
+    # Left the external list above, so without this a live session would drop out of the tool.
+    for iid, working in runner.orphaned_sessions_by_instance().items():
+        for ws in working:
+            summary = _summarize_working(ws, kind="orphaned-session")
+            summary["project"] = runner._instances[iid].project
+            sessions.append(summary)
+
     # Hosted (Direct Session) sessions, read from the *same* persistence container
     # store the app uses (``runner.persistence.hosted_state_store()``) — building
     # the runner already migrated any legacy ``hosted_state.json`` into the DB, so a

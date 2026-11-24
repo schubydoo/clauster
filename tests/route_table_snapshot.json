@@ -531,6 +531,12 @@
     [
       "GET"
     ],
+    "/api/sessions/orphaned"
+  ],
+  [
+    [
+      "GET"
+    ],
     "/api/sessions/tracked"
   ],
   [
@@ -604,6 +610,12 @@
       "GET"
     ],
     "/api/v1/sessions/adoptable"
+  ],
+  [
+    [
+      "GET"
+    ],
+    "/api/v1/sessions/orphaned"
   ],
   [
     [

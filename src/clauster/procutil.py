@@ -838,6 +838,39 @@ def is_bridge_process(pid: int) -> bool:
 _MAX_BRIDGE_ANCESTRY = 1
 
 
+def _is_session_worker(argv: list[str]) -> bool:
+    """Whether an argv is a bridge's session child: ``--print`` and ``--sdk-url`` together.
+
+    Both, because a project may be named ``--sdk-url``, and a bridge carries its name as a
+    value of ``--name``.
+    """
+    return "--print" in argv and "--sdk-url" in argv
+
+
+def session_child_debug_file(pid: int) -> tuple[str, Path] | None:
+    """Return a bridge session child's ``(session id, --debug-file)``, or ``None``.
+
+    The argv of a session child also holds its session URL, so this returns the two values
+    and nothing else, and a caller must never log the argv. Fails closed on a gone, denied
+    or zombie process and on a missing flag. A plain ``OSError`` (no file descriptors left)
+    propagates: it says nothing about this process, and "not a child" would let the
+    phantom-prune delete the crashed row of a session that is still running.
+    """
+    try:
+        argv = psutil.Process(pid).cmdline()
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, ValueError):
+        return None
+    if not _is_session_worker(argv):
+        return None
+    values = []
+    for flag in ("--session-id", "--debug-file"):
+        at = argv.index(flag) if flag in argv else -1
+        if at < 0 or at + 1 >= len(argv) or not argv[at + 1]:
+            return None
+        values.append(argv[at + 1])
+    return values[0], Path(values[1])
+
+
 def bridge_ancestor(pid: int, *, max_depth: int = _MAX_BRIDGE_ANCESTRY) -> int | None:
     """Return the nearest live bridge at or above ``pid`` in its ancestry, else ``None``.
 
@@ -874,7 +907,14 @@ def bridge_ancestor(pid: int, *, max_depth: int = _MAX_BRIDGE_ANCESTRY) -> int |
             # both predicates.
             if is_keeper_cmdline(cmdline):
                 return None
-            if proc.status() != psutil.STATUS_ZOMBIE and is_bridge_cmdline(cmdline):
+            # A session worker is never a bridge. The match is a substring test and the
+            # worker's --debug-file starts with the project name, so a project called
+            # `my-remote-control-app` read as its own bridge (TASK-562).
+            if (
+                proc.status() != psutil.STATUS_ZOMBIE
+                and not _is_session_worker(cmdline)
+                and is_bridge_cmdline(cmdline)
+            ):
                 return proc.pid
             parent = proc.parent()
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, RuntimeError):

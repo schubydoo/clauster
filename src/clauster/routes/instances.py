@@ -403,6 +403,12 @@ async def api_sessions_tracked(runner: RunnerDep) -> dict[str, list[WorkingSessi
     return runner.tracked_sessions_by_instance()
 
 
+@router.get("/api/sessions/orphaned")
+async def api_sessions_orphaned(runner: RunnerDep) -> dict[str, list[WorkingSession]]:
+    """Sessions still running after their standard bridge crashed, by instance (TASK-562)."""
+    return runner.orphaned_sessions_by_instance()
+
+
 @router.get("/api/sessions/adoptable")
 async def api_sessions_adoptable(runner: RunnerDep) -> list[str]:
     """Project names whose live external session is a standard bridge safe to adopt (#330).
