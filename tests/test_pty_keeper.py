@@ -2301,14 +2301,44 @@ def test_settings_error_detail_reads_the_real_screen(output: bytes, expected: li
 
 
 _MENU_AT = _SETTINGS_ERROR_80.index(b"\x1b[3G\x1b[38;5;153m\xe2\x9d\xaf")
+_RULE_80 = b"\x1b[38;5;220m\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\x1b[39m"
+
+
+def test_settings_error_detail_reads_a_rule_split_by_an_escape() -> None:
+    """An escape inside the rule becomes a space when the escapes are taken out."""
+    from clauster import pty_keeper
+
+    split = b"\x1b[38;5;220m\xe2\x94\x80\x1b[1m\xe2\x94\x80\xe2\x94\x80\x1b[39m"
+    assert pty_keeper._settings_error_detail(_SETTINGS_ERROR_80.replace(_RULE_80, split))
+
+
+def test_settings_error_detail_reads_a_long_list_past_8_kib(tmp_path: Path) -> None:
+    """Many refused values push the menu far into the output, and the screen still counts."""
+    from clauster import pty_keeper
+
+    value = (
+        b"\x1b[3G\x1b[38;5;246m\xe2\x94\x9c\x1b[5G\x1b[39mpermissions.allow:\x1b[24G"
+        b"\x1b[38;5;246mExpected\x1b[33Garray,\x1b[40Gbut\x1b[44Greceived\x1b[53Gnumber\x1b[39m"
+        b"\r\r\n"
+    )
+    at = _SETTINGS_ERROR_80.index(b"\x1b[3G\x1b[38;5;246m\xe2\x94\x94")
+    output = _SETTINGS_ERROR_80[:at] + value * 120 + _SETTINGS_ERROR_80[at:]
+    assert len(output) > 8192
+    drain = pty_keeper._KeeperDrain({"state": "starting"}, tmp_path / "k.json", None, None)
+    for start in range(0, len(output), 4096):  # as the PTY reads it, in pieces
+        drain.feed(output[start : start + 4096])
+    assert drain.held_screen == "Settings Error screen"
 
 
 @pytest.mark.parametrize(
     "output",
     [
         b"Settings Error",  # the title alone is not the screen
+        _SETTINGS_ERROR_80.replace(_RULE_80, b""),  # no rule before the title
+        b"   " + _SETTINGS_ERROR_80.replace(_RULE_80, b""),  # an indented quote of it
         _SETTINGS_ERROR_80[:_MENU_AT],  # no menu yet
         _SETTINGS_ERROR_80.replace(b"manually", b"later"),  # one menu choice is missing
+        _SETTINGS_ERROR_80.replace(b"without", b"with"),  # the other menu choice is missing
         _SETTINGS_ERROR_80.replace(b"skipped", b"kept"),  # no end line
         _SETTINGS_ERROR_80[_SETTINGS_ERROR_80.index(b"\x1b[3G/srv") :],  # not where it starts
         b"Welcome to Claude Code " + _SETTINGS_ERROR_80,  # another screen comes first

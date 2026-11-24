@@ -438,11 +438,12 @@ check.
 
 ### "the session stopped at claude's Settings Error screen"
 
-**What you see:** an Interactive Session card shows "Failed to start" with
-``claude refused a value in a settings file: the session stopped at claude's
-Settings Error screen``. The rest of the text is what `claude` reported: the
-path of each settings file it refused, and each refused key with the reason, for
-example `permissions.defaultMode: Invalid value`.
+**What you see:** an Interactive Session card shows "Session failed to start"
+(the status badge reads "Failed to start") with ``claude refused a value in a
+settings file: the session stopped at claude's Settings Error screen...``. After a
+short note on what to do, the card shows `claude reported:` and the text that
+`claude` printed: the path of each settings file it refused, and each refused key
+with the reason, for example `permissions.defaultMode: Invalid value`.
 
 **Most likely cause:** a settings file holds a value that this `claude` version
 does not accept. The config editor can save such a value with a warning (see
@@ -463,7 +464,10 @@ value.
 
 If the list of refused values is long, the card shows only its start. If a file
 path is longer than the terminal is wide, `claude` wraps it, and the card shows a
-space at the wrap.
+space at the wrap. The keeper reads the first 32 KiB of the session output. If a
+very long list pushes the end of the screen past that point, the card reads
+Running with no connect link instead. In that case, run `claude` in the project
+directory as the service user to see the screen.
 
 ### "a login flow is already in progress; cancel it first"
 

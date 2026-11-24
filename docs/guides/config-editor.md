@@ -217,7 +217,7 @@ Read each warning before you start a session. Claude Code can ignore a value
 that it does not know. It can also reject the whole settings file because of one
 such value. The warning at save time is the only check for this. If Claude Code
 rejects the file, an Interactive Session fails to start and its card names the
-value. See
+refused values. See
 [the Settings Error screen](../troubleshooting.md#the-session-stopped-at-claudes-settings-error-screen).
 
 These checks still stop the save with a `422`, and nothing is written:

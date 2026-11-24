@@ -111,10 +111,12 @@ _LOGIN_SCREEN_ERROR = (
 )
 
 #: How much of the bridge's first output is searched for a screen that holds it: the login
-#: screen, or the Settings Error screen. claude draws either first, in under 3 KiB (the login
-#: screen: 2.1.319; the Settings Error screen with four refused values in two files: 2.1.330;
-#: both at 80x24 and at the 120x40 TUI size).
-_FIRST_SCREEN_WINDOW = 8192
+#: screen, or the Settings Error screen. claude draws either first. The login screen takes
+#: under 3 KiB (2.1.319), and so does the Settings Error screen with four refused values in
+#: two files (2.1.330), both at 80x24 and at the 120x40 TUI size. The Settings Error screen
+#: grows by a line or more per refused value, so the window leaves room for a long list. Both
+#: matches are anchored at the start of the output, so a wider window adds no false match.
+_FIRST_SCREEN_WINDOW = 32768
 
 #: The first-run screen is the first thing claude draws, so its text, with the escapes taken
 #: out, starts with this. It is the anchor that keeps a logged-in `--continue` resume, which
@@ -151,8 +153,11 @@ _RE_SPACE_RUN = re.compile(rb"\s+")
 #: login screen. Before this, the URL timeout promoted the bridge to ``ready`` with no link,
 #: and the card read "Running" while claude could not be reached (invariant 1). The screen
 #: starts with a rule of box-drawing characters and then this title (verified against claude
-#: 2.1.330 with a throwaway HOME, at 80x24, at 120x40 and with ``--continue``).
-_RE_SETTINGS_SCREEN_START = re.compile(rb"(?:\xe2\x94\x80)* ?Settings Error ")
+#: 2.1.330 with a throwaway HOME, at 80x24, at 120x40 and with ``--continue``). The rule is
+#: required, so text that merely starts with the title is not the screen. Spaces may sit
+#: inside the rule, because an escape inside it becomes a space when the escapes are taken
+#: out.
+_RE_SETTINGS_SCREEN_START = re.compile(rb"\xe2\x94\x80(?:\xe2\x94\x80| )*Settings Error ")
 
 #: The line that ends the list of refused values. The text between the title and this line
 #: names each file and each refused value, which is what the operator must fix.
