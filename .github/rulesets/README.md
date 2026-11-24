@@ -55,6 +55,27 @@ gh api repos/<owner>/<repo>/rulesets --jq '.[]|{id,name,target,enforcement}'
 gh api repos/<owner>/<repo>/immutable-releases   # expect {"enabled": true, ...}
 ```
 
+### Compare the file with the live ruleset before a PUT
+
+A PUT replaces the whole ruleset with the file. If the file leaves out a parameter
+that the live ruleset has, the PUT can set that parameter back to its default. For
+example, the file once did not have `require_extra_approval_for_unattributed_changes`
+or `required_reviewers`, which the live `main` ruleset had.
+
+Before each PUT, compare the file with the live ruleset. The commands only read, and
+they need `jq` on your `PATH`:
+
+```sh
+keys='{name,target,enforcement,bypass_actors,conditions,rules}'
+id=$(gh api repos/<owner>/<repo>/rulesets --jq '.[]|select(.name=="main")|.id')
+gh api repos/<owner>/<repo>/rulesets/"$id" | jq -S "$keys" \
+  | diff <(jq -S "$keys" .github/rulesets/main.json) -
+```
+
+For `tags.json`, use the name `protect-version-tags`. The output must show only the
+lines that you edited. If it shows another line, the live ruleset and the file do not
+agree on that value. Copy the live value into the file first, in its own pull request.
+
 Immutable releases is a repo setting, not a ruleset file: enable with
 `gh api -X PUT repos/<owner>/<repo>/immutable-releases` (disable with `-X DELETE`).
 
