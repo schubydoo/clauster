@@ -414,10 +414,11 @@ file stays byte-identical.
 
 1. On the Clauster host, run this command as the user that runs Clauster. If the file
    has a problem, the last line of the output names it. For invalid JSON, that line
-   gives a line and column:
+   gives a line and column. For `Infinity`, `NaN` or a number such as `1e400`, it
+   says what the file holds:
 
    ```sh
-   python3 -c 'import json, sys; d = json.load(open(sys.argv[1], encoding="utf-8")); sys.exit(None if isinstance(d, dict) else "the top level is not a JSON object")' ~/.claude.json
+   python3 -c 'import json, sys; bad = lambda s: sys.exit("it holds Infinity, NaN or a number too large"); d = json.load(open(sys.argv[1], encoding="utf-8"), parse_constant=bad, parse_float=lambda s: bad(s) if abs(float(s)) == float("inf") else float(s)); sys.exit(None if isinstance(d, dict) else "the top level is not a JSON object")' ~/.claude.json
    ```
 
 2. Repair the file, or restore it from a copy that you trust. If Clauster wrote the

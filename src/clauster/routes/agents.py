@@ -295,8 +295,9 @@ def _projects_holding(config: ClausterConfig, cwd: Path) -> list[str]:
     Only an entry that is a symlink or junction is resolved (TASK-487). A plain directory
     resolves to ``<resolved projects_root>/<name>``, which the first-part check already
     covers, and resolving it would touch it: a hung network mount there would block the
-    check. A listing failure raises :class:`_ProjectsRootUnlistable` so the refusal can
-    name it.
+    check. This bounds only the unconfigured entries: ``cwd`` and every configured key
+    are still resolved, so a hung mount there can still block. A listing failure raises
+    :class:`_ProjectsRootUnlistable` so the refusal can name it.
     """
     found: set[str] = set()
     # A NUL byte is never a real directory. POSIX resolve() raises ValueError on it, but

@@ -2016,8 +2016,11 @@ def test_yaml12_view_maps_a_recursion_error_to_a_rejection(monkeypatch) -> None:
         raise RecursionError
 
     monkeypatch.setattr(cw, "_yaml12_node", _deep)
-    with pytest.raises(cw.InvalidCandidateError, match="nested too deeply"):
-        cw.yaml12_view("a: 1", what="frontmatter")
+    # The refusal names the document it was given (TASK-492).
+    with pytest.raises(
+        cw.InvalidCandidateError, match="^SKILL.md frontmatter is nested too deeply to parse$"
+    ):
+        cw.yaml12_view("a: 1", what="SKILL.md frontmatter")
 
 
 @pytest.mark.parametrize("entry", ["async: yes", "timeout: 1_000"])
