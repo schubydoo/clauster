@@ -24,6 +24,7 @@ from clauster import config_write as cw
 from clauster import config_write_mcp as mcp
 from clauster.app import create_app
 from clauster.config import load_config
+from conftest import FAKE_CLAUDE
 
 # --- structural validator: accept the valid shapes ---------------------------------
 
@@ -1262,8 +1263,6 @@ def test_write_approvals_dedupes_preserved_base_duplicates(tmp_path: Path) -> No
 
 
 # --- gated routes (full FastAPI lifespan) ------------------------------------------
-
-FAKE_CLAUDE = Path(__file__).resolve().parent / "fixtures" / "fake_claude" / "claude"
 
 
 def _client(write_config, tmp_path, extra: str) -> TestClient:

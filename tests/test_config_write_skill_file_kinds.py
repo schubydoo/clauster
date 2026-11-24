@@ -23,10 +23,9 @@ from clauster import config_write as cw
 from clauster import config_write_skills as sk
 from clauster.app import create_app
 from clauster.config import load_config
-from conftest import needs_symlink
+from conftest import FAKE_CLAUDE, needs_symlink
 
 MASK = cw.REDACTION_SENTINEL
-FAKE_CLAUDE = Path(__file__).resolve().parent / "fixtures" / "fake_claude" / "claude"
 _VALID_MD = "---\ndescription: does a thing\n---\nInstructions here.\n"
 _RUN_SH = b"#!/bin/sh\necho run\n"
 _POSIX_MODES = pytest.mark.skipif(os.name != "posix", reason="POSIX mode bits")

@@ -2072,7 +2072,9 @@ def test_run_keeper_stops_a_bridge_held_at_the_login_screen(
     )
     elapsed = time.monotonic() - started
     assert elapsed >= 1.0  # not before the delay that lets the runner read the live error
-    assert elapsed < 30  # stopped, not waited out
+    # A hang guard, not a speed bound: the stub sleeps 60 s, so this fails only for a keeper
+    # that waits the stub out. The signal in `rc` below proves the stop itself.
+    assert elapsed < 30
     assert rc == -signal.SIGTERM
     info = _read(sidecar)
     assert info["state"] == "exited"

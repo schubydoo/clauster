@@ -16,8 +16,8 @@ from fastapi.testclient import TestClient
 from clauster import config_audit
 from clauster.app import create_app
 from clauster.config import load_config
+from conftest import FAKE_CLAUDE
 
-FAKE_CLAUDE = Path(__file__).resolve().parent / "fixtures" / "fake_claude" / "claude"
 _ENABLED = "config_write:\n  enabled: true\n  allow_user_scope: true\n"
 
 

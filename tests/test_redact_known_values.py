@@ -24,6 +24,7 @@ from fastapi.testclient import TestClient
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
+from _growth import assert_linear_time
 from clauster import pty_screen, redact, supervisor
 from clauster.app import create_app
 from clauster.hosted import _redact_obj
@@ -615,19 +616,33 @@ def test_stream_id_pattern_is_linear_on_crafted_lines() -> None:
     from clauster.routes import websockets as ws_module
 
     learned: dict[str, set[str]] = {}
-    for line in ("[bridge:init] " * 20_000, "Unarchive " * 25_000, "environment_id=" * 15_000):
-        start = time.perf_counter()
-        ws_module._learn_stream_ids("iid-1", line, learned)
-        assert time.perf_counter() - start < 1.0
+    for unit, count in (
+        ("[bridge:init] ", 20_000),
+        ("Unarchive ", 25_000),
+        ("environment_id=", 15_000),
+    ):
+        ws_module._learn_stream_ids("iid-1", unit * count, learned)
+
+        def scan(units: int, unit: str = unit):
+            line = unit * units
+            return lambda: ws_module._learn_stream_ids("iid-1", line, {})
+
+        assert_linear_time(scan, unit=count // 16)
     assert learned == {}
     # Dense untagged hits after a first id: each one used to rescan the line for a tag.
     dense = f"environment_id={ENV} " + "".join(
         f"[b] environment_id=env_{i} " for i in range(11_000)
     )
-    start = time.perf_counter()
     ws_module._learn_stream_ids("iid-1", dense, learned)
-    assert time.perf_counter() - start < 1.0
     assert learned["env"] == {ENV}
+
+    def scan_dense(hits: int):
+        text = f"environment_id={ENV} " + "".join(
+            f"[b] environment_id=env_{i} " for i in range(hits)
+        )
+        return lambda: ws_module._learn_stream_ids("iid-1", text, {})
+
+    assert_linear_time(scan_dense, unit=11_000 // 16)
 
 
 def test_stream_ignores_a_tag_after_the_id() -> None:
@@ -841,11 +856,14 @@ def test_cost_is_linear_on_hostile_text() -> None:
     """Long runs of anchor hits and of the value itself must stay cheap (no quadratic walk)."""
     redact.remember_known_values("iid-1", ENV, SESSION, BRIDGE)
     blocks = "".join(_random_part(ENV)[i : i + 4] for i in range(0, 20, 4))
-    for text in (blocks * 40_000, (ENV + " ") * 20_000, ("A" * 1000 + "\n") * 500):
-        start = time.perf_counter()
-        spans = redact._known_spans(text)
-        assert time.perf_counter() - start < 30.0  # a blow-up, not a fine bound: CI can be slow
-        assert isinstance(spans, list)
+    for piece, count in ((blocks, 40_000), (ENV + " ", 20_000), ("A" * 1000 + "\n", 500)):
+        assert isinstance(redact._known_spans(piece * count), list)
+
+        def scan(units: int, piece: str = piece):
+            text = piece * units
+            return lambda: redact._known_spans(text)
+
+        assert_linear_time(scan, unit=count // 16)
 
 
 def _cpu_seconds(text: str) -> float:

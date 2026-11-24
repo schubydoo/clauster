@@ -18,17 +18,18 @@ from __future__ import annotations
 import json
 import os
 import sys
-import time
 from pathlib import Path
 
 import pytest
 import yaml
 from fastapi.testclient import TestClient
 
+from _growth import count_ops
 from clauster import config_write as cw
 from clauster import config_write_subagents as sub
 from clauster.app import create_app
 from clauster.config import load_config
+from conftest import FAKE_CLAUDE
 
 _MINIMAL = "---\nname: my-agent\ndescription: does a thing\n---\nYou are a helper.\n"
 
@@ -1597,11 +1598,9 @@ def test_shared_aliases_under_a_discarded_key_do_not_hang_a_save(tmp_path: Path)
     assert _naive_walk_visits(root) > 10**12  # the positive control: it IS a pyramid
     # TASK-449.6: the shared seam now refuses a repeated key (the two YAML versions may keep
     # different values), so this file is refused, and it must be refused just as fast: every
-    # composed-tree walk in the seam visits each node once.
-    start = time.monotonic()
+    # composed-tree walk in the seam visits each node once: about 374k Python lines.
     with pytest.raises(cw.InvalidCandidateError, match="see differently"):
-        sub.validate_agent_content(text, expected_name="x")
-    assert time.monotonic() - start < 0.5
+        count_ops(lambda: sub.validate_agent_content(text, expected_name="x"), budget=1_000_000)
     with pytest.raises(cw.InvalidCandidateError):
         sub.write_project_agent(tmp_path, "x", text, None)
     # The walks still follow aliases: here the bad value sits at the bottom of a chain of
@@ -1612,10 +1611,10 @@ def test_shared_aliases_under_a_discarded_key_do_not_hang_a_save(tmp_path: Path)
         + "\n".join(levels)
         + "\nmcpServers:\n  - srv:\n      command: c\n      args: *p20\n---\nbody\n"
     )
-    start = time.monotonic()
     with pytest.raises(cw.InvalidCandidateError, match="nested value at line"):
-        sub.validate_agent_content(deep, expected_name="x")
-    assert time.monotonic() - start < 0.5
+        count_ops(  # about 216k lines
+            lambda: sub.validate_agent_content(deep, expected_name="x"), budget=700_000
+        )
 
 
 @pytest.mark.parametrize(
@@ -2069,8 +2068,6 @@ def test_user_scope_symlink_agent_refused(tmp_path: Path) -> None:
 # =====================================================================================
 # gated routes (full FastAPI lifespan)
 # =====================================================================================
-
-FAKE_CLAUDE = Path(__file__).resolve().parent / "fixtures" / "fake_claude" / "claude"
 
 
 def _client(write_config, tmp_path, extra: str) -> TestClient:
@@ -2681,9 +2678,9 @@ def test_read_agent_degrades_an_alias_pyramid_file_instead_of_hanging_the_worker
     raw = ("---\nname: legacy\ndescription: d\n" + "\n".join(levels) + "\n---\nbody\n").encode()
     (root / "legacy.md").write_bytes(raw)
 
-    started = time.perf_counter()
+    # About 720k Python lines. A walk of every alias path visits 8**8 leaves.
+    count_ops(lambda: sub._read_agent(root, "legacy", "project"), budget=2_000_000)
     doc = sub._read_agent(root, "legacy", "project")
-    assert time.perf_counter() - started < 0.5  # orders of magnitude under the 0.72s blow-up
 
     assert doc["frontmatter"] == {}
     assert doc["content"] == raw.decode()

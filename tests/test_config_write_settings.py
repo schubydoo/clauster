@@ -29,6 +29,7 @@ from clauster import config_write as cw
 from clauster import config_write_settings as cws
 from clauster.app import create_app
 from clauster.config import load_config
+from conftest import FAKE_CLAUDE
 
 # --- structural validator -----------------------------------------------------------
 
@@ -489,8 +490,6 @@ def test_effective_env_merges_key_by_key() -> None:
 
 
 # --- gated routes (full FastAPI lifespan) --------------------------------------------
-
-FAKE_CLAUDE = Path(__file__).resolve().parent / "fixtures" / "fake_claude" / "claude"
 
 
 def _client(write_config, tmp_path, extra: str) -> TestClient:

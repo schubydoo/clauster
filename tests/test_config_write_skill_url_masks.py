@@ -23,9 +23,9 @@ from clauster import config_write as cw
 from clauster import config_write_skills as sk
 from clauster.app import create_app
 from clauster.config import load_config
+from conftest import FAKE_CLAUDE
 
 MASK = cw.REDACTION_SENTINEL
-FAKE_CLAUDE = Path(__file__).resolve().parent / "fixtures" / "fake_claude" / "claude"
 
 _MCP = (
     "---\ndescription: d\nmcpServers:\n  - srv:\n      type: http\n"

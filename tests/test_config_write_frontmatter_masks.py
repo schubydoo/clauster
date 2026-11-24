@@ -8,23 +8,25 @@ of a subagent is never masked or rewritten.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
 import stat
 import sys
-import time
 from pathlib import Path
 
 import pytest
 import yaml
 from fastapi.testclient import TestClient
 
+from _growth import assert_linear_time
 from clauster import config_write as cw
 from clauster import config_write_skills as sk
 from clauster import config_write_subagents as sub
 from clauster.app import create_app
 from clauster.config import load_config
+from conftest import FAKE_CLAUDE
 
 MASK = cw.REDACTION_SENTINEL
 QUOTED = f'"{MASK}"'
@@ -554,7 +556,6 @@ def test_same_yaml_value_tells_types_apart() -> None:
 
 # --- subagents: through the routes ----------------------------------------------------------
 
-FAKE_CLAUDE = Path(__file__).resolve().parent / "fixtures" / "fake_claude" / "claude"
 _ON = "config_write:\n  enabled: true\n  allow_user_scope: true\n"
 
 
@@ -865,10 +866,9 @@ def test_a_stored_fifo_named_by_a_masked_member_is_refused_without_blocking(
     script = _stored_script_skill(tmp_path)
     script.unlink()
     os.mkfifo(script)
-    started = time.monotonic()
+    # A blocked open never returns, so the timeout marker above is the guard.
     with pytest.raises(cw.InvalidCandidateError, match="not a regular file"):
         _masked_script_save(tmp_path)
-    assert time.monotonic() - started < 0.5
 
 
 @pytest.mark.timeout(5)
@@ -881,10 +881,8 @@ def test_a_stored_symlink_named_by_a_masked_member_is_refused(tmp_path: Path) ->
     other.write_text("T=from-OTHER\n", encoding="utf-8")
     script.unlink()
     script.symlink_to(other.name)
-    started = time.monotonic()
     with pytest.raises(cw.InvalidCandidateError, match="symlink"):
         _masked_script_save(tmp_path)
-    assert time.monotonic() - started < 0.5
     assert other.read_text(encoding="utf-8") == "T=from-OTHER\n"
 
 
@@ -904,10 +902,9 @@ def test_the_lstat_check_alone_refuses_a_fifo_or_a_symlink(
         script.with_name("other.sh").write_text("T=x\n", encoding="utf-8")
         script.symlink_to("other.sh")
     monkeypatch.setattr(sk, "_OPEN_FLAGS", os.O_RDONLY)
-    started = time.monotonic()
+    # A blocked open never returns, so the timeout marker above is the guard.
     with pytest.raises(cw.InvalidCandidateError, match="not a regular file"):
         _masked_script_save(tmp_path)
-    assert time.monotonic() - started < 0.5
 
 
 def test_a_masked_member_with_nothing_stored_is_refused(tmp_path: Path) -> None:
@@ -977,10 +974,21 @@ def test_one_stored_line_is_kept_at_most_once(tmp_path: Path) -> None:
     # the restored text grew by the stored length per copy before any cap ran.
     long_line = "TOKEN=" + "s" * 200_000
     copies = f"TOKEN={MASK}\n" * 4000
-    started = time.monotonic()
     with pytest.raises(cw.InvalidCandidateError, match="not sent back one for one"):
         cw.restore_masked_lines(copies, long_line + "\n", what="x.sh", view=cw.redact_secret_lines)
-    assert time.monotonic() - started < 0.5
+
+    def refuse(scale: int):
+        # Both texts grow together, so a restore that multiplies them costs their product.
+        sent = f"TOKEN={MASK}\n" * (scale * 25)
+        stored = "TOKEN=" + "s" * (scale * 1_250) + "\n"
+
+        def run() -> None:
+            with contextlib.suppress(cw.InvalidCandidateError):
+                cw.restore_masked_lines(sent, stored, what="x.sh", view=cw.redact_secret_lines)
+
+        return run
+
+    assert_linear_time(refuse, unit=10)  # the whole run is the 4000 x 200k case above
     # Two copies of a line stored once are refused too; one copy is kept.
     with pytest.raises(cw.InvalidCandidateError, match="one for one"):
         cw.restore_masked_lines(

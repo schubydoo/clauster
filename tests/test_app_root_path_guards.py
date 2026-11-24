@@ -9,15 +9,12 @@ regardless of the proxy; a prefix-stripping proxy (the supported default) is a n
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from fastapi.testclient import TestClient
 from starlette.requests import Request
 
 from clauster.app import _app_local_path, _ui_guard_matches, create_app
 from clauster.config import load_config
-
-FAKE_CLAUDE = Path(__file__).resolve().parent / "fixtures" / "fake_claude" / "claude"
+from conftest import FAKE_CLAUDE
 
 
 def _req(path: str, root: str = "") -> Request:

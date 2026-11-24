@@ -26,6 +26,7 @@ from clauster import config_write as cw
 from clauster import config_write_hooks as hooks
 from clauster.app import create_app
 from clauster.config import load_config
+from conftest import FAKE_CLAUDE
 
 S = cw.REDACTION_SENTINEL
 
@@ -1310,7 +1311,6 @@ def test_validate_never_contacts_the_url_or_server(monkeypatch: pytest.MonkeyPat
 
 # --- routes + dashboard injection ---------------------------------------------------
 
-FAKE_CLAUDE = Path(__file__).resolve().parent / "fixtures" / "fake_claude" / "claude"
 _ON = "config_write:\n  enabled: true\n  allow_user_scope: true\n"
 _URL = "/api/config-write/hooks"
 

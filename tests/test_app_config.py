@@ -8,8 +8,7 @@ from fastapi.testclient import TestClient
 
 from clauster.app import create_app
 from clauster.config import load_config
-
-FAKE_CLAUDE = Path(__file__).resolve().parent / "fixtures" / "fake_claude" / "claude"
+from conftest import FAKE_CLAUDE
 
 
 def _client_and_path(write_config, tmp_path) -> tuple[TestClient, Path]:

@@ -26,6 +26,7 @@ from clauster import claude_md as cm
 from clauster import config_write as cw
 from clauster.app import create_app
 from clauster.config import load_config
+from conftest import FAKE_CLAUDE
 
 # --- structural validator -----------------------------------------------------------
 
@@ -258,7 +259,6 @@ def test_local_scope_is_independent_of_project_scope_file(tmp_path: Path) -> Non
 
 # --- gated routes (full FastAPI lifespan) --------------------------------------------
 
-FAKE_CLAUDE = Path(__file__).resolve().parent / "fixtures" / "fake_claude" / "claude"
 
 _ON = "config_write:\n  enabled: true\n  allow_user_scope: true\n"
 _PROJECT_ONLY = "config_write:\n  enabled: true\n"

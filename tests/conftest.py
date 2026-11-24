@@ -111,6 +111,44 @@ os.environ.pop("CLAUSTER_STATE_DIR", None)
 os.environ.pop("CLAUSTER_API_TOKEN", None)
 atexit.register(lambda: shutil.rmtree(_SESSION_HOME, ignore_errors=True))
 
+
+def _path_without_claude(path: str, mirror_root: Path) -> str:
+    """Return ``path`` with no directory that resolves ``claude``.
+
+    A directory with a real ``claude`` often holds other tools that tests need (``uv`` in
+    ``~/.local/bin``, ``node`` beside an npm global install), so it is replaced by a mirror:
+    a directory of symlinks to everything in it except ``claude``. Where a symlink cannot be
+    made (Windows without the privilege), the directory is dropped, because hiding the real
+    binary is the point of this function.
+    """
+    entries: list[str] = []
+    for index, entry in enumerate(path.split(os.pathsep)):
+        source = Path(entry or os.curdir)
+        if shutil.which("claude", path=str(source)) is None:
+            entries.append(entry)
+            continue
+        mirror = mirror_root / str(index)
+        mirror.mkdir(parents=True)
+        try:
+            for child in source.absolute().iterdir():
+                if child.stem.casefold() != "claude":
+                    (mirror / child.name).symlink_to(child)
+        except (OSError, NotImplementedError):
+            continue
+        entries.append(str(mirror))
+    return os.pathsep.join(entries)
+
+
+# The same pin for the binary (TASK-546). A test that passes the bare name `claude` to a
+# resolving function passed on a developer machine and failed on CI, which has no `claude`.
+# A test that needs one uses `FAKE_CLAUDE`, or opts in by putting its directory on PATH.
+# An xdist worker inherits the controller's PATH, finds no `claude`, and makes no mirror.
+_PATH = os.environ.get("PATH", os.defpath)
+if shutil.which("claude", path=_PATH) is not None:
+    _PATH_MIRROR = tempfile.mkdtemp(prefix="clauster-test-path-")
+    os.environ["PATH"] = _path_without_claude(_PATH, Path(_PATH_MIRROR))
+    atexit.register(lambda: shutil.rmtree(_PATH_MIRROR, ignore_errors=True))
+
 # Route registration is the suite's single largest CPU slice: ~1170 tests build an app and
 # each rebuilds all ~105 routes' pydantic fields from scratch (#1128). Memoize that one
 # pure step, once per worker, before any test can build an app. This patches FastAPI only —
