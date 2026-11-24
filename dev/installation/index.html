@@ -1986,9 +1986,11 @@ and on Linux it adds the <code>_MEI…</code> directory to <code>LD_LIBRARY_PATH
 removes them, and puts back your own <code>LD_LIBRARY_PATH</code>, before it starts a
 bridge or any other program. So <code>node</code>, <code>npm</code> and <code>clauster</code> behave the same in
 a session as in your shell. On Windows the unpack step also sets a DLL search
-directory, which is not an environment variable. Clauster does not change it. A
-bridge, a pty keeper, a background agent or a claustrum daemon that an older
-release started keeps the old environment until you restart it. See
+directory. That is not an environment variable, but Windows passes it to
+every child process. Clauster resets it when it starts, so a child process
+does not search the <code>_MEI…</code> directory for DLLs. A bridge, a pty keeper, a
+background agent or a claustrum daemon that an older release started keeps
+the old environment and DLL directory until you restart it. See
 <a href="../troubleshooting/#in-a-session-node-fails-with-glibc_238-not-found-or-clauster-cannot-load-libpython">the troubleshooting entry</a>.</p>
 </div>
 <div class="admonition note">

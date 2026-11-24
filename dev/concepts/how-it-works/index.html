@@ -1728,9 +1728,10 @@ buffer dropped. The view then shows the <code>· output lost (N frames) ·</code
 the prompt does not come back. While the agent can still wait on a saved
 prompt (an <code>Error</code> card whose agent may still run, or an <code>orphan</code> card), the
 prompt stays saved, and the text comes back after each restart until you Resume,
-Kill or Forget the card. If the daemon no longer has the agent, the card names
-the prompt once and Clauster deletes the saved copy. That is also the case for a
-card that reads <code>claustrum connection dropped and the daemon no longer has this
+Kill or Forget the card, or until the agent exits. If the daemon no longer has
+the agent, the card names the prompt once and Clauster deletes the saved copy.
+That is also the case for an <code>orphan</code> card whose agent exits, and for a card
+that reads <code>claustrum connection dropped and the daemon no longer has this
 session</code> with no <code>orphan</code> badge. If the agent ended while Clauster was down, it waits on
 nothing, and Clauster deletes the saved copy without a note.</p>
 <h3 id="when-the-daemon-connection-drops">When the daemon connection drops<a class="headerlink" href="#when-the-daemon-connection-drops" title="Permanent link">&para;</a></h3>
@@ -1756,7 +1757,12 @@ card shows <code>claustrum connection lost; reattach failed</code>. If Clauster 
 reconnect at all, every running Direct Session shows <code>claustrum daemon
 connection lost and the reconnect failed</code>. In each case, a <code>claude</code> process that
 is still alive is shown as an orphan with <strong>Kill</strong>, the same as after a daemon
-restart, so that <strong>Resume</strong> never starts a second agent beside it.</p>
+restart, so that <strong>Resume</strong> never starts a second agent beside it. While a
+dashboard is open, each refresh (every 4 seconds) checks each orphan again. When
+its <code>claude</code> process exits, the card loses the <code>orphan</code> badge and shows
+<code>the agent exited after Clauster could not reattach it; session lost</code>, followed
+by the names of any prompts it was waiting on. With no dashboard open, nothing
+checks, and the card keeps its old text until a dashboard opens.</p>
 <p>When the connection itself caused the failure, the next daemon connection
 reattaches the session again. If the daemon still has the process, the card
 shows <code>Running</code> again, with its open permission prompts, and a View that is

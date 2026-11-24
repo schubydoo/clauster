@@ -3201,7 +3201,10 @@ directory under <code>state_dir</code> for the reason that the daemon gives.</p>
 <p>A card with the orange <code>orphan</code> badge instead means that the <code>claude</code> process
 still runs, but Clauster could not reattach it. Its text says
 <code>still running, but Clauster could not reattach it</code>. The cause can be a daemon
-restart, a dropped connection or a request that timed out.</p>
+restart, a dropped connection or a request that timed out. While the dashboard
+is open, Clauster checks each orphan again on every refresh. If the <code>claude</code>
+process exits, the card loses the <code>orphan</code> badge and shows
+<code>the agent exited after Clauster could not reattach it; session lost</code>.</p>
 <p>If only the connection was lost, Clauster reattaches the session again over the
 next daemon connection. If the daemon still has the process, the card shows
 <code>Running</code> again. After <code>the reconnect failed</code>, that next connection comes only
@@ -3235,10 +3238,12 @@ offers <strong>Kill</strong>, the <code>claude</code> process may still run and 
 it, then Resume the conversation. After a dropped connection, the next daemon
 connection reattaches the session and opens the prompt again. On an <code>Error</code>
 card whose agent may still run, or an <code>orphan</code> card, the text comes back after
-each restart until you Resume, Kill or Forget the card. The same text can show
-after a reconnect, with no restart. On a <code>Crashed</code> card with no <code>orphan</code> badge,
-or a card that reads <code>claustrum connection dropped and the daemon no longer has
-this session</code> with no <code>orphan</code> badge, the agent is gone, so the text shows once. See
+each restart until you Resume, Kill or Forget the card, or until the agent exits.
+The same text can show after a reconnect, with no restart. On a <code>Crashed</code> card
+with no <code>orphan</code> badge, or a card that reads <code>claustrum connection dropped and
+the daemon no longer has this session</code> with no <code>orphan</code> badge, the agent is gone,
+so the text shows once. An <code>orphan</code> card whose agent exits shows it once too,
+after <code>the agent exited after Clauster could not reattach it; session lost</code>. See
 <a href="../concepts/how-it-works/#a-direct-sessions-view-after-a-restart">A Direct Session's view after a restart</a>.</p>
 <h2 id="getting-more-detail">Getting more detail<a class="headerlink" href="#getting-more-detail" title="Permanent link">&para;</a></h2>
 <h3 id="raising-the-log-level">Raising the log level<a class="headerlink" href="#raising-the-log-level" title="Permanent link">&para;</a></h3>
