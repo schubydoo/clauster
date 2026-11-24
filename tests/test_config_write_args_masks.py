@@ -690,24 +690,9 @@ _REFUSED = [
 #: read them, so they must be masked no less than the line masks alone masked them.
 _TAB_LOADS = [
     *(_agent(form).replace("command: npx\n", "command: npx\t# note\n") for form in _FORMS),
+    # A later error sends it to the retry now, as the CLI reads it; still shown as before.
+    f"---\nname: my-agent\ndescription: d\ntoken: {HELD_A}\t# c\nmcpServers: [\n---\nbody\n",
 ]
-
-
-def test_a_tab_header_that_loads_through_the_retry_keeps_its_secret_masked(
-    tmp_path: Path,
-) -> None:
-    # The unclosed `[` fails YAML 1.2 too, so Claude Code reads its re-quoting retry, where
-    # `token` holds the tab and the comment (checked against eemeli/yaml). Before TASK-485
-    # the tab made this tier refuse the header; now it reads what the CLI reads, and the
-    # view writes the masked value in the retry's quoted spelling.
-    stored = (
-        f"---\nname: my-agent\ndescription: d\ntoken: {HELD_A}\t# c\nmcpServers: [\n---\nbody\n"
-    )
-    assert sub.parse_frontmatter(stored)[0]["token"] == f"{HELD_A}\t# c"
-    root, _path = _place_agent(tmp_path, stored)
-    doc = sub._read_agent(root, "my-agent", "project")
-    assert HELD_A not in doc["content"] and HELD_A not in json.dumps(doc["frontmatter"])
-    assert f'token: "{MASK}"\n' in doc["content"]
 
 
 @pytest.mark.parametrize("stored", _REFUSED)

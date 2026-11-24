@@ -859,12 +859,12 @@ this editor.
 - `memory`, `color` and `experimental.cacheTtl` offer their listed values,
   written exactly as listed. Another text value saves with a warning.
 - `effort` accepts a level name in any case, the alias `med`, or an integer.
-  Another word saves with a warning. `isolation` offers `worktree` and also
-  `remote`, which Claude Code reads but does not document.
+  Another word saves with a warning. Clauster refuses an `effort` number that
+  Claude Code cannot hold, such as `1e400`. `isolation` offers `worktree` and
+  also `remote`, which Claude Code reads but does not document.
 - `model` must be text to YAML 1.2. An unquoted `1e3` or `0o17` is a number to
   Claude Code, which then ignores `model`, so Clauster refuses it. Quote the
-  value, or write `!!str 1e3`. Clauster also refuses an `effort` number that
-  Claude Code cannot hold, such as `1e400`.
+  value, or write `!!str 1e3`.
 - `maxTurns` and `autoCompactWindow` accept a number or a string that Claude
   Code reads as a whole number, for example `200000`, `"200,000"` or `2e5`.
   `autoCompactWindow` must be from `100000` to `1000000`. Do not write
@@ -1257,18 +1257,23 @@ whole save:
 - A key that appears twice in the same mapping. This includes two spellings
   that one YAML version reads as the same key, such as `1` and `01`, or `null`
   and `~`, and two `<<` merge keys in one mapping.
-- A tab after a quoted value, after a `]` or `}`, or right after the `:` of a
-  key, such as `model:`, a tab, then `opus`. YAML 1.2 accepts it, but
-  Clauster's parser does not. Use a space. A tab between the words of an
-  unquoted value, or between an unquoted value and its `#` comment, saves.
-  Clauster reads it as YAML 1.2 does. If such a frontmatter can hold a URL, a
-  server or a hook, the editor shows each of its lines masked. A save of that
-  view keeps the stored lines.
+- A tab after a quoted value, after a `]` or `}`, after a `,` inside `[...]`,
+  after the `-` of a list item, or right after the `:` of a key, such as
+  `model:`, a tab, then `opus`. YAML 1.2 accepts it, but Clauster's parser does
+  not. Use a space.
 - A `?` inside a `{...}` or `[...]` value that YAML 1.1 reads as the start of a
   key and YAML 1.2 reads as text. One example is an unquoted url with a query,
   such as `mcpServers: {srv: {url: https://example.com/p?k=v}}`. Another
   example is `[a, ?b]`. Put the value in quotes. A `?` followed by a space at
   the start of an entry, such as `[? a]`, is a key to both and is accepted.
+
+A tab between the words of an unquoted value, or between an unquoted value and
+its `#` comment, saves. Clauster reads it as YAML 1.2 does. The editor views
+still show such a frontmatter as one that does not load. If it can hold a URL,
+a server or a hook, every line of it shows as `********`. A Skills save of that
+view keeps the stored lines. A Subagents save of that view is refused, so type
+the real values. For a subagent file with such a tab, the parsed frontmatter
+and the list description stay empty.
 
 Some frontmatter is not valid YAML, but Claude Code still reads it, and so does
 Clauster. When the first parse fails, Claude Code parses a changed copy of the
@@ -1400,11 +1405,15 @@ Clauster never runs a hook command or a skill script from this editor.
   Examples are a hidden or direction-changing character, two spaces in a row,
   a space at the start or end, and `<` or `>`. The limit is 256 UTF-16 units,
   so an emoji counts as two. A combining mark, such as an accent typed as a
-  separate character, must follow a letter or a digit, as in Claude Code. So
-  must a Hangul vowel or final jamo, which must follow a Hangul letter.
-  Clauster refuses a few such names that Claude Code shows. One example is a
-  mark that belongs to one script after a Greek or a Chinese letter. Clauster
-  cannot tell the script of every letter.
+  separate character, must follow a letter or a digit, as in Claude Code. A
+  Hangul vowel or final jamo (the part of a Korean syllable that follows its
+  first letter) is refused at the start, after a Latin letter or after a digit.
+  As Claude Code does, Clauster also refuses a run of nine marks, a second dot
+  on `i` or `j`, a mark on a dotless `ı`, and a mark of another script, such as
+  a Devanagari vowel sign, after a Latin letter. Clauster refuses a few such
+  names that Claude Code shows. One example is a mark that belongs to one
+  script after a Greek or a Chinese letter. Clauster cannot tell the script of
+  every letter.
 - Clauster checks `hooks` with the same rules as the
   [Hooks tab](#the-hooks-tab) and as subagent frontmatter hooks. So it accepts
   every documented hook event, hook type and field, and an event, type or field

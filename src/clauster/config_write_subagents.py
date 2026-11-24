@@ -1100,7 +1100,7 @@ def _list_agents(root: Path, source: str) -> list[dict[str, Any]]:
         read_only = _is_read_only_file(entry, raw)
         description: str | None = None
         try:
-            frontmatter, _body = parse_frontmatter(raw.decode("utf-8"))
+            frontmatter = _parse_shown_frontmatter(raw.decode("utf-8"))
             value = frontmatter.get("description")
             if isinstance(value, str):
                 # Masked as the editor masks it (a `${VAR}` or a credential URL in it).
@@ -1826,26 +1826,52 @@ def _mask_agent_text(text: str) -> str | None:
     if match is None:
         return text
     try:
-        frontmatter, _body = parse_frontmatter(core)
+        frontmatter = _parse_shown_frontmatter(core)
         with cw.refuse_check_failures("frontmatter"):
             view = frontmatter_view(frontmatter)
     except cw.InvalidCandidateError:
         masked = _unloaded_header_view(match.group(1))
         return bom + core[: match.start(1)] + masked + core[match.end(1) :]
     shown = _rewrite_values(core, view, stored=None)
-    if shown is None and not _safe_loader_composes(cw.frontmatter_header(core, match)):
-        # A header only cw.FrontmatterLoader reads (a tab in a value, TASK-485): the
-        # in-place writer composes with plain SafeLoader, so the view is the line-by-line
-        # one this header had before that loader, never less masked.
-        masked = _unloaded_header_view(match.group(1))
-        return bom + core[: match.start(1)] + masked + core[match.end(1) :]
     return None if shown is None else bom + shown
 
 
+def _parse_shown_frontmatter(text: str) -> dict[str, Any]:
+    """Parse ``text``'s frontmatter for a VIEW (content, display field, list), or raise.
+
+    A header that only :class:`~clauster.config_write.FrontmatterLoader` reads (a tab in an
+    unquoted value, TASK-485) raises :class:`~clauster.config_write.InvalidCandidateError`
+    here, as it did before that loader: every view then takes the line-by-line masking of a
+    header that does not load. The structural masks (:func:`frontmatter_view`) are not
+    the whole of that masking, for example a credential URL in the middle of a value, so a
+    view must never show less than it did. Saves still read such a header.
+    """
+    frontmatter, _body = parse_frontmatter(text)
+    match = _FRONTMATTER_RE.match(text)
+    if match is not None and not _safe_loader_composes(cw.frontmatter_header(text, match)):
+        raise cw.InvalidCandidateError("frontmatter is shown as a header that does not load")
+    return frontmatter
+
+
 def _safe_loader_composes(header: str) -> bool:
-    """Whether plain ``SafeLoader`` composes the text the CLI parses for ``header``."""
+    """Whether ``header`` loads as it did before ``FrontmatterLoader`` (TASK-485).
+
+    :func:`~clauster.config_write.cli_frontmatter_text` with plain ``SafeLoader`` in place
+    of that loader: the header composes as written, or it fails on syntax that YAML 1.2
+    also refuses and its re-quoting retry composes. A tab in an unquoted value is syntax
+    that only YAML 1.2 accepts, so a header with one does not load here, even where a later
+    error now sends it to the retry.
+    """
     try:
-        yaml.compose(cw.cli_frontmatter_text(header), Loader=yaml.SafeLoader)
+        yaml.compose(header, Loader=yaml.SafeLoader)
+        return True
+    except RecursionError:
+        return False
+    except yaml.YAMLError as exc:
+        if cw._is_yaml11_only_syntax_error(exc):
+            return False
+    try:
+        yaml.compose(cw._cli_retry_text(header), Loader=yaml.SafeLoader)
     except (yaml.YAMLError, RecursionError):
         return False
     return True
@@ -1985,7 +2011,7 @@ def _read_agent(root: Path, name: str, source: str) -> dict[str, Any]:
     except UnicodeDecodeError as exc:
         raise cw.InvalidCandidateError(f"{name}.md is not valid UTF-8") from exc
     try:
-        parsed, _body = parse_frontmatter(text)
+        parsed = _parse_shown_frontmatter(text)
         # The same masked view the editor's `content` shows (an `mcpServers` server NAME is
         # never a secret hint there, in the list, mapping and `!!omap` spellings alike).
         with cw.refuse_check_failures("frontmatter"):

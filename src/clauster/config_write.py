@@ -1750,8 +1750,10 @@ class FrontmatterLoader(yaml.SafeLoader):
       quoted value or a ``]``), is scanned by PyYAML's own code, so it is refused as before.
     * **An explicit ``!!str``.** ``!!str 1e3`` is the string ``1e3`` to both, but PyYAML's
       composed node does not say that the tag was written, and ``1e3`` resolves to a string
-      in YAML 1.1 anyway. This marks a scalar written with a tag, so :func:`yaml12_view`
-      reads it as the string, not as the number a plain ``1e3`` is in YAML 1.2.
+      in YAML 1.1 anyway. This records the tag a scalar was written with, so
+      :func:`yaml12_view` reads it as the string, not as the number a plain ``1e3`` is in
+      YAML 1.2. The same record gives the non-specific ``!`` tag its YAML 1.2 reading,
+      always a string (``! 5`` is ``"5"``), where PyYAML resolves the text as if plain.
 
     Every frontmatter check composes with this loader, so they all read one document. The
     editor's masking (``_mask_header_values``) and its masked-value restore still compose
@@ -1776,11 +1778,11 @@ class FrontmatterLoader(yaml.SafeLoader):
         return [whitespaces]
 
     def compose_scalar_node(self, anchor: Any) -> yaml.ScalarNode:
-        """Compose a scalar as PyYAML does, and mark it when it was written with a tag."""
-        tagged = self.peek_event().tag not in (None, "!")
+        """Compose a scalar as PyYAML does, and record the tag it was written with, if any."""
+        written = self.peek_event().tag
         node = super().compose_scalar_node(anchor)
-        if tagged:
-            setattr(node, _EXPLICIT_TAG_ATTR, True)
+        if written is not None:
+            setattr(node, _EXPLICIT_TAG_ATTR, written)
         return node
 
 
@@ -2111,7 +2113,12 @@ def _yaml12_scalar(node: yaml.ScalarNode) -> Any:
     )
     # An explicit `!!str` on text that YAML 1.1 also resolves to a string (`!!str 1e3`) has
     # the implicit tag, so only FrontmatterLoader's mark tells it apart (TASK-485).
-    explicit_str = node.tag == _YAML_STR_TAG and getattr(node, _EXPLICIT_TAG_ATTR, False)
+    written = getattr(node, _EXPLICIT_TAG_ATTR, None)
+    if written == "!":
+        # The non-specific tag: always a string in YAML 1.2 (`! 5` is "5"), where PyYAML
+        # resolves the text as if it were plain, even when it is quoted.
+        return node.value
+    explicit_str = node.tag == _YAML_STR_TAG and written is not None
     if node.tag != implicit or explicit_str:
         # An explicit tag. `!!str` reads the same in both versions; any other tag is refused
         # by whichever surface checks the field.

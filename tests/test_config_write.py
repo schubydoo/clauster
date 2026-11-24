@@ -2243,6 +2243,12 @@ def test_the_depth_check_reads_past_a_tab_in_a_value() -> None:
         ("k: !<tag:yaml.org,2002:str> 1e3\n", {"k": "1e3"}),
         ("k: 1e3\n", {"k": 1000.0}),
         ("k: [!!str 1e3, 1e3]\n", {"k": ["1e3", 1000.0]}),
+        # The non-specific tag is always a string to YAML 1.2; PyYAML resolves the text,
+        # even a quoted one, as if it were plain (review on this branch).
+        ("k: ! 5\n", {"k": "5"}),
+        ("k: ! true\n", {"k": "true"}),
+        ('k: ! "5"\n', {"k": "5"}),
+        ("k: !\n", {"k": ""}),
     ],
 )
 def test_the_yaml_1_2_view_keeps_an_explicit_str_as_text(header: str, expected: object) -> None:
@@ -2257,6 +2263,9 @@ def test_a_nested_explicit_str_number_spelling_is_not_a_mismatch(parse) -> None:
     assert parse(text)[0]["hooks"] == {"X": ["1e3"]}
     with pytest.raises(cw.InvalidCandidateError, match="nested value"):
         parse(text.replace("!!str 1e3", "1e3"))
+    # `! 5` is the text 5 to YAML 1.2 and the int 5 to PyYAML: a mismatch, refused.
+    with pytest.raises(cw.InvalidCandidateError, match="nested value"):
+        parse(text.replace("!!str 1e3", "! 5"))
 
 
 @pytest.mark.parametrize("parse", _both_parsers())

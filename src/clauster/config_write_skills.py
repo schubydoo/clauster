@@ -352,6 +352,12 @@ _SOFT_DOTTED = (
     (0x1E04C, 0x1E04D),
     (0x1E068, 0x1E068),
 )
+#: The combining marks whose script is Common. After one, the CLI refuses any later mark
+#: in the run that is not Inherited, whatever letter the run follows (review on this
+#: branch). Refused outright here, which only refuses more.
+_NAME_COMMON_MARKS = frozenset(
+    {0x1CE1, 0x1CF7, 0x1D165, 0x1D166, 0x1D16D, 0x1D16E, 0x1D16F, 0x1D170, 0x1D171, 0x1D172}
+)
 #: The CLI caps a run of marks and jamo below this many.
 _NAME_MAX_MARK_RUN = 9
 
@@ -431,7 +437,8 @@ def _name_marks_join(name: str) -> bool:
       marks (``a\u11a8``, a Devanagari vowel sign after a Latin letter).
 
     It also refuses U+20E3, the keycap mark, and a hidden mark (:data:`_NAME_HIDDEN_MARKS`)
-    anywhere. Python has no script property, so
+    anywhere, and so does this port for a mark of the Common script
+    (:data:`_NAME_COMMON_MARKS`). Python has no script property, so
     the last rule is narrower here: a mark outside :data:`_NAME_INHERITED_MARKS` is taken
     only after a letter of :data:`_NAME_SCRIPT_BASES`. One pass, linear in the length.
     """
@@ -439,7 +446,7 @@ def _name_marks_join(name: str) -> bool:
     run = 0
     for char in name:
         point = ord(char)
-        if point == 0x20E3 or _in_ranges(point, _NAME_HIDDEN_MARKS):
+        if point == 0x20E3 or point in _NAME_COMMON_MARKS or _in_ranges(point, _NAME_HIDDEN_MARKS):
             return False
         if not _is_name_mark(char):
             base, run = char, 0
@@ -561,7 +568,7 @@ def _read_name(value: Any) -> str | None:
         raise cw.InvalidCandidateError(
             f"{_label('name')} holds a character Claude Code refuses in a name: a hidden, "
             "direction-changing or blank-like character other than single spaces between "
-            "words, or < or >"
+            "words, < or >, or a combining mark or Hangul jamo that does not follow its letter"
         )
     return text
 

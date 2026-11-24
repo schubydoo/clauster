@@ -3303,7 +3303,9 @@ def test_a_model_that_yaml_1_2_reads_as_a_number_is_refused(spelling: str) -> No
         sub.validate_agent_content(_content(model=spelling))
 
 
-@pytest.mark.parametrize("spelling", ["'1e3'", '"0o17"', "!!str 1e3", "opus", "claude-x-1"])
+@pytest.mark.parametrize(
+    "spelling", ["'1e3'", '"0o17"', "!!str 1e3", "! 1e3", "opus", "claude-x-1"]
+)
 def test_a_model_that_is_text_to_both_yaml_versions_saves(spelling: str) -> None:
     sub.validate_agent_content(_content(model=spelling))  # no raise
 
@@ -3320,32 +3322,48 @@ def test_an_effort_both_yaml_versions_read_saves(spelling: str) -> None:
 
 
 def test_a_tab_inside_a_value_saves_and_reads_back(tmp_path: Path) -> None:
-    # YAML 1.2 reads the tab as part of the text; PyYAML's own loader refused the file.
+    # YAML 1.2 reads the tab as part of the text, and so does the save path now. The views
+    # treat the header as one that does not load, as before (see the test below).
     content = (
         "---\nname: my-agent\ndescription: runs\tthe checks\ntools: Read,\tBash\n"
         "---\nYou are a helper.\n"
     )
     sub.write_project_agent(tmp_path, "my-agent", content, None)
+    assert sub.parse_frontmatter(content)[0]["description"] == "runs\tthe checks"
     doc = sub.read_project_agent(tmp_path, "my-agent")
-    assert doc["frontmatter"]["description"] == "runs\tthe checks"
-    assert (doc["content"], doc["frontmatter"]["tools"]) == (content, "Read,\tBash")
+    assert (doc["content"], doc["frontmatter"]) == (content, {})
+    sub.write_project_agent(tmp_path, "my-agent", doc["content"], doc["hash"])  # saves again
 
 
-def test_a_tab_header_with_a_secret_is_masked_line_by_line(tmp_path: Path) -> None:
-    # The in-place masker composes with plain SafeLoader, which cannot read the tab: the
-    # editor shows every header line masked, as it did before (never less masked).
-    text = (
-        "---\nname: my-agent\ndescription: a\tb\nmcpServers:\n"
-        "  - local:\n      command: npx\n      env:\n        TOKEN: qv-tab-env\n"
-        "---\nYou help.\n"
-    )
+@pytest.mark.parametrize(
+    "header",
+    [
+        "description: a\tb\nmcpServers:\n  - local:\n      command: npx\n"
+        "      env:\n        TOKEN: qv-tab-env\n",
+        # Review on this branch: a credential url in the middle of a value is masked only by
+        # the line masks, which a header that does not load gets.
+        "description: a\tb\nmodel: see https://u:qv-tab-env@h.example.com/x\n",
+        "description: see\thttps://u:qv-tab-env@h.example.com/x\n",
+        "description: a\tb\n# see https://u:qv-tab-env@h.example.com/x\n",
+        # A later error now sends the header to the retry, as the CLI reads it.
+        "description: see https://u:qv-tab-env@h.example.com/x\t# c\nx: [\n",
+    ],
+)
+def test_a_tab_header_is_shown_as_one_that_does_not_load(tmp_path: Path, header: str) -> None:
+    # The editor's masker composes with plain SafeLoader, which cannot read the tab, so the
+    # content, the frontmatter field and the list show what they showed before the tab
+    # loaded (TASK-485): never less masked.
+    text = f"---\nname: my-agent\n{header}---\nYou help.\n"
     _place(tmp_path, "my-agent", text)
     doc = sub.read_project_agent(tmp_path, "my-agent")
-    mask = cw.REDACTION_SENTINEL
-    assert doc["content"] == "---\n" + f"{mask}\n" * 7 + "---\nYou help.\n"
-    servers = doc["frontmatter"]["mcpServers"]
-    assert servers == [{"local": {"command": "npx", "env": {"TOKEN": mask}}}]
-    assert "qv-tab-env" not in json.dumps(doc)
+    match = sub._FRONTMATTER_RE.match(text)
+    assert match is not None
+    header_view = sub._unloaded_header_view(match.group(1))
+    assert doc["content"] == text[: match.start(1)] + header_view + text[match.end(1) :]
+    assert doc["frontmatter"] == {}
+    listed = sub._list_agents(sub.project_agents_dir(tmp_path), "project")
+    assert [entry["description"] for entry in listed] == [None]
+    assert "qv-tab-env" not in json.dumps(doc) + json.dumps(listed)
 
 
 # --- TASK-486: inline mcpServers, zero-indented lists and message wording --------------------
@@ -3423,3 +3441,25 @@ def test_an_inline_refusal_gives_subagent_file_advice(tmp_path: Path, definition
     assert "when it opens the subagent file, so open the file again and save it" in message
     assert "reload the server" not in message
     assert message.count("'srv'") == 1
+
+
+@pytest.mark.parametrize(
+    ("header", "loads"),
+    [
+        ("a: b\n", True),
+        ("hint: [a] [b]\n", True),  # through the re-quoting retry, as before
+        ("when: a\tb\n", False),  # only YAML 1.2 (and FrontmatterLoader) reads it
+        ("token: x\t# c\nx: [\n", False),  # the tab still decides, not the later error
+        ("a: b\n  c: d\n", False),  # the retry does not compose either
+    ],
+)
+def test_the_view_check_loads_a_header_as_before_the_tab_loader(header: str, loads: bool) -> None:
+    assert sub._safe_loader_composes(header) is loads
+
+
+def test_the_view_check_fails_closed_on_a_too_deep_header(monkeypatch: pytest.MonkeyPatch) -> None:
+    def too_deep(*_args: object, **_kwargs: object) -> None:
+        raise RecursionError
+
+    monkeypatch.setattr(sub.yaml, "compose", too_deep)
+    assert sub._safe_loader_composes("a: b\n") is False

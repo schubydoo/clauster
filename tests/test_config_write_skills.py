@@ -2091,6 +2091,11 @@ def test_cli_shows_name(name: str, shown: bool) -> None:
         ("\u0628\u06e1", True),  # an Arabic mark on an Arabic letter
         ("\u0640\u06e1", False),  # the same mark on the Common tatweel
         ("\u30ab\u3099", True),  # a decomposed Japanese voiced mark
+        ("1\u093f", False),  # a script-specific mark on a digit (Common)
+        ("\u0430\u1161", True),  # a jamo on a Cyrillic letter
+        # A mark of the Common script: the CLI refuses a later script mark after it.
+        ("\u0915\u1ce1\u093e", False),
+        ("\uac00\U0001d165\U0001d165", False),
     ],
 )
 def test_cli_shows_name_matches_the_cli_for_marks_and_jamo(name: str, shown: bool) -> None:
