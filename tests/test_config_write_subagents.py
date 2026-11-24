@@ -270,6 +270,7 @@ def test_windows_path_limit_is_a_422_that_names_the_longest_name(
     with pytest.raises(cw.InvalidCandidateError) as exc_info:
         sub.write_project_agent(tmp_path, too_long, _content(too_long), None)
     message = str(exc_info.value)
+    assert "260 characters with the temporary file, and Windows" in message  # over by one
     assert "Windows without long paths allows 259" in message
     assert f"use a name of at most {room} characters" in message
     assert isinstance(exc_info.value.__cause__, FileNotFoundError)
