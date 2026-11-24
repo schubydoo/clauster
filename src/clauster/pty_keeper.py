@@ -194,9 +194,18 @@ _HELD_STOP_DELAY = 5.0
 _HELD_STOP_GRACE = 5.0
 
 
+def _screen_text(head: bytes | bytearray) -> bytes:
+    """Return the text of ``head`` with the escapes taken out and each space run made one."""
+    return _RE_SPACE_RUN.sub(b" ", _RE_TERMINAL_CONTROL.sub(b" ", head)).lstrip()
+
+
 def _shows_login_screen(head: bytes | bytearray) -> bool:
     """Return True when ``head`` (the bridge's first output) draws claude's first-run screens."""
-    text = _RE_SPACE_RUN.sub(b" ", _RE_TERMINAL_CONTROL.sub(b" ", head)).lstrip()
+    return _login_screen_in(_screen_text(head))
+
+
+def _login_screen_in(text: bytes) -> bool:
+    """Return True when ``text`` (from :func:`_screen_text`) is claude's first-run screens."""
     if not text.startswith(_LOGIN_SCREEN_START):
         return False
     text = text[:_LOGIN_SCREEN_SPAN]
@@ -216,7 +225,11 @@ def _settings_error_detail(head: bytes | bytearray) -> str | None:
     (invariant 4). A long path that claude wraps at the terminal width reads with a space at
     the wrap, because the escapes are taken out without a terminal emulator.
     """
-    text = _RE_SPACE_RUN.sub(b" ", _RE_TERMINAL_CONTROL.sub(b" ", head)).lstrip()
+    return _settings_detail_in(_screen_text(head))
+
+
+def _settings_detail_in(text: bytes) -> str | None:
+    """Return the :func:`_settings_error_detail` for ``text`` from :func:`_screen_text`."""
     start = _RE_SETTINGS_SCREEN_START.match(text)
     if start is None:
         return None
@@ -597,10 +610,12 @@ class _KeeperDrain:
 
     def _check_first_screen(self, head: bytes | bytearray) -> None:
         """Fail closed when the bridge's first output is a claude screen that holds it."""
-        if _shows_login_screen(head):
+        # One strip for both checks: this runs on every chunk inside the window.
+        text = _screen_text(head)
+        if _login_screen_in(text):
             self._fail_at_screen("first-run login screen", _LOGIN_SCREEN_ERROR)
             return
-        detail = _settings_error_detail(head)
+        detail = _settings_detail_in(text)
         if detail is not None:
             self._fail_at_screen("Settings Error screen", _settings_screen_error(detail))
 

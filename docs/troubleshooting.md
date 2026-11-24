@@ -466,8 +466,8 @@ If the list of refused values is long, the card shows only its start. If a file
 path is longer than the terminal is wide, `claude` wraps it, and the card shows a
 space at the wrap. The keeper reads the first 32 KiB of the session output. If a
 very long list pushes the end of the screen past that point, the card reads
-Running with no connect link instead. In that case, run `claude` in the project
-directory as the service user to see the screen.
+Running and keeps showing "Preparing connect link…". In that case, run `claude`
+in the project directory as the service user to see the screen.
 
 ### "a login flow is already in progress; cancel it first"
 
