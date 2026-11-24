@@ -115,7 +115,7 @@ from .config_write_mcp import (
 )
 from .config_write_permissions import RECOGNIZED_MODES, is_bypass_mode
 from .config_write_settings import _orphan_sentinel_path
-from .config_write_skills import _mask_header_values, _masked_whole, _no_less_masked
+from .config_write_skills import _mask_header_values, _merge_line_views
 
 #: The directory name holding subagent files under ``.claude/`` at either scope.
 AGENTS_DIRNAME = "agents"
@@ -1807,13 +1807,8 @@ def _unloaded_header_view(header: str) -> str:
     the old view (the line masks alone) hid. A save cannot keep a mask in such a header
     (:func:`_keep_masked_values`).
     """
-    raw = header.splitlines(keepends=True)
-    old = cw.redact_secret_lines(header).splitlines(keepends=True)
-    new = cw.redact_secret_lines(_mask_header_values(header, readable=True))
-    new_lines = new.splitlines(keepends=True)
-    if not len(raw) == len(old) == len(new_lines):  # pragma: no cover - both keep lines
-        return "".join(_masked_whole(line) for line in raw)
-    return "".join(_no_less_masked(r, o, n) for r, o, n in zip(raw, old, new_lines, strict=True))
+    shown = cw.redact_secret_lines(_mask_header_values(header, readable=True))
+    return _merge_line_views(header, cw.redact_secret_lines(header), shown)
 
 
 def _mask_agent_text(text: str) -> str | None:

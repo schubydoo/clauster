@@ -2385,6 +2385,16 @@ def _member_view(text: str) -> str:
     lines_only = cw.redact_secret_lines(text)
     if shown == lines_only:
         return shown
+    return _merge_line_views(text, lines_only, shown)
+
+
+def _merge_line_views(text: str, lines_only: str, shown: str) -> str:
+    """Merge two masked views of ``text`` line by line, never showing less than either hid.
+
+    ``lines_only`` is the line masks alone and ``shown`` is the fuller view. Each line goes
+    through :func:`_no_less_masked`. The one copy of this rule serves the Skills view and the
+    subagent editor's view of a refused header, so the two cannot drift apart.
+    """
     raw = text.splitlines(keepends=True)
     old, new = lines_only.splitlines(keepends=True), shown.splitlines(keepends=True)
     if not len(raw) == len(old) == len(new):  # pragma: no cover - both views keep lines
