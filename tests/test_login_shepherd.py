@@ -140,6 +140,7 @@ def test_start_deadline_pick_reads_lines_after_the_last_look(shepherd, monkeypat
         while "login.example.net" not in flow.snapshot() and time.monotonic() < give_up:
             time.sleep(0.01)
         found = real_wait_for(flow, condition, timeout=timeout)
+        assert "login.example.net" in flow.snapshot()  # the unknown-host URL it must beat
         flow.append(f"Or open {late}\n")  # arrives just after the last look
         return found
 
