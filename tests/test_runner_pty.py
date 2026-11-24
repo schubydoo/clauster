@@ -1610,8 +1610,9 @@ def _late_keeper(monkeypatch, sidecar_json: str) -> list[Path]:
 
     monkeypatch.setattr(BridgeLaunch, "_keeper_launch_cmd", staticmethod(launch))
     monkeypatch.setattr("clauster.spawn_coordinator._READY_TIMEOUT", 0.1)
-    # Wide enough that the poll below runs after the keeper exits and before the first tick.
-    monkeypatch.setattr("clauster.spawn_coordinator._STARTUP_WATCH_INTERVAL", 1.5)
+    # Wide enough that the poll below runs after the keeper exits and before the first tick,
+    # also on a slow CI runner (macOS).
+    monkeypatch.setattr("clauster.spawn_coordinator._STARTUP_WATCH_INTERVAL", 3.0)
     return sidecars
 
 
