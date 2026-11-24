@@ -366,8 +366,7 @@ Clauster masks secrets in two ways. Only the first one is a guarantee.
       more. Each start or resume of a bridge is a new run with a new log, and it
       gets a new count. The ids of earlier runs stay stored and masked until the
       instance is forgotten. The stream also keeps the first 4 ids of each kind
-      over the life of the instance, as it did before the count per run, so a
-      run can keep a few more than 4. All runs of one instance keep at most 68
+      over the life of the instance. All runs of one instance keep at most 68
       ids of each kind. The ids the instance record holds do not count against
       these limits.
       Echoed text can carry such a tag too, so the tag does not prove that the

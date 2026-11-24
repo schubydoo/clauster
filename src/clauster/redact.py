@@ -1786,7 +1786,7 @@ def redact_known_screen_rows(rows: list[str]) -> list[str]:
     (:meth:`clauster.pty_screen.PtyScreen.frame`), on the rows that leave for the browser, so it
     can only mask more than they did. The pty keeper runs it with the values it knows, and the
     ``/ws/pty-screen`` reader runs it again with every value the Clauster process knows
-    (:func:`clauster.pty_screen.read_screen_sidecar`).
+    (:func:`clauster.pty_screen.read_new_screen_frame`).
     """
     spans = _known_spans("".join(rows))
     if not spans:
