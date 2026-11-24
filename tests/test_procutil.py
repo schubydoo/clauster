@@ -836,6 +836,23 @@ def test_release_bundle_dll_directory_logs_a_failed_reset(monkeypatch, caplog):
     assert "could not reset the DLL directory" in caplog.text and "denied" in caplog.text
 
 
+def test_release_bundle_dll_directory_keeps_the_directory_when_it_cannot_register(
+    monkeypatch, caplog
+):
+    # Review nit on PR 1954: a failed registration is logged, not raised, and the reset is
+    # skipped, since resetting without it would hide the unpack dir from this process too.
+    calls = _as_frozen_windows(monkeypatch)
+
+    def _refuse(path):
+        raise OSError(2, "not found", path)
+
+    monkeypatch.setattr(os, "add_dll_directory", _refuse, raising=False)
+    with caplog.at_level("WARNING", logger="clauster.procutil"):
+        assert procutil.release_bundle_dll_directory() is False
+    assert calls == []  # no SetDllDirectoryW call
+    assert "could not register" in caplog.text
+
+
 @pytest.mark.parametrize("platform", ["linux", "darwin"])
 def test_release_bundle_dll_directory_is_windows_only(monkeypatch, platform):
     calls = _as_frozen_windows(monkeypatch)

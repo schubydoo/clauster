@@ -1325,7 +1325,13 @@ def release_bundle_dll_directory() -> bool:
         return False
     import ctypes
 
-    _bundle_dll_directory = os.add_dll_directory(meipass)
+    try:
+        _bundle_dll_directory = os.add_dll_directory(meipass)
+    except OSError as exc:
+        # Without the registration, a reset would drop the unpack dir from this process's
+        # own search too, so keep the inherited directory and run as before.
+        _log.warning("could not register %s for DLL loads; DLL directory kept (%s)", meipass, exc)
+        return False
     # use_last_error: the reason is saved at the call, before other code can overwrite it.
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     if not kernel32.SetDllDirectoryW(None):
