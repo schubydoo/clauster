@@ -55,29 +55,34 @@ gh api repos/<owner>/<repo>/rulesets --jq '.[]|{id,name,target,enforcement}'
 gh api repos/<owner>/<repo>/immutable-releases   # expect {"enabled": true, ...}
 ```
 
+Immutable releases is a repo setting, not a ruleset file: enable with
+`gh api -X PUT repos/<owner>/<repo>/immutable-releases` (disable with `-X DELETE`).
+
 ### Compare the file with the live ruleset before a PUT
 
 A PUT replaces the whole ruleset with the file. If the file leaves out a parameter
 that the live ruleset has, the PUT can set that parameter back to its default. For
-example, the file once did not have `require_extra_approval_for_unattributed_changes`
-or `required_reviewers`, which the live `main` ruleset had.
+example, until November 2026 the file did not have
+`require_extra_approval_for_unattributed_changes` or `required_reviewers`, which the
+live `main` ruleset had.
 
-Before each PUT, compare the file with the live ruleset. The commands only read, and
-they need `jq` on your `PATH`:
+Before each PUT, compare the file with the live ruleset. The commands only read. Run
+them in bash or zsh (the `<(...)` form is not POSIX `sh`), with `jq` on your `PATH`:
 
-```sh
+```bash
+name=main file=.github/rulesets/main.json   # or: protect-version-tags, tags.json
 keys='{name,target,enforcement,bypass_actors,conditions,rules}'
-id=$(gh api repos/<owner>/<repo>/rulesets --jq '.[]|select(.name=="main")|.id')
+id=$(gh api repos/<owner>/<repo>/rulesets --jq ".[]|select(.name==\"$name\")|.id")
 gh api repos/<owner>/<repo>/rulesets/"$id" | jq -S "$keys" \
-  | diff <(jq -S "$keys" .github/rulesets/main.json) -
+  | diff <(jq -S "$keys" "$file") -
 ```
 
-For `tags.json`, use the name `protect-version-tags`. The output must show only the
-lines that you edited. If it shows another line, the live ruleset and the file do not
-agree on that value. Copy the live value into the file first, in its own pull request.
-
-Immutable releases is a repo setting, not a ruleset file: enable with
-`gh api -X PUT repos/<owner>/<repo>/immutable-releases` (disable with `-X DELETE`).
+In the output, `<` lines come from the file and `>` lines come from the live ruleset.
+The output must show only the values that you edited. `jq -S` sorts object keys but
+not array items, so a change in array order also shows as a difference. If the output
+shows a value that you did not edit, the live ruleset and the file do not agree on it.
+Copy the live value into the file first, in its own pull request. If the live value is
+an out-of-band change that you want to undo, the PUT is the fix.
 
 A small GitHub Action to reconcile these files (plus repo settings and labels)
 automatically — applying on merge and re-applying on a schedule to revert
