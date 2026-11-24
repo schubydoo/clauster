@@ -375,6 +375,7 @@ def test_doctor_silent_without_limit(tmp_path):
 
 def test_doctor_ok_when_supported(tmp_path, monkeypatch):
     monkeypatch.setattr(bridge_scope, "probe_scope_support", lambda: SUPPORT)
+    monkeypatch.setattr(ops.task_limits, "bridge_slice_refused", lambda: None)
     check = ops._check_bridge_task_limit(_config(tmp_path, 30000))
     assert check is not None and check.status == ops.OK
     assert "30000" in check.detail
@@ -529,6 +530,7 @@ def test_doctor_leaves_a_missing_binary_to_the_claude_check(tmp_path, monkeypatc
 
     monkeypatch.setattr(ops.claude_cli, "resolve_binary", _missing)
     monkeypatch.setattr(bridge_scope, "probe_scope_support", lambda: SUPPORT)
+    monkeypatch.setattr(ops.task_limits, "bridge_slice_refused", lambda: None)
     check = ops._check_bridge_task_limit(_config(tmp_path, 30000))
     assert check is not None and check.status == ops.OK
 
