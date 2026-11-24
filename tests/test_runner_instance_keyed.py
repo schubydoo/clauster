@@ -3556,6 +3556,19 @@ async def test_promotion_leaves_a_bridge_with_its_own_startup_watch_alone(
     assert inst.status is InstanceStatus.STARTING, "stole a promotion from the startup-watch"
 
 
+async def test_promotion_leaves_a_bridge_whose_spawn_still_runs_alone(runner_config, monkeypatch):
+    # TASK-545: before its watch exists, the spawn's readiness wait owns the row (a reattach
+    # can still read a poisoned session there), so the poll must not promote it either.
+    runner = _make_runner(runner_config)
+    monkeypatch.setattr("clauster.inspector.list_working_sessions", lambda *a, **k: [])
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
+    _stub_connect(monkeypatch)
+    inst = _adopted_starting(runner)
+    runner._registry._spawn_in_flight[inst.instance_id] = inst.project
+    await runner.poll_once()
+    assert inst.status is InstanceStatus.STARTING, "stole a promotion from the spawn"
+
+
 async def test_promotion_skips_a_row_whose_generation_changed_mid_probe(
     runner_config, monkeypatch
 ):

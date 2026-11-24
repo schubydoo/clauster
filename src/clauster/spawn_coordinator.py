@@ -1408,16 +1408,14 @@ class SpawnCoordinator:
         markers: bridge_log.BridgeMarkers,
         proc: subprocess.Popen,
         *,
-        proc_dead: bool | None = None,
+        proc_dead: bool,
     ) -> None:
         """Fold parsed markers into ``instance`` and derive its status from them plus liveness.
 
         Emits the ``ready`` lifecycle event only on the transition into RUNNING, never on
-        every poll. ``proc_dead`` is the caller's own reading of ``proc.poll()``, when it
-        already decided from it (``_apply_markers_with_detail``); otherwise it is read here.
+        every poll. ``proc_dead`` is the caller's one reading of ``proc.poll()``: the caller
+        decides from that same reading which failure reason to fetch first (TASK-544).
         """
-        if proc_dead is None:
-            proc_dead = proc.poll() is not None
         prev_status = instance.status
         instance.bridge_id = markers.bridge_id or instance.bridge_id
         instance.environment_id = markers.environment_id or instance.environment_id
@@ -1611,8 +1609,9 @@ class SpawnCoordinator:
 
         Only the process that runs the side-effecting poll loop announces (#1104). In a peer
         process (``clauster mcp`` keeps the watch of a bridge it spawned) the watch only
-        reconciles, and the live service, which adopted the row and has no watch for it,
-        announces the death once.
+        reconciles, so the two processes never both announce one death. The exactly-once
+        rule holds inside one process: the live service announces a peer's startup death
+        only when it adopted the row before the death, and then by its own poll loop rules.
         """
         if not self._reports_crashes():
             self._reconcile_status(instance, False)

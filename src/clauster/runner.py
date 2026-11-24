@@ -2534,7 +2534,7 @@ class SessionRunner:
         RUNNING transition. Kept as a thin delegator so the direct-call/patch test seams reach
         it.
         """
-        self._spawner._apply_markers(instance, markers, proc)
+        self._spawner._apply_markers(instance, markers, proc, proc_dead=proc.poll() is not None)
 
     async def _heal_poisoned_reattach(
         self,

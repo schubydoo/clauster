@@ -509,8 +509,11 @@ class PollLoop:
         # here, so a real flag-form/tmux bridge at its cwd still surfaces as external. The
         # STARTING arm is safe for the same reason — a dead STARTING row was already
         # reconciled to CRASHED/STOPPED in the loop above, so it can't shadow an external
-        # bridge; it only covers a just-spawned bridge whose pid isn't live yet but whose
-        # auto-created session `agents --json` already reports.
+        # bridge. (A row that its spawn or startup watch owns, TASK-545, is not reconciled
+        # there: it stays STARTING until its owner ends it, at most one readiness wait or
+        # watch tick later, plus a keeper's login-stop delay.) It only covers a just-spawned
+        # bridge whose pid isn't live yet but whose auto-created session `agents --json`
+        # already reports.
         #
         # Values are LISTS of instance_id, never a project name (#1020 symptom A3): a
         # project may run a standard bridge AND N interactive bridges at once (#778), so
@@ -889,6 +892,8 @@ class PollLoop:
             and inst.bridge_pid is not None
             and pid_is_ours.get(inst.instance_id, False)
             and inst.instance_id not in self._registry._startup_watches
+            # The spawn's readiness wait owns the row as its watch does (TASK-545).
+            and inst.instance_id not in self._registry._spawn_in_flight
         ]
         if not stuck:
             return
@@ -944,6 +949,7 @@ class PollLoop:
                 inst is None
                 or inst.status is not InstanceStatus.STARTING
                 or inst.instance_id in self._registry._startup_watches
+                or inst.instance_id in self._registry._spawn_in_flight
                 or inst.bridge_pid != expected[2]
                 or inst.bridge_proc_start != expected[3]
             ):
@@ -983,8 +989,6 @@ class PollLoop:
 
     async def start_poll_loop(self) -> None:
         """Rediscover already-running bridges, then start the background poll loop."""
-        # First: a startup watch can end a crash before the loop's first tick.
-        self._reports_crashes = True
         await self._rediscover()
         # #867 L4: after live bridges are adopted, GC long-dead pointers (hygiene).
         await self._prune_stale_pointers()

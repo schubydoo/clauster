@@ -187,8 +187,9 @@ _ESCAPE_RUN_LIMIT = 512
 #: Seconds between publishing the error for a screen that holds the bridge (the login screen
 #: or the Settings Error screen) and stopping the bridge. The runner's startup watch reads the
 #: sidecar every 2 s. While the bridge is alive it reads ``error`` as ERROR. Once the keeper is
-#: gone the watch still reads the error as ERROR, and the poll loop leaves a watched row alone
-#: (TASK-545), so the delay only keeps the common path on the live read.
+#: gone the watch still reads the error as ERROR, and the poll loop of the process that runs
+#: the watch leaves the row alone (TASK-545). Another Clauster process that adopted the row
+#: has no watch for it, so its poll loop can still read the stop as a crash.
 _HELD_STOP_DELAY = 5.0
 
 #: Seconds a bridge stopped at such a screen gets to exit after SIGTERM before SIGKILL.

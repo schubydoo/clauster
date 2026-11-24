@@ -3834,6 +3834,39 @@ async def test_crash_note_keeps_the_baseline_when_its_reader_is_cancelled(
     assert await runner._poll_loop.crash_note(inst, 7) is None
 
 
+async def test_watch_reads_the_crash_note_before_the_row_reads_crashed(runner_config, monkeypatch):
+    # TASK-545: no reader sees the CRASHED row without its task-limit reason. The row stays
+    # STARTING while the watch reads it, and turns CRASHED with the note in one step.
+    import threading
+
+    started, release = threading.Event(), threading.Event()
+
+    def held(base):
+        started.set()
+        release.wait(10)
+        return "note"
+
+    monkeypatch.setattr("clauster.poll_loop.task_limits.crash_note", held)
+    runner = _make_runner(runner_config)
+    runner._poll_loop._reports_crashes = True
+    inst = RemoteControlInstance(
+        project="alpha", label="alpha", status=InstanceStatus.STARTING, bridge_pid=7
+    )
+    runner._poll_loop._task_counts[inst.instance_id] = task_limits.TaskEventCount(
+        pid=7, cgroup=Path("/nonexistent"), own=0, parent=None
+    )
+    ending = asyncio.create_task(runner._spawner._reconcile_startup_death(inst))
+    try:
+        assert await asyncio.to_thread(started.wait, 10)
+        assert inst.status is InstanceStatus.STARTING
+    finally:
+        release.set()
+    await ending
+    assert inst.status is InstanceStatus.CRASHED
+    assert inst.task_limit_note == "note"
+    assert runner._crash_counts["alpha"] == 1
+
+
 def test_capture_error_detail_no_log_is_noop():
     inst = RemoteControlInstance(project="x", label="x", bridge_debug_log_path=None)
     SessionRunner._capture_error_detail(inst)  # must not raise
