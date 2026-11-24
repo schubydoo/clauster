@@ -3,10 +3,10 @@ from __future__ import annotations
 import bisect
 import random
 import re
-import time
 
 import pytest
 
+from _growth import assert_linear_time
 from clauster import redact
 
 
@@ -50,10 +50,13 @@ def test_strip_ansi_is_linear_on_osc():
     # sub() linear (single-digit ms). N is kept small enough that a regression fails the
     # assert rather than tripping the suite-wide `--timeout`, which kills the whole
     # xdist worker instead of reporting one red test.
-    hostile = "\x1b]" * 20_000
-    start = time.monotonic()
-    assert redact.strip_ansi(hostile) == ""
-    assert time.monotonic() - start < 1.0
+    assert redact.strip_ansi("\x1b]" * 20_000) == ""
+
+    def strip(units: int):
+        hostile = "\x1b]" * units
+        return lambda: redact.strip_ansi(hostile)
+
+    assert_linear_time(strip, unit=1_250)
 
 
 def test_strip_ansi_keeps_an_osc8_label_that_is_itself_the_url():
@@ -1123,10 +1126,13 @@ def test_strip_ansi_keeps_an_unterminated_c1_string_payload():
 
 def test_strip_ansi_is_linear_on_the_c1_string_introducers():
     # The #1329 ReDoS guard, re-run over the introducers #1344 added to the same branch.
-    hostile = "\x1b_" * 20_000
-    start = time.monotonic()
-    assert redact.strip_ansi(hostile) == ""
-    assert time.monotonic() - start < 1.0
+    assert redact.strip_ansi("\x1b_" * 20_000) == ""
+
+    def strip(units: int):
+        hostile = "\x1b_" * units
+        return lambda: redact.strip_ansi(hostile)
+
+    assert_linear_time(strip, unit=1_250)
 
 
 def test_strip_ansi_leaves_bare_control_characters_alone():
@@ -1244,14 +1250,14 @@ def test_sanitize_line_is_linear_in_the_number_of_cuts():
     # The cut machinery adds a second scan and a bisect per mask. Both are linear, but the
     # obvious alternative — walking back from each cut to find a match that ends there —
     # is quadratic when one long token holds thousands of cuts, which is trivial for a
-    # bridge to emit. Measured ~0.15s for this N and growing 2x per doubling; the bound is
-    # loose enough not to flake on a slow CI runner but tight enough to fail a quadratic
-    # regression, and small enough that it fails the assert rather than tripping the
-    # suite-wide `--timeout` (which kills the whole xdist worker).
-    hostile = ("env_01ABCDEFGH\x07" + "x" * 10) * 20_000
-    start = time.monotonic()
-    redact.sanitize_line(hostile)
-    assert time.monotonic() - start < 5.0
+    # bridge to emit. Measured ~0.15s for this N and growing 2x per doubling. N is small
+    # enough that a regression fails the ratio rather than tripping the suite-wide
+    # `--timeout` (which kills the whole xdist worker).
+    def sanitize(units: int):
+        hostile = ("env_01ABCDEFGH\x07" + "x" * 10) * units
+        return lambda: redact.sanitize_line(hostile)
+
+    assert_linear_time(sanitize, unit=1_250)
 
 
 @pytest.mark.parametrize(
@@ -1337,10 +1343,11 @@ def test_a_cut_at_every_greedy_match_start_stays_linear():
     # of this shape took 8.3 seconds. `redact_for_disk` is handed a whole bridge log
     # (`bridge_log_max_size_mb`, 10 MB by default), so the input size is the bridge's to
     # choose. Measured ~0.2s for this N and growing 2x per doubling.
-    hostile = ("\x01sk-" + "A" * 16) * 40_000
-    start = time.monotonic()
-    redact.sanitize_line(hostile)
-    assert time.monotonic() - start < 5.0
+    def sanitize(units: int):
+        hostile = ("\x01sk-" + "A" * 16) * units
+        return lambda: redact.sanitize_line(hostile)
+
+    assert_linear_time(sanitize, unit=2_500)
 
 
 def _cut_spans_anchoring_every_cut(visible, cuts, opened, closed, keeps_prefix, _single_run):
@@ -1847,13 +1854,16 @@ def test_open_spans_hold_no_list_of_every_start():
 )
 def test_a_long_welded_chain_stays_linear(unit):
     # #1615. `redact_for_disk` is handed a whole bridge log (10 MB by default), so a chain of
-    # welded secrets or UUIDs must cost linear time. About 0.15 s for this N; the bound catches
+    # welded secrets or UUIDs must cost linear time. About 0.15 s for this N; the ratio catches
     # a quadratic walk without tripping the suite-wide timeout.
     hostile = unit * (400_000 // len(unit))
-    start = time.monotonic()
-    redact.sanitize_line(hostile)
     redact.redact_screen_text([hostile[:4800]])
-    assert time.monotonic() - start < 5.0
+
+    def sanitize(units: int):
+        text = unit * units
+        return lambda: redact.sanitize_line(text)
+
+    assert_linear_time(sanitize, unit=(400_000 // len(unit)) // 16)
 
 
 def test_secret_start_rejects_a_core_without_a_counted_class_tail():

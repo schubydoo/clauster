@@ -20,9 +20,8 @@ from fastapi.testclient import TestClient
 
 from clauster.app import create_app
 from clauster.config import load_config
+from conftest import FAKE_CLAUDE
 from helpers import RecordingEmitter, assert_stays_empty, wait_for_calls
-
-FAKE_CLAUDE = Path(__file__).resolve().parent / "fixtures" / "fake_claude" / "claude"
 
 
 def _client(write_config, tmp_path, *, extra: str = "") -> TestClient:

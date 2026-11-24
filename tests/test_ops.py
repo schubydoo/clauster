@@ -12,11 +12,11 @@ import subprocess
 import sys
 import tarfile
 import threading
-import time
 from pathlib import Path
 
 import pytest
 
+from _growth import count_ops
 from clauster import deps
 from clauster import ops as ops_mod
 from clauster.config import load_config
@@ -375,14 +375,15 @@ def test_doctor_survives_a_self_referential_yaml_alias(tmp_path):
 
 def test_doctor_is_not_exponential_on_a_yaml_alias_pyramid(tmp_path):
     # Without a `seen` set the leaf-walk is O(paths), not O(nodes): this 24-level pyramid is
-    # ~540 bytes and took 16.9s inside run_doctor, doubling per level. The wall-clock bound is
-    # deliberately loose (it ran in ~0.002s) — it is here to catch a return to exponential,
-    # not to measure this host.
+    # ~540 bytes and took 16.9s inside run_doctor, doubling per level. The walk runs only for
+    # a secret-shaped field, so the pyramid sits under `auth.password_hash`. The count of
+    # Python lines catches a return to exponential on any host.
     body = ["a0: &a0 [x, y]"] + [f"a{i}: &a{i} [*a{i - 1}, *a{i - 1}]" for i in range(1, 25)]
-    started = time.monotonic()
-    detail = _config_detail(tmp_path / "bad.yml", "\n".join(body) + "\n")
-    assert time.monotonic() - started < 10
+    text = "\n".join(body) + "\nauth:\n  password_hash: *a24\n"
+    count_ops(lambda: _config_detail(tmp_path / "bad.yml", text), budget=600_000)
+    detail = _config_detail(tmp_path / "bad.yml", text)
     assert "projects_root: Field required" in detail
+    assert "auth.password_hash:" in detail  # the field whose error runs the walk
 
 
 def test_doctor_validation_error_detail_withholds_the_parsed_mapping(tmp_path):

@@ -8,6 +8,7 @@ import json
 import subprocess
 import sys
 import time
+import types
 from pathlib import Path
 
 import psutil
@@ -718,24 +719,28 @@ def test_await_ready_pty_returns_on_ready_without_url(runner_config, tmp_path) -
     assert info.get("state") == "ready"  # returns promptly on "ready", not only connect_url
 
 
-def test_await_ready_pty_returns_when_keeper_exits_before_ready(runner_config, tmp_path) -> None:
+def test_await_ready_pty_returns_when_keeper_exits_before_ready(
+    runner_config, tmp_path, monkeypatch
+) -> None:
     # A keeper (and thus bridge) that dies before publishing a connect URL must NOT block
     # _await_ready_pty until _READY_TIMEOUT — the dead-proc arm returns the last snapshot at
     # once. Drive a dead _FakeProc with a sidecar still "starting" (no connect_url) and assert
-    # it returns that snapshot promptly, well under the 15s readiness deadline.
-    import time
-
+    # it returns that snapshot without one poll sleep.
     runner, _ = _pty_runner(runner_config)
     sidecar = tmp_path / "sc.json"
     sidecar.write_text(json.dumps({"state": "starting", "bridge_pid": 11}))
 
-    start = time.monotonic()
+    def must_not_sleep(seconds: float) -> None:
+        raise AssertionError(f"polled ({seconds}s) instead of returning on the dead keeper")
+
+    # Only the module's own `time`, not the global `time.sleep`.
+    clock = types.SimpleNamespace(monotonic=time.monotonic, sleep=must_not_sleep)
+    monkeypatch.setattr("clauster.spawn_coordinator.time", clock)
+
     info = runner._await_ready_pty(sidecar, _FakeProc(alive=False))
-    elapsed = time.monotonic() - start
 
     assert info.get("state") == "starting"  # last snapshot, not a synthesized ready/error
     assert info.get("connect_url") is None
-    assert elapsed < 1.0  # returned on the keeper-dead arm, did not block to _READY_TIMEOUT
 
 
 def test_keeper_pid_skips_sidecar_with_mismatched_proc_start(runner_config) -> None:

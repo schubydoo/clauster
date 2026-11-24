@@ -18,7 +18,6 @@ import json
 import os
 import re
 import shlex
-import time
 from pathlib import Path
 
 import pytest
@@ -26,11 +25,12 @@ import yaml
 from fastapi.testclient import TestClient
 from httpx import Response
 
+from _growth import count_ops
 from clauster import config_write as cw
 from clauster import config_write_skills as sk
 from clauster.app import create_app
 from clauster.config import load_config
-from conftest import needs_symlink
+from conftest import FAKE_CLAUDE, needs_symlink
 
 _VALID_MD = "---\ndescription: does a thing\n---\nInstructions here.\n"
 
@@ -895,8 +895,6 @@ def test_local_overrides_independent_of_project_scope(tmp_path: Path) -> None:
 
 
 # --- gated routes (full FastAPI lifespan) -----------------------------------------------
-
-FAKE_CLAUDE = Path(__file__).resolve().parent / "fixtures" / "fake_claude" / "claude"
 
 
 def _client(write_config, tmp_path, extra: str) -> TestClient:
@@ -2689,9 +2687,25 @@ def test_a_skill_with_a_long_merge_chain_is_read_without_recursion() -> None:
     links = ["x0: &a0 {k: v}"] + [f"x{i}: &a{i} {{<<: *a{i - 1}}}" for i in range(1, 1500)]
     content = "---\ndescription: d\nmetadata:\n  " + "\n  ".join(links) + "\n---\nb\n"
     assert len(content.encode("utf-8")) < sk.MAX_SKILL_MD_BYTES
-    start = time.monotonic()
     sk.validate_skill_md_content(content)  # no raise
-    assert time.monotonic() - start < 10.0  # linear; generous for loaded CI runners
+
+    def seam_walks(length: int):
+        rows = ["x0: &a0 {k: v}"] + [f"x{i}: &a{i} {{<<: *a{i - 1}}}" for i in range(1, length)]
+        root = yaml.compose("metadata:\n  " + "\n  ".join(rows) + "\n", Loader=yaml.SafeLoader)
+
+        def run() -> None:
+            cw._first_nested_yaml11_number(root)
+            cw._duplicate_key(root)
+            cw._has_enclosing_alias(root)
+            cw._has_merge_key(root)
+            cw._merge_expands_beyond(root, cw.MAX_MERGE_EXPANDED_PAIRS)
+
+        return run
+
+    # Only the walks are counted: the parse costs about 16k lines per link and would hide
+    # them. 4x the links cost about 4x the lines, and a walk per link of the chain costs 16x.
+    base = count_ops(seam_walks(375))
+    count_ops(seam_walks(1500), budget=6 * base)
     view = cw.yaml12_view(content.split("---\n")[1])
     assert view["metadata"]["x1499"] == {"k": "v"}
 
@@ -2706,13 +2720,13 @@ def test_a_skill_alias_pyramid_under_a_discarded_key_is_refused_quickly(tmp_path
     ]
     content = "---\ndescription: d\n" + "\n".join(levels) + "\nmetadata: {}\n---\nb\n"
     assert len(content.encode("utf-8")) < 1500
-    start = time.monotonic()
     with pytest.raises(cw.InvalidCandidateError, match="see differently"):
-        sk.validate_skill_md_content(content)
+        # About 346k Python lines. A walk per alias path needs 4**20 visits.
+        count_ops(lambda: sk.validate_skill_md_content(content), budget=1_000_000)
     _skill(tmp_path, content)
+    count_ops(lambda: sk.list_skills(tmp_path), budget=1_000_000)  # about 347k lines
     (item,) = sk.list_skills(tmp_path)
     assert item["frontmatter_error"]
-    assert time.monotonic() - start < 5.0  # a walk per alias path would take hours
 
 
 # --- Greptile on PR 1810: digit-limit ValueError and nested mappings in text fields ------

@@ -15,7 +15,6 @@ import datetime
 import errno
 import json
 import math
-import time
 from pathlib import Path
 
 import pytest
@@ -23,10 +22,12 @@ import yaml
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
+from _growth import assert_linear_time, count_ops
 from clauster import config_write as cw
 from clauster import config_write_plugins, config_write_skills, config_write_subagents
 from clauster.app import create_app
 from clauster.config import ClausterConfig, load_config
+from conftest import FAKE_CLAUDE
 
 # --- capability + scope 404 gate (fail closed) -------------------------------------
 
@@ -657,12 +658,11 @@ def test_load_frontmatter_yaml_accepts_an_alias_pyramid_that_stays_under_the_cap
     # Rejection is by expanded SIZE, never by alias count or depth: a pyramid whose expansion
     # fits is ordinary YAML and must still be accepted. Getting there must also not cost
     # O(distinct paths) -- measured before `_is_self_referential` grew its memo, an 8x8 header
-    # `safe_load` parses in 0.7ms took 1.64s to check. The bound below is orders of magnitude
-    # above the memoized cost, so it is not a timing flake.
+    # `safe_load` parses in 0.7ms took 1.64s to check. The memoized check runs about 126k
+    # Python lines here, parse included, and an unmemoized one adds about 500k.
     header = _alias_pyramid(levels=6, refs=6)  # 67_198 characters, under MAX_EXPANDED_CHARS
-    started = time.perf_counter()
+    count_ops(lambda: cw.load_frontmatter_yaml(header, what="frontmatter"), budget=300_000)
     parsed = cw.load_frontmatter_yaml(header, what="frontmatter")
-    assert time.perf_counter() - started < 0.5
     assert parsed["a6"][0] is parsed["a6"][1]  # accepted WITH its aliases intact
 
 
@@ -671,10 +671,10 @@ def test_load_frontmatter_yaml_rejects_an_alias_pyramid_that_expands_past_the_ca
     # refused, so such a document never reaches disk, and the message names nothing from the
     # document (invariant 4 -- it reaches the browser as a skill's `frontmatter_error`).
     header = _alias_pyramid(levels=8, refs=8)
-    started = time.perf_counter()
     with pytest.raises(cw.InvalidCandidateError, match="expands past the .* character cap"):
-        cw.load_frontmatter_yaml(header, what="frontmatter")
-    assert time.perf_counter() - started < 0.5  # the guard short-circuits AT the cap
+        # The guard short-circuits AT the cap: about 170k lines, where a walk of every alias
+        # path runs millions.
+        count_ops(lambda: cw.load_frontmatter_yaml(header, what="frontmatter"), budget=500_000)
 
 
 def test_load_frontmatter_yaml_rejects_a_pyramid_whose_leaf_is_one_long_scalar() -> None:
@@ -882,6 +882,10 @@ def test_expands_beyond_counts_a_diamond_once_and_sizes_scalars_by_length() -> N
 # post-parse guard -- `_is_self_referential`, `_expands_beyond`, `_first_json_unsafe` -- can
 # see it: they only run on the returned object, and reaching it took 7s for 456 bytes. The
 # fix refuses it on the composed NODE graph, which `yaml.compose` builds WITHOUT flattening.
+#
+# The timings here are for a PyYAML without the merge dedupe. PyYAML 6.0.4, the locked
+# version, dedupes merged pairs by key in `flatten_mapping`, so on it the flatten is cheap.
+# `pyyaml>=6.0` still allows a version where it is not, which is why the guard stays.
 
 
 def _merge_pyramid(*, levels: int, refs: int) -> str:
@@ -902,10 +906,9 @@ def test_the_merge_pyramid_reproducer_is_a_positive_control() -> None:
     """
     header = _merge_pyramid(levels=6, refs=8)  # ~300k flattened pairs from < 400 bytes
     assert len(header.encode()) < 400  # orders of magnitude under every byte cap
-    # `compose` builds the node DAG without following a single merge -- milliseconds.
-    started = time.perf_counter()
+    # `compose` builds the node DAG without following a single merge: about 42k lines.
+    count_ops(lambda: yaml.compose(header, Loader=yaml.SafeLoader), budget=150_000)
     root = yaml.compose(header, Loader=yaml.SafeLoader)
-    assert time.perf_counter() - started < 0.2
     assert cw._merge_expands_beyond(root, cw.MAX_MERGE_EXPANDED_PAIRS)
     # `safe_load` DOES flatten, and the dict it returns is tiny (the merged `k` dedupes to one),
     # so the cost is entirely in the parse where no post-parse guard can reach it.
@@ -915,16 +918,17 @@ def test_the_merge_pyramid_reproducer_is_a_positive_control() -> None:
 
 
 def test_load_frontmatter_yaml_rejects_a_merge_pyramid_before_it_detonates() -> None:
-    # The whole point: refuse it FAST, before `safe_load` flattens. Without the pre-parse guard
-    # this header holds a worker thread for ~7s (#1417); with it, the compose walk short-circuits
-    # at the pair cap in milliseconds. The 1s bound is a positive control -- reverting the guard
-    # makes `safe_load` run to completion (no raise, ~7s) and fails BOTH assertions.
-    header = _merge_pyramid(levels=8, refs=8)  # ~19M flattened pairs -> ~7s in `safe_load`
+    # The whole point: refuse it FAST, before `safe_load` flattens. On a PyYAML without the merge
+    # dedupe this header held a worker thread for ~7s (#1417); with the guard, the compose walk
+    # short-circuits at the pair cap in about 189k Python lines. Removing the guard fails the
+    # `raises`, and a guard that walks every merge path fails the budget.
+    header = _merge_pyramid(levels=8, refs=8)  # ~19M pairs without the dedupe (see above)
     assert len(header.encode()) < 550  # ~503 bytes, inside every byte cap
-    started = time.perf_counter()
     with pytest.raises(cw.InvalidCandidateError, match="pair cap through its YAML merge keys"):
-        cw.load_frontmatter_yaml(header, what="frontmatter", line_offset=1)
-    assert time.perf_counter() - started < 1.0  # the guarded parse never reaches the flatten
+        count_ops(
+            lambda: cw.load_frontmatter_yaml(header, what="frontmatter", line_offset=1),
+            budget=600_000,
+        )
 
 
 def test_the_merge_pyramid_rejection_carries_no_document_payload() -> None:
@@ -1008,10 +1012,9 @@ def test_load_frontmatter_yaml_rejects_wide_sibling_merges_that_each_stay_small(
     shared = _merge_pyramid(levels=4, refs=7)  # `a4` flattens to 2_801 pairs, tiny per mapping
     siblings = "\n".join(f"s{i}: {{<<: *a4, id: {i}}}" for i in range(50))  # ~50 * 2_802 pairs
     header = shared + siblings + "\n"
-    started = time.perf_counter()
     with pytest.raises(cw.InvalidCandidateError, match="pair cap through its YAML merge keys"):
-        cw.load_frontmatter_yaml(header, what="frontmatter")
-    assert time.perf_counter() - started < 1.0  # refused on the node graph, before the flatten
+        # Refused on the node graph, before the flatten: about 598k lines.
+        count_ops(lambda: cw.load_frontmatter_yaml(header, what="frontmatter"), budget=1_500_000)
 
 
 def test_load_frontmatter_yaml_refuses_a_self_referential_merge_quickly() -> None:
@@ -1020,10 +1023,11 @@ def test_load_frontmatter_yaml_refuses_a_self_referential_merge_quickly() -> Non
     # (`flatten_mapping` deletes the merge key before recursing) and silently drop the merge,
     # but the CLI's YAML 1.2 loader refuses it ("Merge key cannot reference an enclosing
     # node"), so since TASK-449.6 the seam refuses it too, on the node graph, before the load.
-    started = time.perf_counter()
     with pytest.raises(cw.InvalidCandidateError, match="alias to a node that encloses it"):
-        cw.load_frontmatter_yaml("x: &x {<<: *x, k: v}\n", what="frontmatter")
-    assert time.perf_counter() - started < 1.0
+        count_ops(  # about 12k lines
+            lambda: cw.load_frontmatter_yaml("x: &x {<<: *x, k: v}\n", what="frontmatter"),
+            budget=50_000,
+        )
 
 
 # --- #1369: a YAMLError's prose must not echo the offending token -------------------------
@@ -1621,8 +1625,6 @@ def test_redact_secret_lines_preserves_crlf_endings() -> None:
 
 # --- the gated status route (404 off / flags on), with FastAPI lifespan ------------
 
-FAKE_CLAUDE = Path(__file__).resolve().parent / "fixtures" / "fake_claude" / "claude"
-
 
 def _client(write_config, tmp_path, extra: str) -> TestClient:
     cfg = write_config(f"claude:\n  binary: {FAKE_CLAUDE}\nstate_dir: {tmp_path}/.s\n{extra}")
@@ -1702,17 +1704,20 @@ def test_interp_scan_is_linear_on_hostile_input():
     `${` repeated with no closing brace is the shape that made the old regex restart a
     full-length scan at every opener: measured ~2s at 128 KB and ~2 minutes at 1 MB, on a
     value that arrives unbounded from a cloned repository's `.claude/settings.json`. The
-    bound is deliberately loose (the scan is microseconds) so it flags a return to
-    quadratic behaviour without flaking on a loaded CI runner.
+    check compares one run over the input with runs over equal parts of it, so it flags a
+    return to quadratic behaviour without depending on the speed of the runner.
     """
-    import time
 
-    hostile = "${" * 500_000  # 1 MB, no closing brace anywhere
-    start = time.perf_counter()
-    assert cw._has_interp(hostile) is False
-    assert cw._mask_interps(hostile, cw.REDACTION_SENTINEL) == hostile
-    elapsed = time.perf_counter() - start
-    assert elapsed < 2.0, f"interpolation scan took {elapsed:.2f}s — quadratic behaviour is back"
+    def scan(units: int):
+        hostile = "${" * units  # no closing brace anywhere
+
+        def run() -> None:
+            assert cw._has_interp(hostile) is False
+            assert cw._mask_interps(hostile, cw.REDACTION_SENTINEL) == hostile
+
+        return run
+
+    assert_linear_time(scan, unit=8_000)  # 256 KB in the whole run, about 8s if quadratic
 
 
 def test_url_and_kv_scans_match_the_regexes_they_replaced():
@@ -1774,8 +1779,8 @@ def test_redact_secret_lines_is_linear_on_every_hostile_shape():
     The check is a growth ratio, not a wall-clock bound: each shape runs at size ``n`` and
     ``4n``, and a linear pass costs about 4x where a quadratic one costs about 16x. A fixed
     bound failed on a slow CI runner under coverage (2.24s for a shape that takes 0.11s
-    locally), while the ratio does not depend on the speed of the machine. The ceiling of
-    30s per shape still catches a catastrophic regression at the full size.
+    locally), while the ratio does not depend on the speed of the machine. A run past 30s
+    with a failing ratio ends the retries early, and it is never a failure by itself.
     """
     import time
 
@@ -1810,7 +1815,6 @@ def test_redact_secret_lines_is_linear_on_every_hostile_shape():
         # Small and large runs alternate, so a load change on a shared CI runner hits both.
         small = timed(small_payload)
         large = timed(large_payload)
-        assert large < 30.0, f"{label} took {large:.2f}s — quadratic behaviour is back"
         # The 2 ms floor keeps a near-zero denominator from inflating the ratio.
         return large / max(small, 0.002), large
 
@@ -1828,6 +1832,8 @@ def test_redact_secret_lines_is_linear_on_every_hostile_shape():
             ratios.append(ratio)
             if ratio < 9.0 or large < 0.05:
                 break
+            if large > 30.0:  # already failing: another try would only spend the suite timeout
+                pytest.fail(f"{label}: 4x the input cost {ratio:.1f}x in {large:.0f}s")
         else:
             pytest.fail(f"{label}: 4x the input cost {min(ratios):.1f}x on 3 tries — not linear")
 
@@ -2138,10 +2144,9 @@ def test_a_merge_pyramid_in_a_retried_header_is_refused_quickly() -> None:
         f"&l{i} {{<<: [*l{i - 1}, *l{i - 1}]}}" for i in range(1, 22)
     ]
     header = "argument-hint: [a] [b]\nx: [" + ", ".join(levels) + "]\n"
-    started = time.perf_counter()
     with pytest.raises(cw.InvalidCandidateError):
-        cw.load_frontmatter_yaml(header, what="frontmatter")
-    assert time.perf_counter() - started < 2.0
+        # About 279k lines. A walk of every merge path needs 2**21 visits.
+        count_ops(lambda: cw.load_frontmatter_yaml(header, what="frontmatter"), budget=800_000)
 
 
 def test_the_retry_keeps_an_already_quoted_value() -> None:
@@ -2352,10 +2357,10 @@ def test_a_merge_pyramid_in_any_spelling_hits_the_pair_cap_quickly(merge: str) -
     levels = ["l0: &l0 {k0: 0, k1: 1}"] + [
         f"l{i}: &l{i} {{{merge} : [*l{i - 1}, *l{i - 1}], k{i}: {i}}}" for i in range(1, 24)
     ]
-    started = time.perf_counter()
+    header = "\n".join(levels) + "\n"
     with pytest.raises(cw.InvalidCandidateError, match="pair cap"):
-        cw.load_frontmatter_yaml("\n".join(levels) + "\n", what="frontmatter")
-    assert time.perf_counter() - started < 5.0
+        # At most about 362k lines over the spellings. A walk per merge path needs 2**23 visits.
+        count_ops(lambda: cw.load_frontmatter_yaml(header, what="frontmatter"), budget=1_000_000)
 
 
 def _override_pyramid(depth: int) -> list[str]:
@@ -2382,13 +2387,16 @@ def test_every_seam_walk_is_memoized_on_an_override_shaped_pyramid() -> None:
         + "\nmetadata: {<<: {x: *P20}, x: 1}\n"
     )
     root = yaml.compose(header, Loader=yaml.SafeLoader)
-    started = time.perf_counter()
-    cw._first_nested_yaml11_number(root)
-    cw._duplicate_key(root)
-    cw._has_enclosing_alias(root)
-    cw._has_merge_key(root)
-    cw.yaml12_view(header)
-    assert time.perf_counter() - started < 2.0
+
+    def every_walk() -> None:
+        cw._first_nested_yaml11_number(root)
+        cw._duplicate_key(root)
+        cw._has_enclosing_alias(root)
+        cw._has_merge_key(root)
+        cw.yaml12_view(header)
+
+    count_ops(every_walk, budget=400_000)  # about 128k lines; a walk per path needs 4**20 visits
+    every_walk()
 
 
 def _inline_pyramid(depth: int) -> str:
@@ -2410,10 +2418,13 @@ def test_an_override_shaped_pyramid_saves_quickly_on_both_surfaces() -> None:
         "---\nname: x\ndescription: d\nmcpServers:\n"
         f"  - srv: {{command: c, <<: {{args: {pyramid}}}, args: []}}\n---\nb\n"
     )
-    started = time.perf_counter()
-    config_write_skills.validate_skill_md_content(skill)
-    config_write_subagents.validate_agent_content(agent, expected_name="x")
-    assert time.perf_counter() - started < 5.0
+
+    def save_both() -> None:
+        config_write_skills.validate_skill_md_content(skill)
+        config_write_subagents.validate_agent_content(agent, expected_name="x")
+
+    count_ops(save_both, budget=2_500_000)  # about 910k lines; a walk per path needs 4**20
+    save_both()
 
 
 @pytest.mark.parametrize("parse", _both_parsers())
@@ -2642,10 +2653,13 @@ def test_quoted_end_reads_yaml_escapes(body: str, expected: int | None) -> None:
 
 def test_quoted_end_is_linear_on_many_escaped_quotes() -> None:
     # The CodeQL polynomial-regex shape: an unclosed quote then many `\"` pairs.
-    body = '"' + '\\"' * 200_000
-    start = time.perf_counter()
-    assert cw._quoted_end(body, 0) is None
-    assert time.perf_counter() - start < 2.0
+    assert cw._quoted_end('"' + '\\"' * 200_000, 0) is None
+
+    def scan(units: int):
+        body = '"' + '\\"' * units
+        return lambda: cw._quoted_end(body, 0)
+
+    assert_linear_time(scan, unit=12_500)  # 200k pairs in the whole run
 
 
 def test_a_comment_inside_a_secret_block_still_masks_a_credential_url() -> None:

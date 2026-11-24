@@ -22,6 +22,7 @@ from clauster import config_write as cw
 from clauster import config_write_settings as cws
 from clauster.app import create_app
 from clauster.config import load_config
+from conftest import FAKE_CLAUDE
 
 S = cw.REDACTION_SENTINEL
 
@@ -358,7 +359,7 @@ def test_desktop_only_keys_are_named_and_left_out_of_the_merged_view() -> None:
 def test_settings_read_route_names_the_desktop_only_keys(
     write_config, tmp_path, projects_root
 ) -> None:
-    fake = Path(__file__).resolve().parent / "fixtures" / "fake_claude" / "claude"
+    fake = FAKE_CLAUDE
     cfg = write_config(
         f"claude:\n  binary: {fake}\nstate_dir: {tmp_path}/.s\n"
         "config_write:\n  enabled: true\n  allow_user_scope: true\n"
@@ -542,7 +543,7 @@ def test_local_true_is_left_out_of_the_merged_view(path: str) -> None:
 
 
 def test_route_refuses_an_ignored_key_with_its_message(write_config, tmp_path, projects_root):
-    fake = Path(__file__).resolve().parent / "fixtures" / "fake_claude" / "claude"
+    fake = FAKE_CLAUDE
     cfg = write_config(
         f"claude:\n  binary: {fake}\nstate_dir: {tmp_path}/.s\nconfig_write:\n  enabled: true\n"
     )
@@ -566,7 +567,7 @@ def test_route_refuses_an_ignored_key_with_its_message(write_config, tmp_path, p
 def test_route_sends_skill_overrides_to_the_skills_tab(write_config, tmp_path, projects_root):
     # TASK-499: a Settings save of skillOverrides is refused and names the Skills tab,
     # whose route runs validate_skill_overrides. The bad key would pass the Settings checks.
-    fake = Path(__file__).resolve().parent / "fixtures" / "fake_claude" / "claude"
+    fake = FAKE_CLAUDE
     cfg = write_config(
         f"claude:\n  binary: {fake}\nstate_dir: {tmp_path}/.s\nconfig_write:\n  enabled: true\n"
     )

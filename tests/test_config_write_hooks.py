@@ -33,6 +33,7 @@ from clauster import config_write as cw
 from clauster import config_write_hooks as hooks
 from clauster.app import create_app
 from clauster.config import load_config
+from conftest import FAKE_CLAUDE
 
 # A structurally valid command-hook matcher group, reused across tests.
 _GROUP = {"matcher": "Bash", "hooks": [{"type": "command", "command": "echo hi"}]}
@@ -414,8 +415,6 @@ def test_local_write_never_executes_command(tmp_path: Path) -> None:
 
 
 # --- gated routes (full FastAPI lifespan) ------------------------------------------
-
-FAKE_CLAUDE = Path(__file__).resolve().parent / "fixtures" / "fake_claude" / "claude"
 
 
 def _client(write_config, tmp_path, extra: str) -> TestClient:

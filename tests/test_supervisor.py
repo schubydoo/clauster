@@ -17,8 +17,7 @@ from clauster import procutil, supervisor
 from clauster.app import create_app
 from clauster.claude_cli import ClaudeNotFound
 from clauster.config import CEILING_GATED_MODES, ClausterConfig, load_config
-
-FAKE_CLAUDE = Path(__file__).resolve().parent / "fixtures" / "fake_claude" / "claude"
+from conftest import FAKE_CLAUDE
 
 
 def _state(**overrides) -> dict:

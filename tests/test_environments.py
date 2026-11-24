@@ -21,8 +21,7 @@ from clauster.environments import (
     find_ghosts,
     load_credentials,
 )
-
-FAKE_CLAUDE = Path(__file__).resolve().parent / "fixtures" / "fake_claude" / "claude"
+from conftest import FAKE_CLAUDE
 
 
 class MockTransport:

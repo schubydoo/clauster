@@ -20,9 +20,8 @@ from clauster import redact
 from clauster.app import create_app
 from clauster.config import ClausterConfig, load_config
 from clauster.runner import SessionRunner
+from conftest import FAKE_CLAUDE
 from helpers import RecordingEmitter, assert_stays_empty, wait_for_calls
-
-FAKE_CLAUDE = Path(__file__).resolve().parent / "fixtures" / "fake_claude" / "claude"
 
 
 def _client(write_config, tmp_path) -> TestClient:

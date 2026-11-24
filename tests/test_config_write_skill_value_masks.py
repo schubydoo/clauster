@@ -34,13 +34,13 @@ from clauster import config_write as cw
 from clauster import config_write_skills as sk
 from clauster.app import create_app
 from clauster.config import load_config
+from conftest import FAKE_CLAUDE
 
 MASK = cw.REDACTION_SENTINEL
 #: ``https://u:qv-bin@h.example.com`` as base64, for a ``!!binary`` value.
 _B64_URL = "aHR0cHM6Ly91OnF2LWJpbkBoLmV4YW1wbGUuY29t"
 #: ``password=qv-b64kv`` as base64.
 _B64_KV = "cGFzc3dvcmQ9cXYtYjY0a3Y="
-FAKE_CLAUDE = Path(__file__).resolve().parent / "fixtures" / "fake_claude" / "claude"
 
 _STDIO = (
     "---\ndescription: d\nmcpServers:\n  gh:\n    command: npx\n"

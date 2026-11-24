@@ -24,6 +24,7 @@ from clauster import config_write as cw
 from clauster import config_write_permissions as perms
 from clauster.app import create_app
 from clauster.config import PERMISSION_LABELS, load_config
+from conftest import FAKE_CLAUDE
 
 # --- structural validator: accept the valid shapes ---------------------------------
 
@@ -347,8 +348,6 @@ def test_local_scope_is_independent_of_project_scope_file(tmp_path: Path) -> Non
 
 
 # --- gated routes (full FastAPI lifespan) ------------------------------------------
-
-FAKE_CLAUDE = Path(__file__).resolve().parent / "fixtures" / "fake_claude" / "claude"
 
 
 def _client(write_config, tmp_path, extra: str) -> TestClient:
