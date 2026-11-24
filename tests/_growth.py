@@ -34,6 +34,10 @@ def count_ops(call: Callable[[], object], *, budget: int | None = None) -> int:
     failure carries no traceback or exception context, because a report that renders them
     can expand the same hostile input that the budget stopped (a pydantic error in the chain
     prints its input).
+
+    On Python 3.13 and lower, this tracer replaces coverage's tracer for the whole call, so
+    coverage records no line that the call runs. If the call is the only test of a code path,
+    run it again outside this helper.
     """
     count = 0
     message = f"the call ran past its budget of {budget} Python lines"
