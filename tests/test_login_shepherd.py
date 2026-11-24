@@ -91,21 +91,66 @@ def test_start_custom_url_is_parsed(shepherd, monkeypatch) -> None:
         shepherd.cancel()
 
 
-def test_start_takes_an_unknown_host_url_only_when_the_window_closes(shepherd, monkeypatch):
+def test_start_takes_an_unknown_host_url_only_when_the_window_closes(
+    shepherd, monkeypatch, caplog
+):
     # TASK-566: a URL on an unknown host is the selection rule's last resort, so start() no
     # longer takes it the moment it appears (a real link could still follow). It is still
     # taken, as before, once the start window has closed on a process that is still running.
+    url = "https://login.example.net/authorize?x=1"
     monkeypatch.setenv("FAKE_CLAUDE_LOGIN_MODE", "ready")
-    monkeypatch.setenv("FAKE_CLAUDE_LOGIN_URL", "https://login.example.net/authorize?x=1")
+    monkeypatch.setenv("FAKE_CLAUDE_LOGIN_URL", url)
     monkeypatch.setattr(ls, "START_TIMEOUT_SECONDS", 0.5)
+    real_wait_for = ls._wait_for
+    window: dict[str, float] = {}
+
+    def _wait_once_printed(flow, condition, *, timeout):
+        # Open the short window only once the URL is in the output, so a slow start of the
+        # fake (a cold Python behind a `.cmd` on Windows) cannot use the window up.
+        give_up = time.monotonic() + 30
+        while url not in flow.snapshot() and time.monotonic() < give_up:
+            time.sleep(0.01)
+        window["opened"] = time.monotonic()
+        return real_wait_for(flow, condition, timeout=timeout)
+
+    monkeypatch.setattr(ls, "_wait_for", _wait_once_printed)
     try:
-        began = time.monotonic()
-        result = shepherd.start("login")
-        assert result["authorize_url"] == "https://login.example.net/authorize?x=1"
-        assert time.monotonic() - began >= 0.5  # it waited the window out
+        with caplog.at_level(logging.WARNING, logger="clauster.login_shepherd"):
+            result = shepherd.start("login")
+        assert result["authorize_url"] == url
+        assert time.monotonic() - window["opened"] >= 0.5  # it waited the window out
         assert shepherd.is_active()  # a usable login: the process still waits for a code
+        assert "'login.example.net'" in caplog.text  # and it says why the wait was long
+        assert "x=1" not in caplog.text  # the host only, never the rest of the URL
     finally:
         shepherd.cancel()
+
+
+@_POSIX_ONLY
+@pytest.mark.parametrize("steady", [True, False])
+def test_start_setup_token_deadline_pick_must_be_stable(shepherd, monkeypatch, steady) -> None:
+    # The setup-token fallback at the deadline keeps the two-read stability rule (#852): a
+    # screen URL that is still changing (a link half drawn) is not handed back as final.
+    reads = {"n": 0}
+
+    def _find(self):
+        reads["n"] += 1
+        return (
+            "https://login.example.net/a" if steady else f"https://login.example.net/{reads['n']}"
+        )
+
+    monkeypatch.setenv("FAKE_CLAUDE_LOGIN_MODE", "no_url")
+    monkeypatch.setattr(ls, "START_TIMEOUT_SECONDS", 0.5)
+    monkeypatch.setattr(ls.PtyScreen, "find_authorize_url", _find)
+    if steady:
+        try:
+            assert shepherd.start("setup-token")["authorize_url"] == "https://login.example.net/a"
+        finally:
+            shepherd.cancel()
+    else:
+        with pytest.raises(ls.LoginShepherdError, match="no authorize URL appeared"):
+            shepherd.start("setup-token")
+        assert not shepherd.is_active()
 
 
 def test_start_no_url_fails_closed(shepherd, monkeypatch) -> None:
@@ -158,7 +203,10 @@ def test_start_url_read_only_after_the_exit_names_the_right_reason(shepherd, mon
             return code
 
         flow.proc.poll = _poll
-        exit_seen.wait(timeout=10)  # bounded: a hang fails the test instead of the worker
+        # `returncode` is set only by a poll or wait on the main thread, so None here means
+        # every later poll goes through the wrapper. Bounded: a hang fails the test instead.
+        if flow.proc.returncode is None:
+            exit_seen.wait(timeout=10)
         real_pump(flow)
 
     monkeypatch.setattr(ls, "_pump_stdout", _pump_after_exit)

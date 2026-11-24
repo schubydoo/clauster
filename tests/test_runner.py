@@ -3593,13 +3593,37 @@ def _lifecycle_events(runner, monkeypatch) -> list[str]:
     return seen
 
 
+class _HeldWatchAsyncio:
+    """``asyncio`` as ``spawn_coordinator`` sees it, with every sleep held until ``release``.
+
+    The startup watch's tick is the module's only ``asyncio.sleep``, so this holds that tick
+    and nothing else, and leaves the global ``asyncio.sleep`` alone. Everything else is the
+    real module.
+    """
+
+    def __init__(self, release: asyncio.Event) -> None:
+        self._release = release
+
+    def __getattr__(self, name: str):
+        return getattr(asyncio, name)
+
+    async def sleep(self, delay: float, result=None):
+        await self._release.wait()
+        return await asyncio.sleep(delay, result)
+
+
 async def test_startup_crash_with_a_poll_in_the_gap_is_counted_once(runner_config, monkeypatch):
     # TASK-545: a poll between the bridge's death and the watch's next tick used to decide
     # the outcome behind the watch. Now the watch owns a STARTING row, and it counts and
     # announces a real startup crash exactly once, with its task-limit reason.
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "stall")
     monkeypatch.setattr("clauster.spawn_coordinator._READY_TIMEOUT", 0.2)
-    monkeypatch.setattr("clauster.spawn_coordinator._STARTUP_WATCH_INTERVAL", 1.5)
+    # The watch's first tick waits for `release`, set after the poll below. A 1.5 s interval
+    # used to stand in for that, and under a load average of 60 to 87 the kill, the wait and
+    # the poll did not fit in it: the watch ticked first and reconciled the death itself.
+    release = asyncio.Event()
+    monkeypatch.setattr("clauster.spawn_coordinator.asyncio", _HeldWatchAsyncio(release))
+    monkeypatch.setattr("clauster.spawn_coordinator._STARTUP_WATCH_INTERVAL", 0.05)
     monkeypatch.setattr(
         "clauster.poll_loop.task_limits.crash_note", lambda base: f"limit hit by {base.pid}"
     )
@@ -3620,6 +3644,7 @@ async def test_startup_crash_with_a_poll_in_the_gap_is_counted_once(runner_confi
     assert inst.status is InstanceStatus.STARTING, "the poll loop decided a watched start"
     assert runner._crash_counts.get("alpha", 0) == 0
 
+    release.set()  # now the watch's next tick
     await runner._startup_watches[inst.instance_id]
     assert inst.status is InstanceStatus.CRASHED
     assert runner._crash_counts["alpha"] == 1

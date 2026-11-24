@@ -317,6 +317,11 @@ def is_known_auth_url(url: str) -> bool:
     return _is_known_auth_host(_url_host(url))
 
 
+def url_host(url: str) -> str:
+    """Return the lowercased host of ``url``, or "" if it does not parse (for a log line)."""
+    return _url_host(url)
+
+
 def extract_authorize_url(output: str) -> str | None:
     """Return the best authorize URL in ``output``, or None if none is present.
 

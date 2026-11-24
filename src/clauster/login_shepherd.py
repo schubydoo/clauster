@@ -59,6 +59,7 @@ from .pty_screen import (
     PyteUnavailableError,
     extract_authorize_url,
     is_known_auth_url,
+    url_host,
 )
 
 _T = TypeVar("_T")
@@ -767,12 +768,18 @@ class LoginShepherd:
             # line only appears in the buffer once whole — so it needs no such guard.
             # Read through `_read_screen`: a pyte render fault must degrade this poll to
             # "no URL yet" and let the next one try again, never kill the request (#1358).
-            def _screen_url(_output: str) -> str | None:
+            def _screen_url() -> str | None:
                 """Return the best URL on the rendered screen (the buffer is not read)."""
                 return _read_screen(flow, screen.find_authorize_url)
 
-            find_any = _screen_url
-            condition = _stable_match_finder(lambda: _known_auth_only(_screen_url("")))
+            def _stable_screen_url(_output: str) -> str | None:
+                """Return the screen's URL only if two reads one poll apart agree (#852)."""
+                first = _screen_url()
+                time.sleep(_POLL_INTERVAL_SECONDS)
+                return first if first is not None and first == _screen_url() else None
+
+            find_any = _stable_screen_url
+            condition = _stable_match_finder(lambda: _known_auth_only(_screen_url()))
         else:
             find_any = _extract_authorize_url
             condition = _known_auth_url_in
@@ -781,8 +788,19 @@ class LoginShepherd:
         if url is None and not exited:
             # The window closed with no pick on a known auth host, and the process still runs.
             # The output is now as complete as it will get, so the rule's fallback may answer:
-            # an unknown host stays usable, as the rule has always allowed.
+            # an unknown host stays usable, as the rule has always allowed. Read it afresh: a
+            # line the reader appended after the wait's last look counts too.
+            output = flow.snapshot()
             url = find_any(output)
+            if url is not None:
+                # Not silent: every sign-in now waits out the whole window, and this is why.
+                _log.warning(
+                    "login_shepherd: %s printed no URL on a known auth host within %.0fs; "
+                    "using one on %r (did the CLI move its sign-in host?)",
+                    mode,
+                    START_TIMEOUT_SECONDS,
+                    url_host(url),
+                )
         if url is not None and not exited:
             # A URL appeared while the process still looked alive — but `_wait_for` breaks
             # the instant a URL matches, and `poll()` can lag a just-returned `exit()` by a
