@@ -872,7 +872,8 @@ class PollLoop:
         shows "preparing connect link…" forever for a bridge that is fine.
 
         Re-read that evidence here for exactly the rows that can be stuck: STARTING, pid
-        provably still ours, no connect URL yet, and no startup watch of their own.
+        provably still ours, no connect URL yet, no startup watch of their own, and no
+        spawn still in flight (TASK-545).
         Promotion still requires the evidence itself — ``_connect_facts_for`` resolves
         only from a live pointer or a ready sidecar — so a bridge that is merely alive
         stays STARTING, which is the honest state and the rule ``_reconcile_status``

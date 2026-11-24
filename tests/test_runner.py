@@ -3680,8 +3680,8 @@ async def test_peer_process_watch_reconciles_a_startup_crash_without_announcing(
     runner_config, monkeypatch
 ):
     # TASK-545 with #1104: a process that never runs the side-effecting poll (`clauster
-    # mcp` keeps the watch of a bridge it spawned) only reconciles. The live service, which
-    # adopts the row and has no watch for it, announces the death, so it is announced once.
+    # mcp` keeps the watch of a bridge it spawned) only reconciles, so two processes never
+    # both announce one death. The live service announces it if it adopted the row first.
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "stall")
     monkeypatch.setattr("clauster.spawn_coordinator._READY_TIMEOUT", 0.2)
     monkeypatch.setattr("clauster.spawn_coordinator._STARTUP_WATCH_INTERVAL", 0.05)
