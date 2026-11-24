@@ -2452,7 +2452,11 @@ read every managed source (server-managed settings, and MDM or registry policies
 it does not try to inspect the files. Instead, it refuses <code>inherit</code> itself:</p>
 <ul>
 <li>The launch picker offers <strong>No forced mode</strong> only on a project with
-  <code>allow_bypass_permissions: true</code>.</li>
+  <code>allow_bypass_permissions: true</code>. On another project, a launch whose configured
+  default (<code>instance_defaults.permission_mode</code>) is <code>inherit</code> or <code>bypassPermissions</code>
+  starts at <strong>Ask each time</strong>, and a note under the picker gives the reason.</li>
+<li>A Desktop launch with <strong>No forced mode</strong> asks you to type the project name, as
+  <code>bypassPermissions</code> does.</li>
 <li>Every launch channel (standard bridge, Interactive Session, browser/hosted, and
   background runs) refuses <code>inherit</code> with a <code>403</code> on any other project. This
   includes a request that names no mode while <code>instance_defaults.permission_mode</code>
