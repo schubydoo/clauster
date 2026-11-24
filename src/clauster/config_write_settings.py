@@ -819,6 +819,9 @@ def _orphan_sentinel_path(incoming: Any, stored: Any, path: str) -> str | None:
     ``plugins``) would move one entry's credential into another and report success.
     A dict is matched by key. A list that holds a sentinel must keep its length, and
     each element that holds one must come back unchanged apart from its sentinels.
+    ``stored`` is the view that :func:`_align_masked_lists` built, so a list whose masked
+    elements each bound to one stored element already has ``incoming``'s order and length
+    here (TASK-473); this position rule then refuses only what that binding could not do.
 
     The walk stops at the first list on each path: below it, an element with no sentinel
     has nothing to match, and one that came back unchanged has every sentinel where the
@@ -869,6 +872,97 @@ def _sentinel_holders(*values: Any) -> set[int]:
         elif any(c == cw.REDACTION_SENTINEL or id(c) in holders for c in children):
             holders.add(id(node))
     return holders
+
+
+def _holds_mask(value: Any) -> bool:
+    """Whether a string under ``value``, at any depth, holds the sentinel, whole or in part.
+
+    "In part" is a url that the read view masked in place (``?token=********``).
+    """
+    stack = [value]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            stack.extend(node.values())
+        elif isinstance(node, list):
+            stack.extend(node)
+        elif isinstance(node, str) and cw.REDACTION_SENTINEL in node:
+            return True
+    return False
+
+
+def _canonical(value: Any) -> str:
+    """Return ``value`` (parsed JSON, nested at most as deep as the read could mask) as text.
+
+    Strict about types where ``==`` is not (``1`` and ``1.0`` differ): such a mismatch
+    only makes the binding fail, and the position rule decides as before.
+    """
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def _bind_by_identity(
+    incoming: list[Any], stored: list[Any], shown: list[Any]
+) -> list[Any] | None:
+    """Return the stored element that each element of ``incoming`` came from, or ``None``.
+
+    ``shown`` is the read view of ``stored``. An element that holds a mask is bound to
+    the ONE stored element whose read view it equals exactly: the same entry, with every
+    visible character (its url included) unchanged. Two stored elements that read the
+    same, or two incoming elements bound to one stored element, cannot be told apart, so
+    the whole list returns ``None`` and the position rule decides (TASK-473). An element
+    with no mask has nothing to restore: it is bound to a stored element it equals, so
+    the url checks see it unchanged, or else to ``None``, a new element. Each element is
+    serialized once, so the match is linear (TASK-502).
+    """
+    index: dict[str, list[int]] = {}
+    for j, view in enumerate(shown):
+        index.setdefault(_canonical(view), []).append(j)
+    used: set[int] = set()
+    out: list[Any] = []
+    for value in incoming:
+        matches = index.get(_canonical(value), [])
+        if _holds_mask(value):
+            if len(matches) != 1 or matches[0] in used:
+                return None
+            used.add(matches[0])
+            out.append(stored[matches[0]])
+        else:
+            out.append(stored[matches[0]] if matches else None)
+    return out
+
+
+def _align_masked_lists(incoming: Any, stored: Any, shown: Any) -> Any:
+    """Return ``stored`` with each list that holds a mask in ``incoming`` put in its order.
+
+    The checks after this and :func:`~clauster.config_write.merge_redacted` match a list
+    by POSITION. So where every masked element of an ``incoming`` list binds to one stored
+    element (:func:`_bind_by_identity`), the stored list is replaced by those elements, in
+    ``incoming``'s order and length. Then removing, adding or reordering an element with
+    no mask keeps each masked value with its own entry. Where the binding fails, the
+    stored list stays as it is, and the position rule refuses what it cannot match. Only
+    the first list on each path is aligned: an element bound below it came back unchanged.
+    ``stored`` is never mutated.
+    """
+    if isinstance(incoming, dict):
+        if not isinstance(stored, dict):
+            return stored
+        seen = shown if isinstance(shown, dict) else {}
+        out = dict(stored)
+        for k, v in incoming.items():
+            if k in stored:
+                out[k] = _align_masked_lists(v, stored[k], seen.get(k))
+        return out
+    if (
+        isinstance(incoming, list)
+        and isinstance(stored, list)
+        and isinstance(shown, list)
+        and len(shown) == len(stored)
+        and _holds_mask(incoming)
+    ):
+        bound = _bind_by_identity(incoming, stored, shown)
+        if bound is not None:
+            return bound
+    return stored
 
 
 def _unmasked_slot_path(incoming: Any, shown: Any, path: str, *, holders: set[int]) -> str | None:
@@ -945,8 +1039,8 @@ def _reject_orphan_sentinels(incoming: dict[str, Any], stored: dict[str, Any]) -
         if where:
             raise cw.InvalidCandidateError(
                 f"{where} holds a masked value that no longer matches its stored value (an "
-                "entry or key was renamed, moved or reordered, or a list changed length); "
-                "enter the real value again"
+                "entry or key was renamed or edited, or a list entry that holds it cannot be "
+                "told apart from another masked entry); enter the real value again"
             )
     for key in (cwp.EXTRA_MARKETPLACES_KEY, cwp.EXTRA_MARKETPLACES_ALIAS_KEY):
         if key in incoming:
@@ -986,8 +1080,10 @@ def _restore_masked_urls(
 
     A list is matched by position, so a list element that holds such a url must come back
     exactly as it was read, in a list of the stored length (the rule
-    :func:`_orphan_sentinel_path` applies to a whole-value mask). Only the outermost list
-    on the path is compared, so the walk stays linear. Returns ``(value, restored)``.
+    :func:`_orphan_sentinel_path` applies to a whole-value mask). ``stored`` is the view
+    that :func:`_align_masked_lists` built, so an element that moved or a removed neighbor
+    still meets this rule (TASK-473). Only the outermost list on the path is compared, so
+    the walk stays linear. Returns ``(value, restored)``.
     """
     if isinstance(incoming, dict):
         held = stored if isinstance(stored, dict) else {}
@@ -1138,7 +1234,11 @@ def _locked_write_misc(path: Path, incoming: dict[str, Any], expected_hash: str 
         elif cw.hash_bytes(current_bytes) != expected_hash:
             raise cw.StaleConfigWriteError("config file changed on disk since it was loaded")
         current = cw.load_settings_json_obj(current_bytes)
-        stored_misc = _misc_view(current)
+        # TASK-473: a list that holds a mask is matched by entry, not position, where
+        # every masked entry can be told apart. Every check below runs against that view.
+        stored_misc = _align_masked_lists(
+            incoming, _misc_view(current), _redact_misc(_misc_view(current))
+        )
         restored = _restore_marketplace_urls(incoming, stored_misc)
         _reject_orphan_sentinels(restored, stored_misc)
         merged_misc = cw.merge_redacted(restored, stored_misc)

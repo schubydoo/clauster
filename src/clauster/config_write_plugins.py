@@ -82,7 +82,8 @@ against the current docs (``code.claude.com/docs/en/plugins/cli-reference``,
   throwaway ``HOME``) — an object ``{"installed": [...], "available": [...]}``.
   ``installed`` is the ``list --json`` array. Each ``available`` entry carries
   ``pluginId``, ``name``, ``marketplaceName``, ``source`` and, where the marketplace gives
-  them, ``description`` and ``version``. ``available`` leaves out a plugin that is
+  them, ``description`` and ``version``. An ``installed`` entry has no ``description``
+  (re-confirmed on 2.1.330, TASK-560). ``available`` leaves out a plugin that is
   installed for the invocation cwd (a User install everywhere, a Project install only in
   its own project), so the cwd is not cosmetic here either. It also lists a built-in
   plugin directory (about 3600 entries, 2 MB) that ``marketplace list`` does not name, so
@@ -164,6 +165,15 @@ RunFn = Callable[..., subprocess.CompletedProcess]
 DEFAULT_TIMEOUT_SECONDS = 60.0
 
 _NOT_FOUND_RE = re.compile(r"not found|not installed", re.IGNORECASE)
+
+#: git's message for a repository that its server does not have or does not show to this
+#: host (``fatal: repository '<url>' not found``), and GitHub's ``remote: Repository not
+#: found.`` line above it. Confirmed on 2.1.330 for ``marketplace update``, ``install`` and
+#: ``update``: the CLI passes git's lines through. The match is an unreachable source,
+#: never an absent plugin or marketplace, so it is never a 404 (TASK-472).
+_GIT_REPO_NOT_FOUND_RE = re.compile(
+    r"repository '([^'\n]*)' not found|remote: Repository not found", re.IGNORECASE
+)
 
 #: ``marketplace remove --scope``'s message for a name the chosen scope's settings file
 #: does not declare (``Marketplace 'x' is not declared in user settings``, confirmed on
@@ -459,6 +469,11 @@ def _raise_for_failure(op: str, ident: str, proc: subprocess.CompletedProcess) -
     redacted stderr kept in the detail so the operator can still diagnose it. The
     ``list``/``marketplace-list`` reads are excluded for the same reason (see
     :data:`_NEVER_NOT_FOUND_OPS`). Every other nonzero exit is likewise a generic 400.
+
+    git's own "repository not found" (:data:`_GIT_REPO_NOT_FOUND_RE`) is the same fetch
+    failure for every verb: ``marketplace update`` refreshes a git checkout, and ``install``
+    and ``update`` clone a git-sourced plugin. It raises :class:`PluginCliError` (→ 400)
+    with a message that names the unreachable source, masked like ``ident`` (TASK-472).
     """
     if proc.returncode == 0:
         return
@@ -468,7 +483,26 @@ def _raise_for_failure(op: str, ident: str, proc: subprocess.CompletedProcess) -
     # every copy is replaced by its masked view before the line redaction runs.
     shown = _shown_source(ident)
     raw = (proc.stderr or proc.stdout or "").strip()
-    detail = cw.redact_secret_lines(raw.replace(ident, shown) if ident else raw)
+    if ident:
+        raw = raw.replace(ident, shown)
+    git_missing = _GIT_REPO_NOT_FOUND_RE.search(raw)
+    # For the other verbs the repository url comes from a marketplace file, not from
+    # `ident`, so it gets the same masked view before it is shown. For an add, git names
+    # `ident` itself, which is already masked above and is not named a second time.
+    repo = git_missing.group(1) if git_missing else None
+    repo_shown = shown
+    if repo and repo != shown:
+        repo_shown = _shown_source(repo)
+        raw = raw.replace(repo, repo_shown)
+    detail = cw.redact_secret_lines(raw)
+    if git_missing is not None:
+        subject = f" {shown!r}" if ident else ""
+        where = f" {repo_shown!r}" if repo and repo_shown != shown else ""
+        raise PluginCliError(
+            f"claude plugin {op}{subject} could not fetch its git source{where}: git reports "
+            "that the repository does not exist, or that this host has no access to it. "
+            f"Exit {proc.returncode}: {detail}"
+        )
     if op not in _NEVER_NOT_FOUND_OPS and _NOT_FOUND_RE.search(detail):
         if op.startswith("marketplace"):
             raise MarketplaceNotFoundError(detail)
@@ -569,9 +603,10 @@ def cli_update_plugin(
     ``scope`` is restricted to the three clauster manages (project/user/local) —
     the CLI's own fourth value, ``managed``, is never passed here (out of scope,
     see the module docstring). Updating a not-installed id raises
-    :class:`PluginNotFoundError` (→ 404). Like :func:`cli_install_plugin`, never passes
-    ``-y``/``--accept-command``, so a changed marketplace-declared command is refused
-    (→ 400) rather than run unseen.
+    :class:`PluginNotFoundError` (→ 404), but a git source that git cannot find is a
+    :class:`PluginCliError` (→ 400), as for an install. Like :func:`cli_install_plugin`,
+    never passes ``-y``/``--accept-command``, so a changed marketplace-declared command is
+    refused (→ 400) rather than run unseen.
     """
     validate_plugin_id(plugin_id)
     proc = _run(binary, ["update", plugin_id, "--scope", scope], cwd=cwd, run=run)
@@ -801,7 +836,8 @@ def cli_marketplace_update(
     The route layer still gates this through the ordinary scope/project/confirm
     plumbing (for capability gating and a stable ``cwd``), it just never adds a
     ``--scope`` flag to the argv. Updating an unknown ``name`` raises
-    :class:`MarketplaceNotFoundError` (→ 404).
+    :class:`MarketplaceNotFoundError` (→ 404). A git checkout whose repository git cannot
+    find is a :class:`PluginCliError` (→ 400) that names the source (TASK-472).
     """
     args = ["marketplace", "update"]
     if name is not None:
@@ -925,7 +961,9 @@ def cli_list_offered_plugins(
     plugin id that ends in ``@<marketplace>`` (:func:`_offered_id`), and its ``name`` is
     the name part of that id, never the marketplace's own ``name`` text. Each entry keeps
     only ``id``, ``name``, ``description``, ``version`` and ``installed``: the ``source``
-    (a git url) is not needed to show or install the plugin. The description and version
+    (a git url) is not needed to show or install the plugin. An installed row's
+    description comes from the marketplace's own file (:func:`marketplace_descriptions`),
+    because the CLI's ``installed`` entry has none. The description and version
     are marketplace text: masked line by line, cut (:data:`OFFERED_TEXT_MAX`), and then
     masked structurally (:func:`redact_plugin_display`).
 
@@ -971,8 +1009,15 @@ def cli_list_offered_plugins(
         rank = _install_rank(entry, cwd)
         if plugin_id not in chosen or rank < chosen[plugin_id][0]:
             chosen[plugin_id] = (rank, entry)
+    # An `installed` entry has no description (TASK-560): read the marketplace's own file,
+    # and only when this marketplace has an installed row, so the common read spawns once.
+    descriptions = marketplace_descriptions(binary, cwd, marketplace, run=run) if chosen else {}
     for plugin_id, (_rank, entry) in chosen.items():
-        out[plugin_id] = {"description": None, "version": entry.get("version"), "installed": True}
+        out[plugin_id] = {
+            "description": descriptions.get(plugin_id[: -len(suffix)]),
+            "version": entry.get("version"),
+            "installed": True,
+        }
     shown = [
         {
             "id": plugin_id,
@@ -1148,14 +1193,28 @@ _NAME_SHOWN_MAX = 80
 def _read_marketplace_plugin_names(location: Any) -> list[str] | None:
     """Return the plugin names a marketplace checkout offers, or ``None`` if unreadable.
 
+    See :func:`_read_marketplace_plugins`. A plugin entry with no string ``name`` counts as
+    ``""`` so the total stays the file's own count.
+    """
+    plugins = _read_marketplace_plugins(location)
+    if plugins is None:
+        return None
+    return [
+        p["name"] if isinstance(p, dict) and isinstance(p.get("name"), str) else ""
+        for p in plugins
+    ]
+
+
+def _read_marketplace_plugins(location: Any) -> list[Any] | None:
+    """Return the ``plugins`` list of a marketplace checkout's file, or ``None`` if unreadable.
+
     ``location`` is the CLI's own ``installLocation``, or a ``file`` source's ``path``
     (:func:`_marketplace_list_location`): a directory holding
     ``.claude-plugin/marketplace.json`` (git and directory sources), or the file itself.
     Read-only and for display only. A path that is not a regular file (a FIFO would block
     the read), an oversized file, or invalid JSON yields ``None``. In a checkout directory,
     a ``marketplace.json`` that resolves outside that directory (a committed symlink) is
-    not read either. A plugin entry with no string ``name`` counts as ``""`` so the total
-    stays the file's own count.
+    not read either. The entries are the file's own, unmasked: a caller masks what it shows.
     """
     if not isinstance(location, str) or not location:
         return None
@@ -1181,12 +1240,7 @@ def _read_marketplace_plugin_names(location: Any) -> list[str] | None:
     except (ValueError, RecursionError):  # UnicodeDecodeError is a ValueError
         return None
     plugins = data.get("plugins") if isinstance(data, dict) else None
-    if not isinstance(plugins, list):
-        return None
-    return [
-        p["name"] if isinstance(p, dict) and isinstance(p.get("name"), str) else ""
-        for p in plugins
-    ]
+    return plugins if isinstance(plugins, list) else None
 
 
 #: The ``marketplace list --json`` source types whose ``marketplace update`` rewrites a copy
@@ -1237,6 +1291,34 @@ def marketplace_plugin_names(
         if not isinstance(source, str) or source not in CHECKOUT_MARKETPLACE_SOURCES:
             live.add(entry["name"])
     return out, frozenset(live)
+
+
+def marketplace_descriptions(
+    binary: str, cwd: Path, marketplace: str, *, run: RunFn = subprocess.run
+) -> dict[str, Any]:
+    """Return ``{plugin name: description}`` from ``marketplace``'s own file, or ``{}``.
+
+    ``plugin list --available --json`` gives an offered plugin the description of its entry
+    in this file, but an ``installed`` entry carries no description (confirmed on 2.1.330,
+    TASK-560). So :func:`cli_list_offered_plugins` reads it here for an installed row, from
+    the location that :func:`marketplace_plugin_names` reads. The first entry of a name
+    wins. The values are the file's own text, unmasked: the caller masks what it shows.
+    Display only, so a failed ``marketplace list`` or an unreadable file gives ``{}`` and
+    the row shows no description, as before; it never fails the list it adds to.
+    """
+    try:
+        entries = _list_marketplaces_raw(binary, cwd, run=run)
+    except cw.ConfigWriteError:
+        return {}
+    entry = next(
+        (e for e in entries if isinstance(e, dict) and e.get("name") == marketplace), None
+    )
+    plugins = _read_marketplace_plugins(_marketplace_list_location(entry)) if entry else None
+    out: dict[str, Any] = {}
+    for plugin in plugins or []:
+        if isinstance(plugin, dict) and isinstance(plugin.get("name"), str):
+            out.setdefault(plugin["name"], plugin.get("description"))
+    return out
 
 
 def _plugins_text(count: int) -> str:

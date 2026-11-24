@@ -482,20 +482,42 @@ def test_settings_list_of_masked_urls_round_trips(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "edit",
     [
-        pytest.param(lambda p: list(reversed(p)), id="reorder"),
-        pytest.param(lambda p: p[1:], id="delete-first"),
-        pytest.param(lambda p: [*p, {"name": "c"}], id="append"),
         pytest.param(lambda p: [{**p[0], "name": "a2"}, p[1]], id="edit-masked-element"),
+        pytest.param(lambda p: [{**p[0], "name": "a2"}], id="edit-and-delete"),
     ],
 )
 def test_settings_list_edit_around_a_masked_url_is_refused(tmp_path: Path, edit) -> None:
-    # A list is bound by position, so a masked url's element must come back as it was read.
+    # A masked url's element must come back as it was read, so it binds to its stored url.
     h = _store(tmp_path, {"extraKnownMarketplaces": _inline_market()})
     view = cws.read_project_settings(tmp_path)[0]["extraKnownMarketplaces"]
     view["inline"]["source"]["plugins"] = edit(view["inline"]["source"]["plugins"])
     with pytest.raises(cw.InvalidCandidateError, match="Type the full url"):
         cws.write_project_settings(tmp_path, {"extraKnownMarketplaces": view}, h)
     assert _settings_on_disk(tmp_path)["extraKnownMarketplaces"] == _inline_market()
+
+
+@pytest.mark.parametrize(
+    ("edit", "kept"),
+    [
+        pytest.param(lambda p: list(reversed(p)), ["b", "a"], id="reorder"),
+        pytest.param(lambda p: p[1:], ["b"], id="delete-first"),
+        pytest.param(lambda p: [*p, {"name": "c"}], ["a", "b", "c"], id="append"),
+    ],
+)
+def test_settings_list_edit_around_a_masked_url_keeps_each_stored_url(
+    tmp_path: Path, edit, kept: list[str]
+) -> None:
+    # TASK-473: each element that came back as it was read binds to its own stored url,
+    # whatever its position, so the token never reaches another element or host.
+    h = _store(tmp_path, {"extraKnownMarketplaces": _inline_market()})
+    view = cws.read_project_settings(tmp_path)[0]["extraKnownMarketplaces"]
+    assert _HIDDEN not in json.dumps(view)
+    view["inline"]["source"]["plugins"] = edit(view["inline"]["source"]["plugins"])
+    cws.write_project_settings(tmp_path, {"extraKnownMarketplaces": view}, h)
+    by_name = {p["name"]: p for p in _inline_market()["inline"]["source"]["plugins"]}
+    plugins_on_disk = _settings_on_disk(tmp_path)["extraKnownMarketplaces"]["inline"]["source"]
+    assert plugins_on_disk["plugins"] == [by_name.get(n, {"name": n}) for n in kept]
+    assert MASK not in cw.project_settings_path(tmp_path).read_text(encoding="utf-8")
 
 
 def test_settings_route_put_refuses_a_moved_masked_url(
