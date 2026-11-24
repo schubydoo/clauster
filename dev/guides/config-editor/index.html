@@ -2718,10 +2718,21 @@ not <code>010</code>, <code>0b101</code> or <code>1_000</code>. Quote a value th
 Clauster never runs a hook command and never connects to an MCP server from
 this editor.</p>
 <ul>
-<li><code>name</code> must be lowercase letters, digits and hyphens, at most 239
-  characters, and the same as the name of the file. The name is also the
+<li><code>name</code> must be lowercase letters, digits and single hyphens, start with a
+  letter, not end with a hyphen, have at most 239 characters, and be the same
+  as the name of the file. The name is also the
   file name, so this rule is narrower than the Claude Code rule. A file with
-  a longer or other name does not show in the list.</li>
+  a longer or other name does not show in the list. The <strong>Name</strong> box holds at
+  most 239 characters. The editor writes the name into the frontmatter for
+  you. It quotes the names <code>yes</code>, <code>no</code>, <code>on</code>, <code>off</code>, <code>true</code>, <code>false</code> and
+  <code>null</code>, because YAML reads them unquoted as a boolean or null.</li>
+<li>The subagent file path has one more limit. On Windows without long paths,
+  the path of the temporary file that a subagent save writes must fit in 259
+  characters. That path is 13
+  characters longer than the path of the subagent file. If it does not fit,
+  the save returns <code>422</code>. The message names the longest name that fits in
+  that project, or tells you to move the project to a shorter path when no
+  name fits. It also says that you can turn on long paths in Windows.</li>
 <li><code>memory</code>, <code>color</code> and <code>experimental.cacheTtl</code> offer their listed values,
   written exactly as listed. Another text value saves with a warning.</li>
 <li><code>effort</code> accepts a level name in any case, the alias <code>med</code>, or an integer.
@@ -3426,7 +3437,12 @@ space at the start or the end is part of the name.</p>
 <td>Remove the key (in Rows mode or Raw JSON), or save it at the scope that the message names. For a <code>true</code> value, set it to <code>false</code></td>
 </tr>
 <tr>
-<td>The Plugins tab shows <code>Failed to load (400).</code>, and the response names "returned output nested too deeply (more than 64 levels)"</td>
+<td>A tab shows "existing settings file is not valid JSON" and a line and column</td>
+<td>The settings file for that scope is not valid JSON, so Clauster does not show or overwrite it</td>
+<td>Fix the file on the host near that line and column, then reopen the tab. Clauster counts the position from the first character that is not blank. So the line number skips blank lines at the start of the file, and on that first line the column also skips its leading spaces and tabs</td>
+</tr>
+<tr>
+<td>The Plugins tab shows "returned output nested too deeply (more than 64 levels)"</td>
 <td>The <code>claude plugin list --json</code> or <code>claude plugin marketplace list --json</code> output nests objects and lists more than 64 levels deep. Clauster reads no output nested deeper than 64 levels</td>
 <td>Find the plugin or marketplace entry with the deep value in the output of that command on the host, and fix or remove it</td>
 </tr>
