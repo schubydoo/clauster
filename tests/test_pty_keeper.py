@@ -1984,10 +1984,10 @@ def test_keeper_drain_fails_closed_at_the_login_screen(tmp_path: Path, capsys) -
     drain = pty_keeper._KeeperDrain(base, sidecar, None, None)
     cut = _THEME_PICKER.index(b"style")  # inside the second phrase
     drain.feed(_THEME_PICKER[:cut])
-    assert drain.login_required is False
+    assert drain.stop_required is False
     drain.feed(_THEME_PICKER[cut:])
 
-    assert drain.login_required is True
+    assert drain.stop_required is True
     assert _read(sidecar)["state"] == "error"
     assert _read(sidecar)["error"] == pty_keeper._LOGIN_SCREEN_ERROR
     assert "not logged in" in pty_keeper._LOGIN_SCREEN_ERROR
@@ -2010,11 +2010,11 @@ def test_keeper_drain_waits_before_the_login_stop_is_due(tmp_path: Path, monkeyp
     from clauster import pty_keeper
 
     drain = pty_keeper._KeeperDrain({"state": "starting"}, tmp_path / "k.json", None, None)
-    assert drain.login_stop_due() is False  # nothing seen yet
+    assert drain.stop_due() is False  # nothing seen yet
     drain.feed(_THEME_PICKER)
-    assert drain.login_stop_due() is False  # seen, but the delay has not passed
-    monkeypatch.setattr(pty_keeper, "_LOGIN_STOP_DELAY", 0.0)
-    assert drain.login_stop_due() is True
+    assert drain.stop_due() is False  # seen, but the delay has not passed
+    monkeypatch.setattr(pty_keeper, "_HELD_STOP_DELAY", 0.0)
+    assert drain.stop_due() is True
 
 
 def test_keeper_drain_ignores_login_text_past_the_first_output(tmp_path: Path) -> None:
@@ -2024,9 +2024,9 @@ def test_keeper_drain_ignores_login_text_past_the_first_output(tmp_path: Path) -
     sidecar = tmp_path / "k.json"
     base: dict[str, object] = {"state": "starting", "error": None, "note": None}
     drain = pty_keeper._KeeperDrain(base, sidecar, None, None)
-    drain.feed(b"x" * pty_keeper._LOGIN_SCREEN_WINDOW)
+    drain.feed(b"x" * pty_keeper._FIRST_SCREEN_WINDOW)
     drain.feed(_THEME_PICKER)
-    assert drain.login_required is False
+    assert drain.stop_required is False
     drain._deadline = time.monotonic() - 1
     drain.tick()
     assert _read(sidecar)["state"] == "ready"
@@ -2040,7 +2040,7 @@ def test_keeper_drain_ignores_login_text_once_the_url_was_found(tmp_path: Path) 
     drain = pty_keeper._KeeperDrain(base, sidecar, None, None)
     drain.feed(_SPLIT_RAW)
     drain.feed(_THEME_PICKER)
-    assert drain.login_required is False
+    assert drain.stop_required is False
     assert _read(sidecar)["state"] == "ready"
     assert _read(sidecar)["error"] is None
 
@@ -2064,7 +2064,7 @@ def test_run_keeper_stops_a_bridge_held_at_the_login_screen(
     """The keeper stops the bridge (it cannot get past the screen) and keeps the reason."""
     from clauster import pty_keeper
 
-    monkeypatch.setattr(pty_keeper, "_LOGIN_STOP_DELAY", 1.0)
+    monkeypatch.setattr(pty_keeper, "_HELD_STOP_DELAY", 1.0)
     sidecar = tmp_path / "k.json"
     started = time.monotonic()
     rc = pty_keeper.run_keeper(
@@ -2087,8 +2087,8 @@ def test_run_keeper_kills_a_login_screen_bridge_that_ignores_sigterm(
 ) -> None:  # noqa: ANN001
     from clauster import pty_keeper
 
-    monkeypatch.setattr(pty_keeper, "_LOGIN_STOP_DELAY", 0.0)
-    monkeypatch.setattr(pty_keeper, "_LOGIN_STOP_GRACE", 0.3)
+    monkeypatch.setattr(pty_keeper, "_HELD_STOP_DELAY", 0.0)
+    monkeypatch.setattr(pty_keeper, "_HELD_STOP_GRACE", 0.3)
     sidecar = tmp_path / "k.json"
     rc = pty_keeper.run_keeper(
         _login_screen_bridge(tmp_path, ignore_sigterm=True), sidecar, cwd=str(tmp_path)
@@ -2102,7 +2102,7 @@ def test_run_keeper_conpty_stops_a_bridge_held_at_the_login_screen(
 ) -> None:  # noqa: ANN001
     from clauster import pty_keeper
 
-    monkeypatch.setattr(pty_keeper, "_LOGIN_STOP_DELAY", 0.0)
+    monkeypatch.setattr(pty_keeper, "_HELD_STOP_DELAY", 0.0)
     fake = _fake_conpty(chunks=[_THEME_PICKER.decode(), "redraw\r\n"], exit_code=1)
     monkeypatch.setattr(pty_keeper, "_load_pty_process", lambda: fake)
     sidecar = tmp_path / "b.keeper.json"
@@ -2120,7 +2120,7 @@ def test_run_keeper_conpty_reports_a_login_stop_that_failed(
 ) -> None:  # noqa: ANN001
     from clauster import pty_keeper
 
-    monkeypatch.setattr(pty_keeper, "_LOGIN_STOP_DELAY", 0.0)
+    monkeypatch.setattr(pty_keeper, "_HELD_STOP_DELAY", 0.0)
     fake = _fake_conpty(
         chunks=[_THEME_PICKER.decode(), "redraw\r\n"],
         terminate_error=_FakeWinptyError("access denied"),
@@ -2129,8 +2129,345 @@ def test_run_keeper_conpty_reports_a_login_stop_that_failed(
     sidecar = tmp_path / "b.keeper.json"
     pty_keeper._run_keeper_conpty(["claude", "--remote-control"], sidecar, None, None)
 
-    assert "could not stop the bridge held at the login screen" in capsys.readouterr().err
+    assert (
+        "could not stop the bridge held at the first-run login screen" in capsys.readouterr().err
+    )
     assert _read(sidecar)["error"] == pty_keeper._LOGIN_SCREEN_ERROR
+
+
+# -- TASK-554: a pty bridge held at claude's Settings Error screen ---------------------
+# When a settings file holds a value claude refuses, the flag form draws its Settings Error
+# screen first and waits for a keypress, as at the login screen. These bytes are what claude
+# 2.1.330 drew with a throwaway HOME: at the default 80x24 winsize with one refused value,
+# and at the 120x40 TUI size with four refused values in two files. Only the file paths
+# (now neutral ones) and the rule (shortened from the full terminal width) are changed.
+
+_SETTINGS_ERROR_80 = (
+    b"\x1b7\x1b[r\x1b8\x1b[?25h\x1b[?25l\x1b[?2004h\x1b[?2031h\x1b[?1004h\r\r\n"
+    b"\x1b[38;5;220m\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\x1b[39m\r\r\n"
+    b"\x1b[3G\x1b[38;5;220m\x1b[1mSettings\x1b[12GError\x1b[22m\x1b[39m\r\r\n"
+    b"\r\r\n"
+    b"\x1b[3G/srv/clauster/.claude/settings.json\r\r\n"
+    b"\x1b[3G\x1b[38;5;246m\xe2\x94\x94\x1b[5G\x1b[39mpermissions.defaultMode:\x1b[30G"
+    b"\x1b[38;5;246mInvalid\x1b[38Gvalue.\x1b[45GExpected\x1b[54Gone\x1b[58Gof:\x1b[62G"
+    b'"acceptEdits",\x1b[39m'
+    b"\r\r\n"
+    b'\x1b[5G\x1b[38;5;246m"auto",\x1b[13G"bypassPermissions",\x1b[34G"default",\x1b[45'
+    b'G"dontAsk",\x1b[56G"plan"\x1b[39m'
+    b"\r\r\n"
+    b"\r\r\n"
+    b'\x1b[3G\x1b[38;5;246mValid\x1b[9Gmodes:\x1b[16G"acceptEdits"\x1b[30G(ask\x1b[35Gb'
+    b'efore\x1b[42Gfile\x1b[47Gchanges),\x1b[57G"plan"\x1b[64G(analysis\x1b[39m'
+    b"\r\r\n"
+    b'\x1b[3G\x1b[38;5;246monly),\x1b[10G"bypassPermissions"\x1b[30G(auto-accept\x1b[43'
+    b'Gall),\x1b[49Gor\x1b[52G"default"\x1b[62G(standard\x1b[39m'
+    b"\r\r\n"
+    b"\x1b[3G\x1b[38;5;246mbehavior)\x1b[39m\r\r\n"
+    b"\x1b[3G\x1b[38;5;246mLearn\x1b[9Gmore:\x1b[15G\x1b]8;id=10we9ge;https://code.clau"
+    b"de.com/docs/en/iam#permission-modes\x07https://code.claude.com/docs/en/iam#permis"
+    b"sion-modes\x1b[39m\x1b]8;;\x07"
+    b"\r\r\n"
+    b"\r\r\n"
+    b"\x1b[3G\x1b[38;5;246mFiles\x1b[9Gwith\x1b[14Gerrors\x1b[21Gare\x1b[25Gskipped"
+    b"\x1b[33Gentirely,\x1b[43Gnot\x1b[47Gjust\x1b[52Gthe\x1b[56Ginvalid\x1b[64Gsetting"
+    b"s.\x1b[39m"
+    b"\r\r\n"
+    b"\r\r\n"
+    b"\x1b[3G\x1b[38;5;153m\xe2\x9d\xaf\x1b[5G\x1b[38;5;246m1.\x1b[8G\x1b[38;5;153mFix"
+    b"\x1b[12Gwith\x1b[17GClaude\x1b[39m"
+    b"\r\r\n"
+    b"\x1b[5G\x1b[38;5;246m2.\x1b[8G\x1b[39mExit\x1b[13Gand\x1b[17Gfix\x1b[21Gmanually"
+    b"\r\r\n"
+    b"\x1b[5G\x1b[38;5;246m3.\x1b[8G\x1b[39mContinue\x1b[17Gwithout\x1b[25Gthese\x1b[31"
+    b"Gsettings"
+    b"\r\r\n"
+    b"\r\r\n"
+    b"\x1b[3G\x1b[38;5;246m\x1b[3mEnter\x1b[9Gto\x1b[12Gconfirm\x1b[20G\xc2\xb7\x1b[22GEsc"
+    b"\x1b[26Gto\x1b[29Gcancel\x1b[23m\x1b[39m"
+    b"\r\r\n"
+    b"\x1b[2C\x1b[5A\x1b[>0q\x1b[?u\x1b]7501;?\x07\x1b[c"
+)
+_SETTINGS_ERROR_TWO_FILES_120 = (
+    b"\x1b7\x1b[r\x1b8\x1b[?25h\x1b[?25l\x1b[?2004h\x1b[?2031h\x1b[?1004h\r\r\n"
+    b"\x1b[38;5;220m\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\x1b[39m\r\r\n"
+    b"\x1b[3G\x1b[38;5;220m\x1b[1mSettings\x1b[12GError\x1b[22m\x1b[39m\r\r\n"
+    b"\r\r\n"
+    b"\x1b[3G/srv/clauster/.claude/settings.json\r\r\n"
+    b"\x1b[3G\x1b[38;5;246m\xe2\x94\x9c\x1b[5G\x1b[39mcleanupPeriodDays:\x1b[24G\x1b[38;5"
+    b";246mExpected\x1b[33Gnumber,\x1b[41Gbut\x1b[45Greceived\x1b[54Gstring\x1b[39m"
+    b"\r\r\n"
+    b"\x1b[3G\x1b[38;5;246m\xe2\x94\x9c\x1b[5G\x1b[39mpermissions.allow:\x1b[24G\x1b[38;5"
+    b";246mExpected\x1b[33Garray,\x1b[40Gbut\x1b[44Greceived\x1b[53Gnumber\x1b[39m"
+    b"\r\r\n"
+    b"\x1b[3G\x1b[38;5;246m\xe2\x94\x94\x1b[5G\x1b[39mpermissions.defaultMode:\x1b[30G"
+    b"\x1b[38;5;246mInvalid\x1b[38Gvalue.\x1b[45GExpected\x1b[54Gone\x1b[58Gof:\x1b[62G"
+    b'"acceptEdits",\x1b[77G"auto",\x1b[85G"bypassPermissions",\x1b[106G"default",\x1b[39m'
+    b"\r\r\n"
+    b'\x1b[5G\x1b[38;5;246m"dontAsk",\x1b[16G"plan"\x1b[39m\r\r\n'
+    b"\r\r\n"
+    b"\x1b[3G\x1b[38;5;246mPermission\x1b[14Grules\x1b[20Gmust\x1b[25Gbe\x1b[28Gin\x1b["
+    b'31Gan\x1b[34Garray.\x1b[41GFormat:\x1b[49G["Tool(specifier)"].\x1b[70GExamples:'
+    b'\x1b[80G["Bash(npm\x1b[91Grun\x1b[95Gbuild)",\x1b[39m'
+    b"\r\r\n"
+    b'\x1b[3G\x1b[38;5;246m"Edit(docs/**)",\x1b[20G"Read(~/.zshrc)"].\x1b[39GUse\x1b[43'
+    b"G*\x1b[45Gfor\x1b[49Gwildcards.\x1b[39m"
+    b"\r\r\n"
+    b"\x1b[3G\x1b[38;5;246mLearn\x1b[9Gmore:\x1b[15G\x1b]8;id=ue1b5a;https://code.claud"
+    b"e.com/docs/en/iam#configuring-permissions\x07https://code.claude.com/docs/en/iam#"
+    b"configuring-permissions\x1b[39m\x1b]8;;\x07"
+    b"\r\r\n"
+    b"\r\r\n"
+    b'\x1b[3G\x1b[38;5;246mValid\x1b[9Gmodes:\x1b[16G"acceptEdits"\x1b[30G(ask\x1b[35Gb'
+    b'efore\x1b[42Gfile\x1b[47Gchanges),\x1b[57G"plan"\x1b[64G(analysis\x1b[74Gonly),'
+    b'\x1b[81G"bypassPermissions"\x1b[101G(auto-accept\x1b[114Gall),\x1b[39m'
+    b"\r\r\n"
+    b'\x1b[3G\x1b[38;5;246mor\x1b[6G"default"\x1b[16G(standard\x1b[26Gbehavior)\x1b[39m'
+    b"\r\r\n"
+    b"\x1b[3G\x1b[38;5;246mLearn\x1b[9Gmore:\x1b[15G\x1b]8;id=10we9ge;https://code.clau"
+    b"de.com/docs/en/iam#permission-modes\x07https://code.claude.com/docs/en/iam#permis"
+    b"sion-modes\x1b[39m\x1b]8;;\x07"
+    b"\r\r\n"
+    b"\r\r\n"
+    b"\x1b[3G/srv/projects/alpha/.claude/settings.local.json\r\r\n"
+    b"\x1b[3G\x1b[38;5;246m\xe2\x94\x94\x1b[5G\x1b[39mmodel:\x1b[12G\x1b[38;5;246mExpected"
+    b"\x1b[21Gstring,\x1b[29Gbut\x1b[33Greceived\x1b[42Gnumber\x1b[39m"
+    b"\r\r\n"
+    b"\r\r\n"
+    b"\x1b[3G\x1b[38;5;246mFiles\x1b[9Gwith\x1b[14Gerrors\x1b[21Gare\x1b[25Gskipped"
+    b"\x1b[33Gentirely,\x1b[43Gnot\x1b[47Gjust\x1b[52Gthe\x1b[56Ginvalid\x1b[64Gsetting"
+    b"s.\x1b[39m"
+    b"\r\r\n"
+    b"\r\r\n"
+    b"\x1b[3G\x1b[38;5;153m\xe2\x9d\xaf\x1b[5G\x1b[38;5;246m1.\x1b[8G\x1b[38;5;153mFix"
+    b"\x1b[12Gwith\x1b[17GClaude\x1b[39m"
+    b"\r\r\n"
+    b"\x1b[5G\x1b[38;5;246m2.\x1b[8G\x1b[39mExit\x1b[13Gand\x1b[17Gfix\x1b[21Gmanually"
+    b"\r\r\n"
+    b"\x1b[5G\x1b[38;5;246m3.\x1b[8G\x1b[39mContinue\x1b[17Gwithout\x1b[25Gthese\x1b[31"
+    b"Gsettings"
+    b"\r\r\n"
+    b"\r\r\n"
+    b"\x1b[3G\x1b[38;5;246m\x1b[3mEnter\x1b[9Gto\x1b[12Gconfirm\x1b[20G\xc2\xb7\x1b[22GEsc"
+    b"\x1b[26Gto\x1b[29Gcancel\x1b[23m\x1b[39m"
+    b"\r\r\n"
+    b"\x1b[2C\x1b[5A\x1b[>0q\x1b[?u\x1b]7501;?\x07\x1b[c"
+)
+# What 2.1.330 drew first with a valid settings file: its banner (path made neutral). A
+# healthy session starts with it, so the screen's text after it is not the screen.
+_HEALTHY_BANNER = (
+    b"\x1b7\x1b[r\x1b8\x1b[?25h\x1b[?25l\x1b[?2004h\x1b[?2031h\x1b[?1004h"
+    b"\x1b]0;\xe2\x9c\xb3 Claude Code\x07\x1b[38;5;174m \xe2\x96\x90\x1b[48;5;16m"
+    b"\xe2\x96\x9b\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x9b\xe2\x96\x88\x1b[12G\x1b[39m"
+    b"\x1b[49m\x1b[1mClaude\x1b[19GCode\x1b[24G\x1b[22m\x1b[38;5;246mv2.1.330\x1b[39m\r\r\n"
+    b"\x1b[38;5;174m \xe2\x96\x9d\xe2\x96\x9d\x1b[7G\xe2\x96\x9d\xe2\x96\x9d\x1b[12G"
+    b"\x1b[38;5;246m/srv/projects/alpha\x1b[39m\r\r\n\r\r\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("output", "expected"),
+    [
+        (
+            _SETTINGS_ERROR_80,
+            [
+                "/srv/clauster/.claude/settings.json",
+                '└ permissions.defaultMode: Invalid value. Expected one of: "acceptEdits",',
+                "Learn more: https://code.claude.com/docs/en/iam#permission-modes",
+            ],
+        ),
+        (
+            _SETTINGS_ERROR_TWO_FILES_120,
+            [
+                "/srv/clauster/.claude/settings.json",
+                "├ cleanupPeriodDays: Expected number, but received string",
+                "├ permissions.allow: Expected array, but received number",
+                "/srv/projects/alpha/.claude/settings.local.json",
+                "└ model: Expected string, but received number",
+            ],
+        ),
+    ],
+)
+def test_settings_error_detail_reads_the_real_screen(output: bytes, expected: list[str]) -> None:
+    from clauster import pty_keeper
+
+    detail = pty_keeper._settings_error_detail(output)
+    assert detail is not None
+    for text in expected:
+        assert text in detail
+    # The title, the end line and the menu are Clauster's to word, not part of the detail.
+    for text in ("Settings Error", "Files with errors", "Exit and fix manually", "Enter to"):
+        assert text not in detail
+    assert pty_keeper._shows_login_screen(output) is False  # the two screens never overlap
+
+
+_MENU_AT = _SETTINGS_ERROR_80.index(b"\x1b[3G\x1b[38;5;153m\xe2\x9d\xaf")
+_RULE_80 = b"\x1b[38;5;220m\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\x1b[39m"
+
+
+def test_settings_error_detail_reads_a_rule_split_by_an_escape() -> None:
+    """An escape inside the rule becomes a space when the escapes are taken out."""
+    from clauster import pty_keeper
+
+    split = b"\x1b[38;5;220m\xe2\x94\x80\x1b[1m\xe2\x94\x80\xe2\x94\x80\x1b[39m"
+    assert pty_keeper._settings_error_detail(_SETTINGS_ERROR_80.replace(_RULE_80, split))
+
+
+def test_settings_error_detail_reads_a_long_list_past_8_kib(tmp_path: Path) -> None:
+    """Many refused values push the menu far into the output, and the screen still counts."""
+    from clauster import pty_keeper
+
+    value = (
+        b"\x1b[3G\x1b[38;5;246m\xe2\x94\x9c\x1b[5G\x1b[39mpermissions.allow:\x1b[24G"
+        b"\x1b[38;5;246mExpected\x1b[33Garray,\x1b[40Gbut\x1b[44Greceived\x1b[53Gnumber\x1b[39m"
+        b"\r\r\n"
+    )
+    at = _SETTINGS_ERROR_80.index(b"\x1b[3G\x1b[38;5;246m\xe2\x94\x94")
+    output = _SETTINGS_ERROR_80[:at] + value * 120 + _SETTINGS_ERROR_80[at:]
+    assert len(output) > 8192
+    drain = pty_keeper._KeeperDrain({"state": "starting"}, tmp_path / "k.json", None, None)
+    for start in range(0, len(output), 4096):  # as the PTY reads it, in pieces
+        drain.feed(output[start : start + 4096])
+    assert drain.held_screen == "Settings Error screen"
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        b"Settings Error",  # the title alone is not the screen
+        _SETTINGS_ERROR_80.replace(_RULE_80, b""),  # no rule before the title
+        b"   " + _SETTINGS_ERROR_80.replace(_RULE_80, b""),  # an indented quote of it
+        _SETTINGS_ERROR_80[:_MENU_AT],  # no menu yet
+        _SETTINGS_ERROR_80.replace(b"manually", b"later"),  # one menu choice is missing
+        _SETTINGS_ERROR_80.replace(b"without", b"with"),  # the other menu choice is missing
+        _SETTINGS_ERROR_80.replace(b"skipped", b"kept"),  # no end line
+        _SETTINGS_ERROR_80[_SETTINGS_ERROR_80.index(b"\x1b[3G/srv") :],  # not where it starts
+        b"Welcome to Claude Code " + _SETTINGS_ERROR_80,  # another screen comes first
+        _HEALTHY_BANNER,
+        _HEALTHY_BANNER + _SETTINGS_ERROR_80,  # a session that re-draws the screen later
+        _THEME_PICKER,
+        b"Continue at https://claude.ai/code/session_01ABC\r\n",
+        b"",
+    ],
+)
+def test_settings_error_detail_needs_the_whole_screen_where_claude_starts(output: bytes) -> None:
+    from clauster import pty_keeper
+
+    assert pty_keeper._settings_error_detail(output) is None
+
+
+def test_settings_error_detail_is_redacted_and_bounded(monkeypatch) -> None:  # noqa: ANN001
+    """The keeper writes the detail to the sidecar on disk, so it is redacted there."""
+    from clauster import pty_keeper
+
+    secret = b"sk-ant-api03-" + b"A" * 24
+    output = _SETTINGS_ERROR_80.replace(b"settings.json", b"settings.json " + secret)
+    detail = pty_keeper._settings_error_detail(output)
+    assert detail is not None
+    assert secret.decode() not in detail
+    assert "/srv/clauster/.claude/settings.json" in detail
+
+    monkeypatch.setattr(pty_keeper, "_SETTINGS_DETAIL_LIMIT", 40)
+    detail = pty_keeper._settings_error_detail(_SETTINGS_ERROR_80)
+    assert detail is not None
+    assert detail.endswith(" …")
+    assert len(detail) <= 42
+
+
+def test_settings_screen_error_names_the_screen_and_what_to_do() -> None:
+    from clauster import pty_keeper
+
+    error = pty_keeper._settings_screen_error("/srv/a/settings.json └ model: Expected string")
+    assert "Settings Error screen" in error
+    assert "Fix or remove that value" in error
+    assert error.endswith("claude reported: /srv/a/settings.json └ model: Expected string")
+    assert "claude reported" not in pty_keeper._settings_screen_error("")
+
+
+def test_keeper_drain_fails_closed_at_the_settings_error_screen(tmp_path: Path, capsys) -> None:  # noqa: ANN001
+    """The sidecar goes to `error` naming the screen and the value, never `ready`."""
+    from clauster import pty_keeper
+
+    sidecar = tmp_path / "k.json"
+    base: dict[str, object] = {"state": "starting", "error": None, "note": None}
+    drain = pty_keeper._KeeperDrain(base, sidecar, None, None)
+    drain.feed(_SETTINGS_ERROR_80[:_MENU_AT])  # a read that ends before the menu
+    assert drain.stop_required is False
+    drain.feed(_SETTINGS_ERROR_80[_MENU_AT:])
+
+    assert drain.stop_required is True
+    assert drain.held_screen == "Settings Error screen"
+    error = _read(sidecar)["error"]
+    assert _read(sidecar)["state"] == "error"
+    assert error == pty_keeper._settings_screen_error(
+        pty_keeper._settings_error_detail(_SETTINGS_ERROR_80) or ""
+    )
+    assert "permissions.defaultMode: Invalid value." in error
+
+    drain.feed(_SETTINGS_ERROR_80)  # a redraw is not a second report
+    drain.feed(_SPLIT_RAW)  # a URL cannot undo the error
+    assert capsys.readouterr().err.count("Settings Error screen") == 1  # to <sidecar>.log
+    assert _read(sidecar).get("connect_url") is None
+
+    drain._deadline = time.monotonic() - 1
+    drain.tick()
+    assert _read(sidecar)["state"] == "error"  # NOT promoted to ready at the URL timeout
+    assert _read(sidecar)["note"] is None
+
+
+def test_keeper_drain_ignores_settings_error_text_past_the_first_output(tmp_path: Path) -> None:
+    from clauster import pty_keeper
+
+    sidecar = tmp_path / "k.json"
+    base: dict[str, object] = {"state": "starting", "error": None, "note": None}
+    drain = pty_keeper._KeeperDrain(base, sidecar, None, None)
+    drain.feed(b"x" * pty_keeper._FIRST_SCREEN_WINDOW)
+    drain.feed(_SETTINGS_ERROR_80)
+    assert drain.stop_required is False
+    drain._deadline = time.monotonic() - 1
+    drain.tick()
+    assert _read(sidecar)["state"] == "ready"
+
+
+def test_run_keeper_stops_a_bridge_held_at_the_settings_error_screen(
+    tmp_path: Path, monkeypatch, _restore_sighup
+) -> None:  # noqa: ANN001
+    from clauster import pty_keeper
+
+    monkeypatch.setattr(pty_keeper, "_HELD_STOP_DELAY", 0.0)
+    script = tmp_path / "settings_bridge.py"
+    script.write_text(
+        "import sys, time\n"
+        f"sys.stdout.buffer.write({_SETTINGS_ERROR_80!r})\n"
+        "sys.stdout.flush()\n"
+        "time.sleep(60)\n"
+    )
+    sidecar = tmp_path / "k.json"
+    started = time.monotonic()
+    rc = pty_keeper.run_keeper([sys.executable, str(script)], sidecar, cwd=str(tmp_path))
+    assert time.monotonic() - started < 30  # stopped, not waited out
+    assert rc == -signal.SIGTERM
+    info = _read(sidecar)
+    assert info["state"] == "exited"
+    assert "Settings Error screen" in info["error"]  # survives the terminal write
+    assert info["connect_url"] is None
+
+
+def test_run_keeper_conpty_stops_a_bridge_held_at_the_settings_error_screen(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:  # noqa: ANN001
+    from clauster import pty_keeper
+
+    monkeypatch.setattr(pty_keeper, "_HELD_STOP_DELAY", 0.0)
+    fake = _fake_conpty(
+        chunks=[_SETTINGS_ERROR_80.decode(), "redraw\r\n"],
+        terminate_error=_FakeWinptyError("access denied"),
+    )
+    monkeypatch.setattr(pty_keeper, "_load_pty_process", lambda: fake)
+    sidecar = tmp_path / "b.keeper.json"
+    pty_keeper._run_keeper_conpty(["claude", "--remote-control"], sidecar, None, None)
+
+    assert "could not stop the bridge held at the Settings Error screen" in capsys.readouterr().err
+    assert "Settings Error screen" in _read(sidecar)["error"]
 
 
 def test_run_keeper_on_windows_never_restamps_an_unpack_dir(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001

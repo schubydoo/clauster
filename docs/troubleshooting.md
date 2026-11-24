@@ -436,6 +436,39 @@ login, or use the dashboard login flow
 An `ANTHROPIC_API_KEY` in the service environment also satisfies the `doctor`
 check.
 
+### "the session stopped at claude's Settings Error screen"
+
+**What you see:** an Interactive Session card shows "Session failed to start"
+(the status badge reads "Failed to start") with ``claude refused a value in a
+settings file: the session stopped at claude's Settings Error screen...``. After a
+short note on what to do, the card shows `claude reported:` and the text that
+`claude` printed: the path of each settings file it refused, and each refused key
+with the reason, for example `permissions.defaultMode: Invalid value`.
+
+**Most likely cause:** a settings file holds a value that this `claude` version
+does not accept. The config editor can save such a value with a warning (see
+[Known values are suggestions](guides/config-editor.md#known-values-are-suggestions)).
+For an Interactive Session, `claude` does not exit. It opens its Settings Error
+screen and waits for a keypress. The keeper reads that screen at the start of the
+session output, records the error, and stops the bridge about 5 seconds later.
+Clauster does not choose an option on that screen for you. "Continue without these
+settings" makes `claude` ignore every setting in that file, not only the refused
+value.
+
+**The fix:**
+
+1. Open the settings file that the card names.
+2. Correct or remove each key that the card names. You can use the config editor
+   or a text editor.
+3. Start the session again.
+
+If the list of refused values is long, the card shows only its start. If a file
+path is longer than the terminal is wide, `claude` wraps it, and the card shows a
+space at the wrap. The keeper reads the first 32 KiB of the session output. If a
+very long list pushes the end of the screen past that point, the card reads
+Running and keeps showing "Preparing connect link…". In that case, run `claude`
+in the project directory as the service user to see the screen.
+
 ### "a login flow is already in progress; cancel it first"
 
 **What you see:** the dashboard sign-in panel refuses to start, reporting that a

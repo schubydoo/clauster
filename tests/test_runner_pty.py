@@ -1446,6 +1446,58 @@ async def test_spawn_pty_not_logged_in_is_an_error_naming_the_login(runner_confi
 
 
 @_POSIX_ONLY
+async def test_spawn_pty_at_the_settings_error_screen_is_an_error_naming_it(
+    runner_config, monkeypatch
+):
+    """TASK-554: a flag-form bridge at claude's Settings Error screen is an ERROR row.
+
+    It used to go STARTING then RUNNING at the keeper's URL timeout with no link, while
+    claude waited at a screen nobody can answer. The card names the screen and the value.
+    """
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "pty_settings_error")
+    runner, _ = _pty_runner(runner_config)
+    inst = await runner.spawn("alpha")
+    try:
+        assert inst.status is InstanceStatus.ERROR
+        assert inst.url is None
+        detail = inst.error_detail or ""
+        assert "Settings Error screen" in detail
+        assert "/srv/projects/alpha/.claude/settings.json" in detail
+        assert "permissions.defaultMode: Invalid value." in detail
+        for _ in range(300):
+            if procutil.proc_create_time(inst.bridge_pid) is None:
+                break
+            await asyncio.sleep(0.05)
+        assert procutil.proc_create_time(inst.bridge_pid) is None  # stopped, not left there
+        assert inst.status is InstanceStatus.ERROR
+    finally:
+        await runner.stop(inst.instance_id)
+
+
+@_POSIX_ONLY
+async def test_late_settings_error_screen_is_an_error_not_a_crash(runner_config, monkeypatch):
+    """TASK-554: the screen drawn after the readiness wait ends ERROR through the watch."""
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "pty_settings_error")
+    monkeypatch.setenv("FAKE_CLAUDE_SLOW", "1.0")
+    monkeypatch.setattr("clauster.spawn_coordinator._READY_TIMEOUT", 0.3)
+    monkeypatch.setattr("clauster.spawn_coordinator._READY_POLL_INTERVAL", 0.05)
+    runner, _ = _pty_runner(runner_config)
+    inst = await runner.spawn("alpha")
+    try:
+        assert inst.status is InstanceStatus.STARTING  # past the readiness wait
+        for _ in range(200):
+            await runner.poll_once()
+            if inst.status is not InstanceStatus.STARTING:
+                break
+            await asyncio.sleep(0.1)
+        assert inst.status is InstanceStatus.ERROR
+        assert "Settings Error screen" in (inst.error_detail or "")
+        assert runner._registry._crash_counts.get("alpha", 0) == 0
+    finally:
+        await runner.stop(inst.instance_id)
+
+
+@_POSIX_ONLY
 async def test_late_login_screen_is_an_error_not_a_crash(runner_config, monkeypatch):
     """TASK-533: the login screen drawn after the readiness wait still ends ERROR.
 
