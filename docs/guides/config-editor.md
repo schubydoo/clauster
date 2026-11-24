@@ -835,10 +835,21 @@ not `010`, `0b101` or `1_000`. Quote a value that must stay a string. See
 Clauster never runs a hook command and never connects to an MCP server from
 this editor.
 
-- `name` must be lowercase letters, digits and hyphens, at most 239
-  characters, and the same as the name of the file. The name is also the
+- `name` must be lowercase letters, digits and single hyphens, start with a
+  letter, not end with a hyphen, have at most 239 characters, and be the same
+  as the name of the file. The name is also the
   file name, so this rule is narrower than the Claude Code rule. A file with
-  a longer or other name does not show in the list.
+  a longer or other name does not show in the list. The **Name** box holds at
+  most 239 characters. The editor writes the name into the frontmatter for
+  you. It quotes the names `yes`, `no`, `on`, `off`, `true`, `false` and
+  `null`, because YAML reads them unquoted as a boolean or null.
+- The subagent file path has one more limit. On Windows without long paths,
+  the path of the temporary file that a subagent save writes must fit in 259
+  characters. That path is 13
+  characters longer than the path of the subagent file. If it does not fit,
+  the save returns `422`. The message names the longest name that fits in
+  that project, or tells you to move the project to a shorter path when no
+  name fits. It also says that you can turn on long paths in Windows.
 - `memory`, `color` and `experimental.cacheTtl` offer their listed values,
   written exactly as listed. Another text value saves with a warning.
 - `effort` accepts a level name in any case, the alias `med`, or an integer.
@@ -1478,7 +1489,8 @@ space at the start or the end is part of the name.
 | Enable or Disable fails with "is already enabled" or "is installed at project scope, not user" | The badge is the merged state, and the chosen scope already has that value or cannot override it | Pick the scope that the message names, or use the Local scope to override a project setting for yourself |
 | Removing a marketplace returns `404` with "is not declared at … scope" | A different scope declares it, or Claude Code cannot read that scope's settings file | Make sure that the file is readable. Switch to the scope that declares it and remove it there. If no scope declares it, follow the command in the message |
 | A Settings save returns `422` with "Claude Code reads … only from" | The file holds a key (or a `true` value) that Claude Code ignores at this scope | Remove the key (in Rows mode or Raw JSON), or save it at the scope that the message names. For a `true` value, set it to `false` |
-| The Plugins tab shows `Failed to load (400).`, and the response names "returned output nested too deeply (more than 64 levels)" | The `claude plugin list --json` or `claude plugin marketplace list --json` output nests objects and lists more than 64 levels deep. Clauster reads no output nested deeper than 64 levels | Find the plugin or marketplace entry with the deep value in the output of that command on the host, and fix or remove it |
+| A tab shows "existing settings file is not valid JSON" and a line and column | The settings file for that scope is not valid JSON, so Clauster does not show or overwrite it | Fix the file on the host near that line and column, then reopen the tab. Clauster counts the position from the first character that is not blank. So the line number skips blank lines at the start of the file, and on that first line the column also skips its leading spaces and tabs |
+| The Plugins tab shows "returned output nested too deeply (more than 64 levels)" | The `claude plugin list --json` or `claude plugin marketplace list --json` output nests objects and lists more than 64 levels deep. Clauster reads no output nested deeper than 64 levels | Find the plugin or marketplace entry with the deep value in the output of that command on the host, and fix or remove it |
 
 Need to recover an earlier config? The five most recent pre-save snapshots
 sit next to the file as `clauster.yml.bak-*` — copy one back over

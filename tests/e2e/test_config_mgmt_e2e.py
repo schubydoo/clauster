@@ -12,6 +12,7 @@ unit-tested; this proves the wired Alpine flow round-trips to a real running ser
 from __future__ import annotations
 
 import json
+import re
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -20,6 +21,9 @@ from typing import TYPE_CHECKING
 
 import pytest
 import yaml
+
+from clauster import config_write as cw
+from clauster.config_write_subagents import MAX_NAME_CHARS
 
 if TYPE_CHECKING:
     from _driver import AgentBrowser
@@ -501,6 +505,113 @@ def test_config_mgmt_settings_failed_load_clears_previous_env_rows(
     browser.fill('[data-test="cm-confirm"]', "USER SCOPE")
     browser.expect_disabled('[data-test="cm-save"]')  # nothing to save into User scope
     assert not user_settings.exists()
+
+
+# --- TASK-512: a failed load shows the server's reason ----------------------------------
+
+
+def test_config_mgmt_broken_local_settings_shows_the_server_reason(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """A broken settings.local.json names the JSON error in the banner, not just a 422."""
+    local = _projects_root(config_mgmt_server) / "alpha" / ".claude" / "settings.local.json"
+    local.parent.mkdir(parents=True, exist_ok=True)
+    local.write_text('{"env": {sk-e2e-SECRETVALUE: 1}}', encoding="utf-8")
+
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-settings"]')
+    browser.expect_visible('[data-test="cm-settings-rows"]')
+    browser.click('[data-test="cm-scope-local"]')
+    reason = "existing settings file is not valid JSON: Expecting property name"
+    browser.expect_text('[data-test="cm-error"]', reason)
+    browser.expect_text('[data-test="cm-error"]', "line 1 column 10")
+    # The always-mounted role="alert" region carries the same text for a screen reader.
+    browser.expect_text('[data-test="cm-error-live"]', reason)
+    assert "SECRETVALUE" not in browser.get_text('[data-test="cm-error"]')
+    assert "Failed to load (422)" not in browser.get_text('[data-test="cm-error"]')
+
+
+_FAIL_SUBAGENTS_LIST = """(() => {
+  const orig = window.fetch;
+  window.fetch = (url, opts) => {
+    if (String(url).includes("/api/config-write/subagents?")) return %s;
+    return orig(url, opts);
+  };
+  return "stubbed";
+})()"""
+
+
+@pytest.mark.parametrize(
+    ("failure", "message"),
+    [
+        (
+            'Promise.resolve(new Response(\'{"detail": "config-write is disabled"}\', '
+            "{ status: 404 }))",
+            "config-write is disabled",
+        ),
+        (
+            'Promise.resolve(new Response(\'{"detail": "Not Found"}\', { status: 404 }))',
+            "This config surface is unavailable.",
+        ),
+        (
+            'Promise.resolve(new Response("<html>gateway</html>", { status: 404 }))',
+            "This config surface is unavailable.",
+        ),
+        ('Promise.resolve(new Response("{}", { status: 500 }))', "Failed to load (500)."),
+    ],
+    ids=["404-detail", "404-route-missing", "404-not-json", "500-no-detail"],
+)
+def test_config_mgmt_failed_surface_load_shows_detail_or_status(
+    browser: AgentBrowser, config_mgmt_server: Server, failure: str, message: str
+) -> None:
+    """A 404 surface shows the server's detail, else the status message (TASK-512)."""
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    assert browser.eval_json(_FAIL_SUBAGENTS_LIST % failure) == "stubbed"
+    browser.click('[data-test="cm-surface-subagents"]')
+    browser.expect_text('[data-test="cm-error"]', message)
+    browser.expect_text('[data-test="cm-error-live"]', message)
+    assert "<html>" not in browser.get_text('[data-test="cm-error"]')
+
+
+# The list fails with a 404 whose body the TEST releases, after the operator switched
+# tabs, so the load error is read only once its load is superseded (no timer to race).
+_SLOW_FAILING_SUBAGENTS_LIST = """(() => {
+  const orig = window.fetch;
+  window.fetch = (url, opts) => {
+    if (!String(url).includes("/api/config-write/subagents?")) return orig(url, opts);
+    return Promise.resolve({
+      ok: false, status: 404,
+      json: () => new Promise((resolve) => {
+        window.releaseBody = () => resolve({ detail: "late subagents detail" });
+      }),
+    });
+  };
+  return "stubbed";
+})()"""
+_LIVE_ERROR_TEXT = "document.querySelector('[data-test=\"cm-error-live\"]').textContent"
+
+
+def test_config_mgmt_superseded_load_error_never_reaches_the_banner(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """A load error read after a tab switch stays out of the new tab's banner (TASK-512)."""
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    assert browser.eval_json(_SLOW_FAILING_SUBAGENTS_LIST) == "stubbed"
+    browser.click('[data-test="cm-surface-subagents"]')
+    # The stub was reached: the subagents load is waiting on the body.
+    deadline = time.monotonic() + 5
+    while browser.eval_json("typeof window.releaseBody") != "function":
+        assert time.monotonic() < deadline, "the subagents list fetch never reached the stub"
+        time.sleep(0.2)
+    browser.click('[data-test="cm-surface-settings"]')
+    browser.expect_visible('[data-test="cm-settings-rows"]')
+    assert browser.eval_json("(window.releaseBody(), true)") is True
+    time.sleep(0.3)  # let the awaiting loader run
+    assert "late subagents detail" not in browser.eval_json(_LIVE_ERROR_TEXT)
+    assert browser.eval_json(f"{_ROOT}.configMgmt.error") == ""
 
 
 # --- TASK-271: a typed row for every top-level key --------------------------------------
@@ -1003,6 +1114,90 @@ def test_config_mgmt_new_subagent_name_single_source(
     text = saved.read_text(encoding="utf-8")
     assert "name: solo-agent" in text  # injected from the Name box
     assert "single-source agent" in text
+
+
+# --- TASK-466 / TASK-468: the Name box writes a YAML string and keeps to the length cap ---
+
+_YAML_KEYWORD_NAMES = ("yes", "no", "on", "off", "true", "false", "null")
+_FRONTMATTER = re.compile(r"\A---\n(.*?)\n---", re.S)
+
+
+def _header(text: str) -> str:
+    match = _FRONTMATTER.match(text)
+    assert match is not None, text
+    return match.group(1)
+
+
+def test_config_mgmt_subagent_keyword_names_read_back_as_the_name(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """The page's own name sync writes each YAML keyword name as a string (TASK-466).
+
+    PyYAML (YAML 1.1, what the backend checks) and the YAML 1.2 view of Claude Code's own
+    loader must both read the injected name back as the typed name. An ordinary name
+    stays plain, so a save does not rewrite every existing agent's `name:` line.
+    """
+    _open_modal(browser, config_mgmt_server)
+    names = [*_YAML_KEYWORD_NAMES, "my-agent"]
+    body = "---\ndescription: d\nname: stale\n---\nbody\n"
+    synced = browser.eval_json(
+        f"(() => {{ const d = {_ROOT}; return {json.dumps(names)}"
+        f".map((n) => d._syncAgentName({json.dumps(body)}, n)); }})()"
+    )
+    for name, text in zip(names, synced, strict=True):
+        header = _header(text)
+        assert yaml.safe_load(header)["name"] == name, text
+        assert cw.yaml12_view(header)["name"] == name, text
+        assert "stale" not in text
+    assert synced[-1].startswith("---\nname: my-agent\n")
+    assert synced[0].startswith('---\nname: "yes"\n')
+
+
+def test_config_mgmt_subagent_named_yes_saves_and_reopens(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """A subagent named `yes` saves through the editor and reopens as `yes` (TASK-466)."""
+    agents = _projects_root(config_mgmt_server) / "alpha" / ".claude" / "agents"
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-subagents"]')
+    browser.expect_visible('[data-test="cm-agent-new"]')
+    browser.click('[data-test="cm-agent-new"]')
+    browser.expect_visible('[data-test="cm-agent-editor"]')
+    browser.fill('[data-test="cm-agent-name"]', "yes")
+    browser.fill('[data-test="cm-agent-content"]', "---\ndescription: a yes agent\n---\nDo it.\n")
+    browser.fill('[data-test="cm-agent-confirm"]', "alpha")
+    browser.click('[data-test="cm-agent-save"]')
+    browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
+
+    header = _header((agents / "yes.md").read_text(encoding="utf-8"))
+    assert yaml.safe_load(header)["name"] == "yes"
+    assert cw.yaml12_view(header)["name"] == "yes"
+    browser.click('[data-test="cm-agent-edit-yes"]')
+    browser.expect_value('[data-test="cm-agent-name"]', "yes")
+    browser.expect_hidden('[data-test="cm-error"]')
+
+
+def test_config_mgmt_subagent_name_box_keeps_to_the_backend_cap(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """The Name box holds at most the backend's cap and says so beside the box (TASK-468)."""
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-subagents"]')
+    browser.expect_visible('[data-test="cm-agent-new"]')
+    browser.click('[data-test="cm-agent-new"]')
+    browser.expect_visible('[data-test="cm-agent-editor"]')
+    box = '[data-test="cm-agent-name"]'
+    browser.expect_attr(box, "maxlength", str(MAX_NAME_CHARS))
+    browser.expect_attr(box, "aria-describedby", "cm-agent-name-rule")
+    browser.expect_visible('[data-test="cm-agent-name-rule"]')
+    browser.expect_text('[data-test="cm-agent-name-rule"]', f"{MAX_NAME_CHARS} characters")
+    # One raw fill, not browser.fill: its verify loop waits for the full text, which
+    # maxlength never lets in. The browser cuts the text at maxlength.
+    browser._run("fill", box, "a" * (MAX_NAME_CHARS + 40), check=True)
+    browser.expect_value(box, "a" * MAX_NAME_CHARS)
+    assert browser.eval_json(f"{_ROOT}.configMgmt.subagents.name.length") == MAX_NAME_CHARS
 
 
 def test_config_mgmt_mcp_tab_loads(browser: AgentBrowser, config_mgmt_server: Server) -> None:

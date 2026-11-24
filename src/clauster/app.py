@@ -23,6 +23,7 @@ from . import (
     __version__,
     atomicio,
     auth,
+    config_write_subagents,
     frozen_bundle,
     login_shepherd,
     login_status,
@@ -631,6 +632,8 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     # setup wizard's separate template env (see setup_wizard.NO_AUTOFILL). Baked into the markup so
     # Alpine `x-for` row clones inherit it; password fields deliberately omit it (login autofill).
     templates.env.globals["NO_AUTOFILL"] = setup_wizard.NO_AUTOFILL
+    # The subagent Name box's maxlength is the backend's own cap (TASK-468), so they agree.
+    templates.env.globals["AGENT_NAME_MAX"] = config_write_subagents.MAX_NAME_CHARS
 
     def _render(
         request: Request,

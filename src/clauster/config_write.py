@@ -2827,7 +2827,11 @@ def load_settings_json_obj(raw: bytes) -> dict[str, Any]:
     try:
         text = raw.decode("utf-8").strip()
     except UnicodeDecodeError as exc:
-        raise InvalidCandidateError(f"existing settings file is not valid UTF-8: {exc}") from exc
+        # The position only: the codec's own message quotes the offending byte, and the
+        # dashboard now shows this detail in the load banner (TASK-512).
+        raise InvalidCandidateError(
+            f"existing settings file is not valid UTF-8 (at byte {exc.start})"
+        ) from exc
     if not text:
         return {}
     try:
