@@ -1384,23 +1384,45 @@ def test_route_marketplace_remove_names_the_plugins_the_cli_uninstalled(
 
 
 @pytest.mark.parametrize(
-    ("stdout", "expected"),
+    ("stdout", "expected", "named"),
     [
-        ("Also uninstalled 1 plugin from this marketplace:\n  fmt@m\nDone\n", "1 plugin from"),
+        (
+            "Also uninstalled 1 plugin from this marketplace:\n  fmt@m\nDone\n",
+            "1 plugin from this marketplace: fmt@m.",
+            True,
+        ),
         # An id the validator refuses is never echoed, and the count still reaches the operator.
-        ("Also uninstalled 1 plugin from this marketplace:\n  x; rm -rf ~\n", "1 plugin from"),
-        ("Also uninstalled 2 plugins from this marketplace:\n  fmt@m\n", "2 plugins from"),
+        (
+            "Also uninstalled 1 plugin from this marketplace:\n  x; rm -rf ~\n",
+            "1 plugin from this marketplace.",
+            False,
+        ),
+        (
+            "Also uninstalled 2 plugins from this marketplace:\n  fmt@m\n",
+            "2 plugins from this marketplace.",
+            False,
+        ),
+        # A wrapped id: both fragments pass the id shape, and only one ends in @m.
+        (
+            "Also uninstalled 2 plugins from this marketplace:\n  aaaa\n  fmt@m\n  lint@m\n",
+            "2 plugins from this marketplace.",
+            False,
+        ),
+        (
+            "Also uninstalled 1 plugin from this marketplace:\n  fmt@other\n",
+            "1 plugin from this marketplace.",
+            False,
+        ),
     ],
 )
 def test_uninstalled_warning_names_only_a_complete_valid_list(
-    tmp_path: Path, stdout: str, expected: str
+    tmp_path: Path, stdout: str, expected: str, named: bool
 ) -> None:
     run, _calls = _fake_run(rc=0, stdout=stdout)
     warning = plugins.cli_marketplace_remove(str(FAKE_CLAUDE), tmp_path, "m", "user", run=run)
     assert warning is not None and expected in warning
     assert "rm -rf" not in warning
-    # Named only when the valid lines match the count.
-    assert ("fmt@m" in warning) == (expected == "1 plugin from" and "fmt@m" in stdout)
+    assert ("fmt@" in warning) is named
 
 
 def test_cli_marketplace_remove_without_uninstalls_has_no_warning(tmp_path: Path) -> None:

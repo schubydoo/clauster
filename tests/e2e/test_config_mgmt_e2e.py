@@ -3025,7 +3025,9 @@ def test_config_mgmt_marketplace_note_shows_no_command_for_a_hostile_name(
     for name in ("x; touch /tmp/p", "y`id`$(id)"):
         selector = f"[data-test='cm-market-readonly-{name}']"
         browser.expect_text(selector, "Clauster shows no command for this name")
-        assert "claude plugin marketplace remove" not in browser.get_text(selector)
+        text = browser.get_text(selector)  # get_text returns "" on an error: prove this read
+        assert "Clauster shows no command for this name" in text
+        assert "claude plugin marketplace remove" not in text
 
 
 def test_config_mgmt_marketplaces_unreadable_declarations_offer_no_remove(

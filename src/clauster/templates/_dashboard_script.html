@@ -3171,10 +3171,14 @@
       _configMgmtRevealResult(origin) {
         const c = this.configMgmt;
         if (!(c.error || c.saved) || !this._focusIsFree(origin)) return;
-        // A warning sits under the banner and can hold the next step (TASK-514): show it.
-        const warned = c.saved && c.warnings.length;
-        this.revealFeedback(c.error ? '[data-test="cm-error"]'
-          : warned ? '[data-test="cm-save-warnings"]' : '[data-test="cm-saved"]');
+        this.revealFeedback(this._configMgmtResultSelector());
+      },
+      // A warning sits under the banner and can hold the next step (TASK-514): show it.
+      _configMgmtResultSelector() {
+        const c = this.configMgmt;
+        if (c.error) return '[data-test="cm-error"]';
+        return c.saved && c.warnings.length
+          ? '[data-test="cm-save-warnings"]' : '[data-test="cm-saved"]';
       },
       // A write that threw. Reloads catch their own errors, so this is mostly a request that
       // never reached the server; when the write already landed (`saved`), say that rather
@@ -4352,7 +4356,7 @@
           // The banners sit above the panel and Save sits at its foot (#1031). Skip the
           // scroll when the operator is working elsewhere, so it does not pull them away.
           if (live && (c.error || c.saved) && this._skillOvFocusIsFree()) {
-            this.revealFeedback(c.error ? '[data-test="cm-error"]' : '[data-test="cm-saved"]');
+            this.revealFeedback(this._configMgmtResultSelector());
           }
         }
       },

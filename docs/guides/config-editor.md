@@ -1066,7 +1066,8 @@ The scope rules and the update results below were checked against Claude Code
     that is safe in a shell command.
   - Claude Code dropped the marketplace and uninstalled its plugins. This can
     happen even when another project still declares the marketplace, and it can
-    remove that project's installs. The warning names the plugins.
+    remove that project's installs. When Claude Code reports the uninstalled
+    plugins, the warning names them or gives their number.
 - **Show plugins lists the plugins that a marketplace offers.** Clauster runs
   `claude plugin list --available --json` from the directory of the scope that
   you chose. At User scope, that is the home directory of the user that runs

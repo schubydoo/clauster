@@ -227,6 +227,25 @@ def test_start_failure_names_the_log_only_when_it_has_content(cfg, capsys, tmp_p
     assert "read its log with: clauster logs abc12345" in capsys.readouterr().err
 
 
+def test_start_failure_log_hint_reads_the_raw_log_first(cfg, capsys, tmp_path):
+    # The same order as ClausterEngine.bridge_log_path, which `clauster logs` reads.
+    raw, public = tmp_path / "raw.log", tmp_path / "public.log"
+    raw.write_bytes(b"")
+    public.write_bytes(b"a line\n")
+    inst = _inst(
+        status=InstanceStatus.ERROR,
+        error_detail="x",
+        bridge_raw_log_path=raw,
+        bridge_debug_log_path=public,
+    )
+    _FakeEngine.outcome = SpawnOutcome(instance=inst, created=True)
+    assert main(["start", "-c", cfg, "alpha"]) == 1
+    assert "clauster logs" not in capsys.readouterr().err
+    raw.write_bytes(b"a raw line\n")
+    assert main(["start", "-c", cfg, "alpha"]) == 1
+    assert "clauster logs abc12345" in capsys.readouterr().err
+
+
 def test_start_json_ending_in_error_keeps_its_shape_and_exits_1(cfg, capsys):
     ok = _inst(status=InstanceStatus.RUNNING)
     _FakeEngine.outcome = SpawnOutcome(instance=ok, created=True)

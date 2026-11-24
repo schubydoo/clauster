@@ -456,8 +456,10 @@ async def test_spawn_pty_launch_failure_sets_error(runner_config, tmp_path, monk
 
     monkeypatch.setattr(runner._registry, "_persist", _spy_persist)
 
+    token = "session_01ABCDEFGHJKMNPQRSTVWXYZ"
+
     def boom(*a, **k):
-        raise OSError("openpty: too many open files")
+        raise OSError(f"{'x' * 3000} {token} openpty: too many open files")
 
     monkeypatch.setattr(runner._launch, "_popen_keeper", boom)
 
@@ -468,7 +470,10 @@ async def test_spawn_pty_launch_failure_sets_error(runner_config, tmp_path, monk
     out = await runner._spawn_pty(inst, proj, "alpha", log_path, "default", resume=False)
 
     assert out.status is InstanceStatus.ERROR
-    assert out.error_detail == "openpty: too many open files"  # TASK-515: the reason is kept
+    # TASK-515: the reason is kept, redacted and bounded.
+    detail = out.error_detail or ""
+    assert detail.endswith("openpty: too many open files")
+    assert token not in detail and len(detail) == 2000
     assert persisted == [True]  # the ERROR state was persisted, not swallowed
 
 

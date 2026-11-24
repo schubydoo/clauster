@@ -703,15 +703,17 @@ async def test_spawn_poison_marks_error_and_clears_pointer(runner_config, monkey
 async def test_spawn_launch_failure_keeps_a_redacted_reason(runner_config, monkeypatch):
     # TASK-515: an exec failure wrote no bridge output, so the exception is the only reason.
     runner = _make_runner(runner_config)
+    token = "session_01ABCDEFGHJKMNPQRSTVWXYZ"
 
     def boom(*_a, **_k):
-        raise OSError("exec failed for session_01ABCDEFGHJKMNPQRSTVWXYZ")
+        raise OSError(f"{'x' * 3000} {token} exec failed")
 
     monkeypatch.setattr(runner._launch, "_popen", boom)
     inst = await runner.spawn("alpha")
     assert inst.status is InstanceStatus.ERROR
-    assert "exec failed for" in (inst.error_detail or "")
-    assert "session_01ABCDEFGHJKMNPQRSTVWXYZ" not in (inst.error_detail or "")
+    detail = inst.error_detail or ""
+    assert detail.endswith("exec failed")
+    assert token not in detail and len(detail) == 2000
 
 
 async def test_forget_refuses_running_bridge(runner_config, monkeypatch):

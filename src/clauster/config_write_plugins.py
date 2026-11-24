@@ -685,14 +685,15 @@ def cli_marketplace_remove(
             f"the list, {_marketplace_cli_step(name)}"
         )
     _raise_for_failure("marketplace-remove", name, proc)
-    return _describe_uninstalled(proc.stdout or "")
+    return _describe_uninstalled(proc.stdout or "", name)
 
 
-def _describe_uninstalled(stdout: str) -> str | None:
+def _describe_uninstalled(stdout: str, marketplace: str) -> str | None:
     """Return a warning for the plugins a ``marketplace remove`` uninstalled, if any.
 
-    The ids come from CLI output, so only a line that passes :func:`validate_plugin_id` is
-    named. When the lines do not match the count, the warning gives the count alone.
+    The ids come from CLI output, so only a valid id of this ``marketplace`` is named: a
+    wrapped line cannot pass as one. When the lines do not match the count, the warning
+    gives the count alone.
     """
     lines = stdout.splitlines()
     for index, line in enumerate(lines):
@@ -701,13 +702,15 @@ def _describe_uninstalled(stdout: str) -> str | None:
             continue
         count = int(match.group(1))
         ids: list[str] = []
-        # Only `count` lines: a plain word on the next line is also a valid id shape.
         for entry in lines[index + 1 : index + 1 + count]:
+            candidate = entry.strip()
             try:
-                validate_plugin_id(entry.strip())
+                validate_plugin_id(candidate)
             except cw.InvalidCandidateError:
                 break
-            ids.append(entry.strip())
+            if not candidate.endswith(f"@{marketplace}"):
+                break
+            ids.append(candidate)
         noun = "plugin" if count == 1 else "plugins"
         named = f": {', '.join(ids)}" if len(ids) == count else ""
         return (
