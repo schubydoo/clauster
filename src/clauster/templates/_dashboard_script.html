@@ -5813,6 +5813,7 @@
         return { all: "All", desktop: "Desktop", browser: "Browser", detached: "Background", external: "External" }[f] || f;
       },
       detailOf(key) { return (this.rowOf(key) || {}).error_detail || null; },
+      taskLimitNoteOf(key) { return (this.rowOf(key) || {}).task_limit_note || null; },
       externalCount(name) {
         const s = this.externalSessions[name];
         return Array.isArray(s) ? s.length : 0;

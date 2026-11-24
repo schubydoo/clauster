@@ -1243,6 +1243,10 @@
                   <span class="text-danger small ms-1" data-test="bridge-error-detail"
                         x-show="displayStatus(i.rk) === 'error' && detailOf(i.rk)" x-cloak
                         x-text="detailOf(i.rk)"></span>
+                  {# The likely reason for a crash: a task limit refused forks just before it. #}
+                  <span class="text-danger small ms-1" data-test="bridge-task-limit-note"
+                        x-show="displayStatus(i.rk) === 'crashed' && taskLimitNoteOf(i.rk)" x-cloak
+                        x-text="taskLimitNoteOf(i.rk)"></span>
                   {# A restart that stopped this row and could not start it again (TASK-459):
                      its error follows the row from Active into Recent. #}
                   {# Hidden only while bridge-error-detail above shows the same cause; an

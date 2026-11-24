@@ -68,7 +68,7 @@ import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
-from . import inspector, procutil
+from . import inspector, procutil, task_limits
 from .claude_cli import ClaudeNotFound
 from .config import ClausterConfig, ResumeMode
 from .field_decode import _ticks_on_exact_match
@@ -126,6 +126,8 @@ class PollLoop:
         self._binary = binary
         self._registry = registry
         self._record = record
+        # Last refused-fork counters of each live bridge, the baseline for a crash reason.
+        self._task_counts: dict[str, task_limits.TaskEventCount] = {}
         self._sample_one_bridge = sample_one_bridge
         self._warn_if_refresh_slow = warn_if_refresh_slow
         self._reconcile_status = reconcile_status
@@ -247,6 +249,8 @@ class PollLoop:
         # because nothing else on the poll path writes and a restart would otherwise
         # re-open the same lottery.
         stamped = False
+        for gone in self._task_counts.keys() - self._registry._instances.keys():
+            del self._task_counts[gone]
         for instance in list(self._registry._instances.values()):
             pid = instance.bridge_pid
             # A pty keeper self-exits with its bridge, and Clauster's direct child (the
@@ -318,6 +322,14 @@ class PollLoop:
             instance.claude_version = (
                 await asyncio.to_thread(procutil.running_claude_version, pid) if alive else None
             )
+            if side_effects and alive:
+                # The baseline for the crash reason below. Taken on every live tick, because
+                # a limit can be hit and the bridge can die between two ticks.
+                count = await asyncio.to_thread(task_limits.snapshot, pid)
+                if count is None:
+                    self._task_counts.pop(instance.instance_id, None)
+                else:
+                    self._task_counts[instance.instance_id] = count
             prev_status = instance.status
             self._reconcile_status(instance, alive)
             if (
@@ -332,6 +344,14 @@ class PollLoop:
                 # double-notify for one death (#1104).
                 self._registry._crash_counts[instance.project] = (
                     self._registry._crash_counts.get(instance.project, 0) + 1
+                )
+                # Keyed to this pid: a resumed row keeps its instance id, and the counters
+                # of the previous process say nothing about this one.
+                base = self._task_counts.pop(instance.instance_id, None)
+                instance.task_limit_note = (
+                    await asyncio.to_thread(task_limits.crash_note, base)
+                    if base is not None and base.pid == pid
+                    else None
                 )
                 # The crash notification is now fired inside _emit_lifecycle (#541), so
                 # the single chokepoint owns history + webhook + notification together.

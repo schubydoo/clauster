@@ -131,7 +131,8 @@ class RecordFacade:
         bodies = {
             "crash": (
                 f"clauster: bridge crashed — {instance.label}",
-                f"The bridge for project {proj} exited unexpectedly (not via Stop) — mode {mode}.",
+                f"The bridge for project {proj} exited unexpectedly (not via Stop) — mode {mode}."
+                + (f" {instance.task_limit_note}" if instance.task_limit_note else ""),
             ),
             "ready": (
                 f"clauster: bridge ready — {instance.label}",

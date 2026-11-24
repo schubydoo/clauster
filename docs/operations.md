@@ -523,6 +523,25 @@ The limit has these caveats:
 - **A stopped user manager stops the scopes.** Linger keeps the manager running
   after logout.
 
+To see task use, run `clauster doctor`. The `service tasks` check shows the
+current count, the limit, and how many process or thread starts the limit
+refused. The kernel keeps that count until the cgroup is recreated, usually at a
+reboot, so a warning can describe an old event. With `bridge_task_limit` set, the
+`bridge task limit` check also shows the refusals in `clauster_bridges.slice`.
+
+If a limit refuses starts shortly before a bridge exits, the crashed row and the
+crash notification say so. The text says "likely" because the timing does not
+prove the cause. If the scope of the bridge is already gone, the text says
+"possible", because the remaining count can come from another bridge. Clauster
+needs one live poll of the bridge first, so a bridge that dies right after it
+starts has no such reason. The reason is not kept across a Clauster restart.
+
+The slice count needs a kernel that adds a child scope's refusals to its parent.
+If the cgroup files have no `pids.events.local`, the kernel can leave the slice
+count at 0. Then doctor shows no slice refusals, and a crash whose scope is gone
+has no "possible" reason. The `service tasks` count and the "likely" reason do
+not depend on this.
+
 ## Backup, restore, and corruption recovery
 
 ### Routine backup
