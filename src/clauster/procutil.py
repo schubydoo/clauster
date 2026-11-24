@@ -838,6 +838,28 @@ def is_bridge_process(pid: int) -> bool:
 _MAX_BRIDGE_ANCESTRY = 1
 
 
+def session_child_debug_file(pid: int) -> tuple[str, Path] | None:
+    """Return a bridge session child's ``(session id, --debug-file)``, or ``None``.
+
+    Only a process with ``--sdk-url`` is a bridge session child. The argv also holds that
+    URL, so this returns the two values and nothing else, and a caller must never log the
+    argv. Fails closed on a gone, denied or zombie process and on a missing flag.
+    """
+    try:
+        argv = psutil.Process(pid).cmdline()
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, ValueError, OSError):
+        return None
+    if "--sdk-url" not in argv:
+        return None
+    values = []
+    for flag in ("--session-id", "--debug-file"):
+        at = argv.index(flag) if flag in argv else -1
+        if at < 0 or at + 1 >= len(argv) or not argv[at + 1]:
+            return None
+        values.append(argv[at + 1])
+    return values[0], Path(values[1])
+
+
 def bridge_ancestor(pid: int, *, max_depth: int = _MAX_BRIDGE_ANCESTRY) -> int | None:
     """Return the nearest live bridge at or above ``pid`` in its ancestry, else ``None``.
 

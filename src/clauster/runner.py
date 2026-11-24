@@ -1270,7 +1270,12 @@ class SessionRunner:
         by_path = {p.path.resolve(): name for name, p in self._discovered().items()}
         out: dict[str, list[WorkingSession]] = {}
         for session in self._sessions:
-            if session.attribution is not Attribution.EXTERNAL:
+            if session.attribution is Attribution.ORPHANED:
+                # Back to today's display as soon as the row is no longer crashed (a Resume
+                # between two polls), so the old process never drops off the dashboard.
+                if self._orphan_row(session) is not None:
+                    continue
+            elif session.attribution is not Attribution.EXTERNAL:
                 continue
             name = by_path.get(session.cwd.resolve())
             if name is not None:
@@ -1304,6 +1309,32 @@ class SessionRunner:
         for sessions in out.values():
             sessions.sort(key=lambda s: (s.started_at, s.local_uuid))
         return out
+
+    def _orphan_row(self, session: WorkingSession) -> RemoteControlInstance | None:
+        """Return the crashed row an ORPHANED session belongs to, or ``None`` once it moved on."""
+        if session.attribution is not Attribution.ORPHANED or session.parent_instance is None:
+            return None
+        row = self._instances.get(session.parent_instance)
+        return row if row is not None and row.status is InstanceStatus.CRASHED else None
+
+    def orphaned_sessions_by_instance(self) -> dict[str, list[WorkingSession]]:
+        """Group the sessions that outlived a crashed bridge by that bridge's id (TASK-562)."""
+        out: dict[str, list[WorkingSession]] = {}
+        for session in self._sessions:
+            row = self._orphan_row(session)
+            if row is not None:
+                out.setdefault(row.instance_id, []).append(session)
+        for sessions in out.values():
+            sessions.sort(key=lambda s: (s.started_at, s.local_uuid))
+        return out
+
+    def has_orphaned_session(self, project: str) -> bool:
+        """Whether a crashed bridge of ``project`` left a session running."""
+        return any(
+            row.project == project
+            for row in map(self._orphan_row, self._sessions)
+            if row is not None
+        )
 
     def live_session_uuids(self, project_path: Path) -> set[str]:
         """Local session UUIDs of currently-running sessions writing into a project's dir (#614).

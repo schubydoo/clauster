@@ -324,6 +324,9 @@ class Attribution(StrEnum):
     HOSTED = "hosted"
     UNTRACKED = "untracked"
     EXTERNAL = "external"
+    # Still running after its standard bridge crashed. `parent_instance` is the crashed row,
+    # linked by the debug-file name only (`inspector.link_orphans`, TASK-562).
+    ORPHANED = "orphaned"
 
 
 class WorkingSession(BaseModel):

@@ -108,7 +108,9 @@ session sources the dashboard already surfaces:
 - **external-session** / **bridge-session** — live working sessions seen via the
   `claude agents --json` cross-check (unmanaged externals and the sessions under
   a managed bridge). A `bridge-session` is listed **once**, under the bridge that
-  owns it; its `parent_instance` is that bridge's `id`.
+  owns it; its `parent_instance` is that bridge's `id`;
+- **orphaned-session** — a session that is still running after its standard bridge
+  crashed. Its `parent_instance` is the crashed bridge's `id`.
 
 Takes no arguments. Returns `{"count": <n>, "sessions": [...]}`. Each session
 carries an `id`, a `kind`, a `status`/`state`, the owning `project` where known,

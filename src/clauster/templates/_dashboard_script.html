@@ -201,6 +201,8 @@
       ptyPending: {},         // project -> true while a pty launch awaits its first row (#779)
       externalSessions: {},
       trackedSessions: {},  // instance_id -> live working sessions under THAT bridge (#570, #1020)
+      orphanedSessions: {},  // crashed instance_id -> its sessions that are still running (TASK-562)
+      _orphanRowsSeen: {},   // the crashed rows that already opened Recent once
       bridgeSessOpen: {},   // row key (rk) -> true while its multi-session list is expanded (#570)
       externalOpen: {},   // project name -> true while its external-session detail is expanded
       adoptableProjects: [],  // names whose external session is a standard bridge we can adopt (#330)
@@ -5339,15 +5341,16 @@
         this._refreshing = true;
         let ok = true;
         try {
-          const [iRes, sRes, aRes, dRes, tRes] = await Promise.all([
+          const [iRes, sRes, aRes, dRes, tRes, oRes] = await Promise.all([
             fetch(ROOT + "/api/instances"),
             fetch(ROOT + "/api/sessions"),
             fetch(ROOT + "/api/agents"),
             fetch(ROOT + "/api/sessions/adoptable"),
             fetch(ROOT + "/api/sessions/tracked"),
+            fetch(ROOT + "/api/sessions/orphaned"),
           ]);
           // Session expired mid-use -> bounce to login instead of silently showing stale data.
-          if (this._authExpired(iRes) || this._authExpired(sRes) || this._authExpired(aRes) || this._authExpired(dRes) || this._authExpired(tRes)) return;
+          if (this._authExpired(iRes) || this._authExpired(sRes) || this._authExpired(aRes) || this._authExpired(dRes) || this._authExpired(tRes) || this._authExpired(oRes)) return;
           if (iRes.ok) {
             const list = await iRes.json();
             // Split the flat instance list (#779): interactive (pty) sessions are a flat
@@ -5425,6 +5428,9 @@
           // multi-session expander only; a failed fetch just collapses to the starter link.
           if (tRes.ok) this.trackedSessions = await tRes.json();
           else { this.trackedSessions = {}; }
+          // Advisory like the two above: a failed fetch shows the plain crashed row.
+          if (oRes.ok) this._absorbOrphaned(await oRes.json());
+          else { this.orphanedSessions = {}; }
           // Hosted sessions live in a separate registry (HostedManager); only poll
           // them when the claustrum channel is configured.
           if (CLAUSTRUM_ENABLED) {
@@ -5672,7 +5678,9 @@
         // was written to make readable.
         const tail = this.resumeBlockedReason(name) ? "." : " — Resume to continue.";
         if (s === "interrupted") return "Ended without a Stop (host restart or external exit)" + tail;
-        if (s === "crashed") return "The bridge exited unexpectedly" + tail;
+        // No call to action while a session survived: Resume restarts it, and survivorNoteOf
+        // says so right beside this.
+        if (s === "crashed") return "The bridge exited unexpectedly" + (this.survivingSessions(name).length ? "." : tail);
         return null;
       },
       isRunning(name) { return this.statusOf(name) === "running"; },
@@ -5830,6 +5838,38 @@
       },
       detailOf(key) { return (this.rowOf(key) || {}).error_detail || null; },
       taskLimitNoteOf(key) { return (this.rowOf(key) || {}).task_limit_note || null; },
+      // Sessions that outlived this row's bridge (TASK-562). Gated on the row's own status:
+      // a Resume changes the row before the next /api/sessions/orphaned read.
+      survivingSessions(key) {
+        const row = this.rowOf(key);
+        if (!row || row.status !== "crashed") return [];
+        const s = this.orphanedSessions[row.instance_id];
+        return Array.isArray(s) ? s : [];
+      },
+      survivingCount() {
+        return this.endedBridges().reduce((n, i) => n + this.survivingSessions(i.rk).length, 0);
+      },
+      // What was tested on a real crash: the new bridge adopts the session and starts a new
+      // process for it, and the old process exits about 40 s later. Worded per session
+      // because that test had one session.
+      survivorNoteOf(key) {
+        const s = this.survivingSessions(key);
+        if (!s.length) return null;
+        const pids = s.map((x) => x.pid).join(", ");
+        const lead = s.length === 1
+          ? "Its session is still running (pid " + pids + ")."
+          : s.length + " sessions from this bridge are still running (pids " + pids + ").";
+        return lead + " Resume reattaches a session in a new process. The conversation " +
+          "continues, but shell commands and subagents in the old process end. " +
+          "If that work must finish, wait before you press Resume.";
+      },
+      // A live session must not hide in a collapsed group: open Recent once per crashed row.
+      _absorbOrphaned(next) {
+        const ids = Object.keys(next);
+        if (ids.some((id) => !this._orphanRowsSeen[id])) this.recentOpen = true;
+        this._orphanRowsSeen = Object.fromEntries(ids.map((id) => [id, true]));
+        this.orphanedSessions = next;
+      },
       externalCount(name) {
         const s = this.externalSessions[name];
         return Array.isArray(s) ? s.length : 0;

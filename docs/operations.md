@@ -424,6 +424,14 @@ over a WebSocket to the dashboard's live log view.
   start". `clauster logs <instance>` reads a dead bridge's log too, so you do not
   have to find the file yourself — see [reading a stopped or crashed bridge's
   log](reference/cli.md#reading-a-stopped-or-crashed-bridges-log).
+- **For a Crashed bridge whose session is still running** — a session child can
+  outlive a standard bridge. The crashed row then shows the session and its pid,
+  in place of a separate External card. Clauster links the two only when the debug
+  file name of the child contains the debug file name of the bridge. If it cannot
+  prove the link, for example after a Clauster restart, the session stays External.
+  Clauster does not signal this process. Resume reattaches the session in a new
+  process. The conversation continues, but shell commands and subagents in the old
+  process end. If that work must finish, wait before you press Resume.
 
 Bridge lifecycle states you will see on a card or in `clauster_bridges`:
 
