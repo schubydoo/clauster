@@ -1385,6 +1385,17 @@
   
 </li>
         
+          <li class="md-nav__item">
+  <a href="#a-background-agents-resume-fails-with-the-checks-of-the-job-and-its-working-directory-took-longer-than-20-s" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A background agent's Resume fails with "the checks of the job and its working directory took longer than 20 s"
+      
+    </span>
+  </a>
+  
+</li>
+        
       </ul>
     </nav>
   
@@ -2230,6 +2241,17 @@
   
 </li>
         
+          <li class="md-nav__item">
+  <a href="#a-background-agents-resume-fails-with-the-checks-of-the-job-and-its-working-directory-took-longer-than-20-s" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A background agent's Resume fails with "the checks of the job and its working directory took longer than 20 s"
+      
+    </span>
+  </a>
+  
+</li>
+        
       </ul>
     </nav>
   
@@ -2908,6 +2930,32 @@ file stays byte-identical.</p>
 <li>Run the command from step 1 again. No output means that Clauster can read the file.</li>
 <li>Do the action again.</li>
 </ol>
+<h3 id="a-background-agents-resume-fails-with-the-checks-of-the-job-and-its-working-directory-took-longer-than-20-s">A background agent's Resume fails with "the checks of the job and its working directory took longer than 20 s"<a class="headerlink" href="#a-background-agents-resume-fails-with-the-checks-of-the-job-and-its-working-directory-took-longer-than-20-s" title="Permanent link">&para;</a></h3>
+<p><strong>What you see:</strong> you click <strong>Resume</strong> on an ended background agent, or send
+<code>POST /api/agents/&lt;id&gt;/resume</code>, and the request fails with a <code>504</code>:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-15-1" name="__codelineno-15-1" href="#__codelineno-15-1"></a>job '&lt;id&gt;' was not resumed: the checks of the job and its working directory took
+<a id="__codelineno-15-2" name="__codelineno-15-2" href="#__codelineno-15-2"></a>longer than 20 s. A network mount may be hung. Try again later.
+</code></pre></div>
+<p><strong>Cause:</strong> before it resumes a job, Clauster reads the job's record under
+<code>~/.claude</code>, resolves the job's working directory and trusts that directory in
+<code>~/.claude.json</code>. When the resume runs in <code>inherit</code> or <code>bypassPermissions</code> mode, it
+also lists <code>projects_root</code> for the permission check. On a healthy disk these steps
+take milliseconds. They took more than 20 seconds, so a folder on the way did not
+answer. This is usually a network mount (NFS, SMB, sshfs) that hangs.</p>
+<p>Clauster did not resume the job, and it does not resume it later when the folder
+answers again. The blocked step can stay in the background until the mount answers.
+If the step that hung was one of the last ones (the second folder check, the search
+for the <code>claude</code> binary or the trust write), the trust write can still finish then. It
+only marks the job's directory as trusted, the same entry that a successful resume
+writes.</p>
+<p><strong>Fix:</strong></p>
+<ol>
+<li>On the Clauster host, run <code>ls</code> as the user that runs Clauster on the job's
+   directory, on <code>projects_root</code> and on the home directory. A command that does not
+   return names the folder that hangs.</li>
+<li>Repair or remount that folder.</li>
+<li>Click <strong>Resume</strong> again.</li>
+</ol>
 <h2 id="claude-itself-is-the-problem">Claude itself is the problem<a class="headerlink" href="#claude-itself-is-the-problem" title="Permanent link">&para;</a></h2>
 <h3 id="not-logged-in-access-token-has-expired-re-authenticate-with-claude">"not logged in" / "access token has expired; re-authenticate with <code>claude</code>"<a class="headerlink" href="#not-logged-in-access-token-has-expired-re-authenticate-with-claude" title="Permanent link">&para;</a></h3>
 <p><strong>What you see:</strong> <code>doctor</code> warns on the <code>claude-login</code> row —
@@ -3032,7 +3080,7 @@ each old one:</p>
 </ol>
 <p>To see if one process still has the old environment, run this on the Linux host.
 No output means that the process is clean:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-15-1" name="__codelineno-15-1" href="#__codelineno-15-1"></a>tr<span class="w"> </span><span class="s1">'\0'</span><span class="w"> </span><span class="s1">'\n'</span><span class="w"> </span>&lt;<span class="w"> </span>/proc/&lt;pid&gt;/environ<span class="w"> </span><span class="p">|</span><span class="w"> </span>grep<span class="w"> </span>-E<span class="w"> </span><span class="s1">'^(LD_LIBRARY_PATH=(.*:)?[^:]*/_MEI|_PYI_)'</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-16-1" name="__codelineno-16-1" href="#__codelineno-16-1"></a>tr<span class="w"> </span><span class="s1">'\0'</span><span class="w"> </span><span class="s1">'\n'</span><span class="w"> </span>&lt;<span class="w"> </span>/proc/&lt;pid&gt;/environ<span class="w"> </span><span class="p">|</span><span class="w"> </span>grep<span class="w"> </span>-E<span class="w"> </span><span class="s1">'^(LD_LIBRARY_PATH=(.*:)?[^:]*/_MEI|_PYI_)'</span>
 </code></pre></div>
 <p>Do not run this check on a pty keeper's own pid. In the binary, a current keeper
 always has these variables: on Linux and macOS it runs as its own copy of the
@@ -3043,7 +3091,7 @@ starts. Check the bridge pid instead.</p>
 <p><strong>What you see:</strong> the dashboard's live log view stops updating.</p>
 <p><strong>Most likely cause:</strong> the WebSocket stream died, not the bridge. Check
 whether the on-disk log is still growing:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-16-1" name="__codelineno-16-1" href="#__codelineno-16-1"></a>tail<span class="w"> </span>-f<span class="w"> </span>~/.clauster/logs/&lt;label&gt;-*.log
+<div class="highlight"><pre><span></span><code><a id="__codelineno-17-1" name="__codelineno-17-1" href="#__codelineno-17-1"></a>tail<span class="w"> </span>-f<span class="w"> </span>~/.clauster/logs/&lt;label&gt;-*.log
 </code></pre></div>
 <p>If it grows, the bridge is fine — reload the dashboard to reconnect the
 stream. If it is silent too, treat it as a wedged bridge: stop and resume it
@@ -3055,9 +3103,9 @@ its keeper) still running with no project card that controls it.</p>
 survive a <code>systemctl restart</code> under the shipped unit's <code>KillMode=process</code>;
 normally Clauster reattaches to them at startup. One that was orphaned
 instead is cleaned up with:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-17-1" name="__codelineno-17-1" href="#__codelineno-17-1"></a>clauster<span class="w"> </span>keepers<span class="w">                      </span><span class="c1"># list orphaned pty keepers (no project card)</span>
-<a id="__codelineno-17-2" name="__codelineno-17-2" href="#__codelineno-17-2"></a>clauster<span class="w"> </span>keepers<span class="w"> </span>--kill<span class="w"> </span>&lt;pid&gt;<span class="w">         </span><span class="c1"># stop one by its keeper PID</span>
-<a id="__codelineno-17-3" name="__codelineno-17-3" href="#__codelineno-17-3"></a>clauster<span class="w"> </span>keepers<span class="w"> </span>--kill<span class="w"> </span>&lt;pid&gt;<span class="w"> </span>--force<span class="w"> </span><span class="c1"># stop a keeper still on a project card (recovery path)</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-18-1" name="__codelineno-18-1" href="#__codelineno-18-1"></a>clauster<span class="w"> </span>keepers<span class="w">                      </span><span class="c1"># list orphaned pty keepers (no project card)</span>
+<a id="__codelineno-18-2" name="__codelineno-18-2" href="#__codelineno-18-2"></a>clauster<span class="w"> </span>keepers<span class="w"> </span>--kill<span class="w"> </span>&lt;pid&gt;<span class="w">         </span><span class="c1"># stop one by its keeper PID</span>
+<a id="__codelineno-18-3" name="__codelineno-18-3" href="#__codelineno-18-3"></a>clauster<span class="w"> </span>keepers<span class="w"> </span>--kill<span class="w"> </span>&lt;pid&gt;<span class="w"> </span>--force<span class="w"> </span><span class="c1"># stop a keeper still on a project card (recovery path)</span>
 </code></pre></div>
 <p><strong>Mechanism:</strong> <a href="../reference/cli/#clauster-keepers-stop-an-orphaned-pty-keeper"><code>clauster keepers</code></a>
 · <a href="../operations/#restart">the <code>KillMode</code> / restart caveat</a>.</p>
@@ -3108,7 +3156,7 @@ bridge's log, and Clauster lifts it onto the card. The exact fault is also
 logged on a line that begins with <code>clauster.pty_keeper:</code>. The three faults log
 <code>screen could not be rendered</code>, <code>rejected an escape sequence</code> (once for each
 error type), and <code>failed and was disabled</code>:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-18-1" name="__codelineno-18-1" href="#__codelineno-18-1"></a>grep<span class="w"> </span>clauster.pty_keeper<span class="w"> </span>~/.clauster/logs/&lt;label&gt;-*.keeper.log
+<div class="highlight"><pre><span></span><code><a id="__codelineno-19-1" name="__codelineno-19-1" href="#__codelineno-19-1"></a>grep<span class="w"> </span>clauster.pty_keeper<span class="w"> </span>~/.clauster/logs/&lt;label&gt;-*.keeper.log
 </code></pre></div>
 <h2 id="everything-looks-fine-but-the-session-never-responds">Everything looks fine but the session never responds<a class="headerlink" href="#everything-looks-fine-but-the-session-never-responds" title="Permanent link">&para;</a></h2>
 <h3 id="hosted-direct-session-cannot-connect-to-claustrum">Hosted / Direct Session: "cannot connect to claustrum"<a class="headerlink" href="#hosted-direct-session-cannot-connect-to-claustrum" title="Permanent link">&para;</a></h3>
@@ -3117,9 +3165,9 @@ error type), and <code>failed and was disabled</code>:</p>
 API returns <code>hosted channel unavailable: claustrum daemon not connected</code>.</p>
 <p><strong>Most likely cause:</strong> the claustrum daemon is not running (or not installed —
 it is an optional dependency), or its socket path is wrong.</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-19-1" name="__codelineno-19-1" href="#__codelineno-19-1"></a>curl<span class="w"> </span>-s<span class="w"> </span>http://127.0.0.1:7621/healthz<span class="w">      </span><span class="c1"># the claustrum block names the reason</span>
-<a id="__codelineno-19-2" name="__codelineno-19-2" href="#__codelineno-19-2"></a>clauster<span class="w"> </span>deps<span class="w"> </span>list<span class="w">                         </span><span class="c1"># is claustrum installed?</span>
-<a id="__codelineno-19-3" name="__codelineno-19-3" href="#__codelineno-19-3"></a>tail<span class="w"> </span>~/.clauster/claustrum/daemon.log<span class="w">      </span><span class="c1"># what did the daemon last say?</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-20-1" name="__codelineno-20-1" href="#__codelineno-20-1"></a>curl<span class="w"> </span>-s<span class="w"> </span>http://127.0.0.1:7621/healthz<span class="w">      </span><span class="c1"># the claustrum block names the reason</span>
+<a id="__codelineno-20-2" name="__codelineno-20-2" href="#__codelineno-20-2"></a>clauster<span class="w"> </span>deps<span class="w"> </span>list<span class="w">                         </span><span class="c1"># is claustrum installed?</span>
+<a id="__codelineno-20-3" name="__codelineno-20-3" href="#__codelineno-20-3"></a>tail<span class="w"> </span>~/.clauster/claustrum/daemon.log<span class="w">      </span><span class="c1"># what did the daemon last say?</span>
 </code></pre></div>
 <p>Start with <code>/healthz</code>: its <code>claustrum</code> block carries an <code>error</code> describing why
 the last start attempt failed — including the commonest case, the binary not
@@ -3257,11 +3305,11 @@ Before that the server logged at <code>info</code> in every deployment.</p>
 </blockquote>
 <p>Set <code>log_level</code> (default <code>info</code>) to raise the server's own verbosity — it
 covers Clauster's loggers and uvicorn's alike:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-20-1" name="__codelineno-20-1" href="#__codelineno-20-1"></a><span class="nt">log_level</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">debug</span><span class="w">   </span><span class="c1"># debug | info | warning | error</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-21-1" name="__codelineno-21-1" href="#__codelineno-21-1"></a><span class="nt">log_level</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">debug</span><span class="w">   </span><span class="c1"># debug | info | warning | error</span>
 </code></pre></div>
 <p>For a one-shot run, or in a container or unit file, use the env override
 instead of editing the config:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-21-1" name="__codelineno-21-1" href="#__codelineno-21-1"></a><span class="nv">CLAUSTER_LOG_LEVEL</span><span class="o">=</span>debug<span class="w"> </span>clauster<span class="w"> </span>run<span class="w"> </span>-c<span class="w"> </span>clauster.yml
+<div class="highlight"><pre><span></span><code><a id="__codelineno-22-1" name="__codelineno-22-1" href="#__codelineno-22-1"></a><span class="nv">CLAUSTER_LOG_LEVEL</span><span class="o">=</span>debug<span class="w"> </span>clauster<span class="w"> </span>run<span class="w"> </span>-c<span class="w"> </span>clauster.yml
 </code></pre></div>
 <p>Either way the level is read <strong>once at startup</strong>, so restart Clauster after
 changing it. What <code>debug</code> mostly adds is <strong>uvicorn's own</strong> debug records —
