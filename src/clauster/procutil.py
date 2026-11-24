@@ -1314,8 +1314,11 @@ def release_bundle_dll_directory() -> bool:
     This first registers the unpack dir with ``os.add_dll_directory``. That keeps it on
     this process's own search path for extension modules and ``ctypes``, which load with
     ``LOAD_LIBRARY_SEARCH_DEFAULT_DIRS``, and a child does not get it. Then it resets the
-    inherited directory with ``SetDllDirectoryW(NULL)``, the recipe PyInstaller documents
-    for launching an external program. Returns whether it reset. Does nothing unless this
+    inherited directory with ``SetDllDirectoryW("")``. PyInstaller's recipe passes ``NULL``,
+    but ``NULL`` restores the default search order, which puts the current directory (a
+    child's project folder) back in; an empty string drops the unpack dir and keeps the
+    current directory out, as Microsoft's ``SetDllDirectoryW`` page says. Returns whether
+    it reset. Does nothing unless this
     is the standalone binary on Windows. A failed reset is logged, not raised: the server
     then runs as it did before.
     """
@@ -1334,7 +1337,7 @@ def release_bundle_dll_directory() -> bool:
         return False
     # use_last_error: the reason is saved at the call, before other code can overwrite it.
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    if not kernel32.SetDllDirectoryW(None):
+    if not kernel32.SetDllDirectoryW(""):
         _log.warning(
             "could not reset the DLL directory; children may search %s for DLLs (%s)",
             meipass,

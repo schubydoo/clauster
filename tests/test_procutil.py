@@ -825,7 +825,9 @@ def test_release_bundle_dll_directory_keeps_it_here_and_resets_it_for_children(m
     """
     calls = _as_frozen_windows(monkeypatch)
     assert procutil.release_bundle_dll_directory() is True
-    assert calls == [("add_dll_directory", _MEI), ("SetDllDirectoryW", None)]
+    # An empty string, not NULL: NULL would put a child's current directory back in its
+    # DLL search order (review nit on PR 1954).
+    assert calls == [("add_dll_directory", _MEI), ("SetDllDirectoryW", "")]
     assert procutil._bundle_dll_directory == _MEI  # held, so the registration stays
 
 
