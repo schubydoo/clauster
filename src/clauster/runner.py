@@ -43,6 +43,7 @@ from . import (
     redact,
     rediscovery,
     runner_state,
+    session_ends,
     spawn_coordinator,
 )
 
@@ -537,6 +538,8 @@ class SessionRunner:
         # earlier collaborators use); the deferring lambdas resolve `self`'s CURRENT attribute
         # at call time so a test that swaps e.g. `runner.rediscover` still intercepts it. The
         # runner keeps thin delegators (below) for the moved methods — see :class:`PollLoop`.
+        # Which sessions each standard bridge's log says ended (TASK-557).
+        self._session_ends = session_ends.SessionEndTracker()
         self._poll_loop = poll_loop.PollLoop(
             config=config,
             binary=self._binary,
@@ -553,6 +556,7 @@ class SessionRunner:
             hosted_provider=lambda: self._hosted_instances,
             rediscover=lambda: self.rediscover(),
             prune_stale_pointers=lambda: self._prune_stale_pointers(),
+            retire_ended_starters=lambda: self._retire_ended_starters(),
         )
         # Spawn / resume path (#1157): the security-critical collaborator that owns the
         # fail-closed gate sequence, both bridge launches (standard + pty), the readiness
@@ -611,6 +615,7 @@ class SessionRunner:
             reconcile_status=lambda inst, alive: self._reconcile_status(inst, alive),
             project_path=lambda name: self._project_path(name),
             capture_error_detail=lambda inst: self._capture_error_detail(inst),
+            retire_ended_starters=lambda: self._retire_ended_starters(),
         )
 
     # ----- read API -------------------------------------------------------
@@ -1593,7 +1598,10 @@ class SessionRunner:
         )
         try:
             await asyncio.to_thread(
-                pointers.clear_pointer, resolved, claude_projects_dir=self._claude_projects_dir
+                pointers.clear_pointer,
+                resolved,
+                claude_projects_dir=self._claude_projects_dir,
+                keep_mtime=False,
             )
         except (pointers.PointerStillLive, OSError) as exc:
             _log.warning("could not clear poisoned bridge-pointer for %s: %s", resolved, exc)
@@ -2597,6 +2605,7 @@ class SessionRunner:
                 pointers.clear_pointer,
                 project_path.resolve(),
                 claude_projects_dir=self._claude_projects_dir,
+                keep_mtime=False,
             )
         except (pointers.PointerStillLive, OSError) as exc:
             _log.warning(
@@ -2616,6 +2625,10 @@ class SessionRunner:
         """
         if instance.status is InstanceStatus.RUNNING:
             await asyncio.to_thread(self._backfill_starter_session, instance, project_path)
+            # At once, not on the next poll: the pointer can name a session already proven
+            # archived, and the new bridge's log says nothing about it (TASK-557). Both
+            # callers are standard-only, and the pass itself reads standard rows only.
+            await self._retire_ended_starters()
         elif instance.status in (InstanceStatus.ERROR, InstanceStatus.CRASHED):
             await asyncio.to_thread(self._capture_error_detail, instance)
 
@@ -2981,6 +2994,7 @@ class SessionRunner:
                         pointers.clear_pointer,
                         project_path,
                         claude_projects_dir=self._claude_projects_dir,
+                        keep_mtime=False,
                     )
                 except pointers.PointerStillLive:
                     _log.warning(
@@ -3124,6 +3138,64 @@ class SessionRunner:
     async def rediscover(self, *, persist: bool = True) -> None:
         """Reattach surviving + persisted bridges at startup (delegates to ``Rediscovery``)."""
         await self._rediscovery.rediscover(persist=persist)
+        # Here and not only in the poll: the read-only CLI path rediscovers and never polls,
+        # and a reattach seeds the starter from a pointer that still names an ended session.
+        await self._retire_ended_starters()
+
+    async def _retire_ended_starters(self) -> None:
+        """Stop deep-linking the starter session of a standard bridge once it ended (TASK-557).
+
+        Reads only the bridge logs and writes only in-memory rows, so it is safe under
+        ``persist=False`` and ``side_effects=False``. Best-effort: a failure here must not
+        stop a poll tick or a startup, so it is logged and the next tick tries again.
+        """
+        targets = {
+            inst.instance_id: (
+                inst.starter_session_id,
+                inst.environment_id,
+                inst.bridge_raw_log_path,
+                inst.bridge_debug_log_path,
+            )
+            for inst in self._registry._instances.values()
+            if inst.channel == "remote-control"
+            and inst.resume_mode == "standard"
+            and inst.starter_session_id is not None
+            and not inst.starter_archived
+        }
+
+        def _scan() -> dict[str, session_ends.LinkEvidence]:
+            """Read the logs off the loop: the tracker's lock is held across a file read."""
+            # The raw file is missing when redaction was turned on after this bridge started:
+            # the bridge still writes the public log then.
+            sources = {
+                iid: raw if raw is not None and raw.exists() else public
+                for iid, (_sid, _env, raw, public) in targets.items()
+            }
+            self._session_ends.keep_only({p for p in sources.values() if p is not None})
+            return {
+                iid: self._session_ends.evidence(sources[iid], sid, env)
+                for iid, (sid, env, _raw, _public) in targets.items()
+                if sid is not None
+            }
+
+        try:
+            found = await asyncio.to_thread(_scan)
+        except Exception:
+            _log.exception("could not check for ended starter sessions; continuing")
+            return
+        for iid, evidence in found.items():
+            inst = self._registry._instances.get(iid)
+            # Re-checked across the await: a spawn can have replaced the row or its log.
+            if (
+                inst is None
+                or inst.starter_session_id != targets[iid][0]
+                or (inst.bridge_raw_log_path, inst.bridge_debug_log_path) != targets[iid][2:]
+            ):
+                continue
+            if evidence is session_ends.LinkEvidence.ARCHIVED:
+                inst.mark_starter_archived()
+            elif evidence is not session_ends.LinkEvidence.READ_ERROR:
+                inst.set_starter_vouched(evidence is session_ends.LinkEvidence.LIVE)
 
     def _reattach_pty_from_sidecar(
         self, name: str, saved: dict, *, exclude_pids: frozenset[int]

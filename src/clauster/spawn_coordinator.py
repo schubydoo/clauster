@@ -150,6 +150,7 @@ class SpawnCoordinator:
         reconcile_status: Callable[[RemoteControlInstance, bool], None],
         project_path: Callable[[str], Path | None],
         capture_error_detail: Callable[[RemoteControlInstance], None],
+        retire_ended_starters: Callable[[], Awaitable[None]],
     ) -> None:
         """Bind to config + the shared registry/record/launch/rediscovery and injected helpers.
 
@@ -198,6 +199,7 @@ class SpawnCoordinator:
         self._reconcile_status = reconcile_status
         self._project_path = project_path
         self._capture_error_detail = capture_error_detail
+        self._retire_ended_starters = retire_ended_starters
         # Mark remote control as acknowledged once, before the first spawn.
         self._rc_setting_ensured = False
         # Install the resume-recap SessionStart hook once, before the first spawn.
@@ -748,6 +750,11 @@ class SpawnCoordinator:
         # session (#671). Best-effort; a no-op for a cold start, a pty spawn, or when the
         # anchor is healthy/indeterminate.
         await self._clear_pointer_if_anchor_poisoned(proj.path)
+
+        # The poll may not have read the previous bridge's log since its session ended, and
+        # this start can seed that session's id from the pointer. Read it first (TASK-557).
+        if effective_resume_mode == "standard":
+            await self._retire_ended_starters()
 
         # Before the cap: the cap and the row registration must stay close together, because
         # another project can pass the cap during any await between them. Also before every

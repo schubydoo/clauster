@@ -192,9 +192,13 @@ class BridgePrune:
             # backup=False: a 2-week-dead pointer isn't worth a .bak that would itself linger.
             # The environment id is kept (#1580): the server can still hold the environment,
             # and without the id the next start 409s. An already-stripped pointer is a no-op,
-            # so the rewrite happens once and does not keep resetting this TTL's mtime.
+            # and keep_mtime holds the one real rewrite to the same age: the CLI's reuse TTL
+            # reads this mtime too, so a cleanup must not make a dead pointer look fresh.
             if pointers.clear_pointer(
-                resolved, claude_projects_dir=self._claude_projects_dir, backup=False
+                resolved,
+                claude_projects_dir=self._claude_projects_dir,
+                backup=False,
+                keep_mtime=True,
             ):
                 _log.info("pruned the stale session anchor from bridge-pointer for %s", resolved)
         except pointers.PointerStillLive:

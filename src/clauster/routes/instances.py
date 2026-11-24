@@ -916,7 +916,12 @@ async def _restart_bridge(
         await runner.stop(resolved)
     except UnknownProject as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    identity: dict[str, str] = {}
     if env_client is not None and env_id is not None:
+        # Read before the discard deletes the file: the replacement pointer needs it (TASK-561).
+        identity = await asyncio.to_thread(
+            pointers.reusable_identity, path, claude_projects_dir=runner.claude_projects_dir
+        )
         await _discard_bridge_environment(env_client, env_id, path, runner)
     try:
         outcome = await _spawn_or_http(runner.resume_detailed(resolved, create_session=not force))
@@ -936,7 +941,7 @@ async def _restart_bridge(
         raise _restart_failed("bridge", exc) from exc
     warnings = list(outcome.warnings)
     if force and outcome.created:
-        warning = await _write_reuse_pointer(outcome.instance, path, runner)
+        warning = await _write_reuse_pointer(outcome.instance, path, runner, identity=identity)
         if warning is not None:
             warnings.append(warning)
     return _spawn_body(
@@ -948,7 +953,11 @@ async def _restart_bridge(
 
 
 async def _write_reuse_pointer(
-    instance: RemoteControlInstance, path: Path, runner: SessionRunner
+    instance: RemoteControlInstance,
+    path: Path,
+    runner: SessionRunner,
+    *,
+    identity: dict[str, str],
 ) -> str | None:
     """Write the pointer a Force-restarted bridge never writes itself; return a warning.
 
@@ -971,6 +980,7 @@ async def _write_reuse_pointer(
             environment_id=env_id,
             pid=instance.bridge_pid,
             proc_start=str(instance.bridge_start_ticks),
+            identity=identity,
             claude_projects_dir=runner.claude_projects_dir,
         )
     except OSError as exc:

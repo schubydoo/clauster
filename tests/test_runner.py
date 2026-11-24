@@ -35,6 +35,7 @@ from clauster.runner import (
     SpawnError,
     UnknownProject,
 )
+from clauster.session_ends import LinkEvidence
 from clauster.trust import is_trusted
 from conftest import _raise_cancelled
 
@@ -4647,3 +4648,410 @@ async def test_a_row_from_an_earlier_boot_is_judged_dead_at_reattach(runner_conf
     assert alive is False, "a row from an earlier boot must be judged dead on identity"
     ticks_same_boot, alive_same_boot = runner._judge_row(555000, 1000.0, 770579, "new-boot")
     assert alive_same_boot is True, "the same row in the live boot stays alive"
+
+
+# ----- TASK-557: the link leaves a starter session that ended ---------------------------
+
+
+def _archive_line(session_id: str) -> str:
+    """The line a multi-session bridge logs when it archives a completed session."""
+    key = bridge_log.session_key(session_id)
+    return (
+        f"2026-11-17T02:23:01.000Z [DEBUG] [bridge:api] POST /v1/code/sessions/cse_{key}/archive\n"
+    )
+
+
+def _append(log_path: Path, text: str) -> None:
+    with log_path.open("a", encoding="utf-8") as fh:
+        fh.write(text)
+
+
+@pytest.mark.parametrize("redact_on_disk", [False, True])
+async def test_starter_session_exit_moves_the_link_while_the_bridge_runs(
+    runner_config, monkeypatch, redact_on_disk
+):
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    config, _claude_json = runner_config
+    config.logs.redact_session_url = redact_on_disk
+    runner = _make_runner(runner_config)
+    inst = await runner.spawn("alpha")
+    try:
+        assert inst.status is InstanceStatus.RUNNING
+        starter = inst.starter_session_id
+        assert starter is not None
+        await runner.poll_once()
+        # Positive control: a live starter keeps its deep link across a poll.
+        assert inst.session_url == f"https://claude.ai/code/{starter}?from=cli"
+
+        log_path = inst.bridge_raw_log_path or inst.bridge_debug_log_path
+        assert log_path is not None
+        _append(log_path, _archive_line(starter))
+        await runner.poll_once()
+
+        assert inst.status is InstanceStatus.RUNNING  # the bridge itself keeps running
+        assert inst.session_url is None
+        assert (inst.session_url or inst.url) == (
+            f"https://claude.ai/code?environment={inst.environment_id}"
+        )
+    finally:
+        await runner.stop(inst.instance_id)
+
+
+async def test_another_sessions_end_keeps_the_starter_link(runner_config, monkeypatch):
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    runner = _make_runner(runner_config)
+    inst = await runner.spawn("alpha")
+    try:
+        assert inst.bridge_debug_log_path is not None
+        _append(inst.bridge_debug_log_path, _archive_line("session_01ANOTHERSESSIONAAAAAA"))
+        await runner.poll_once()
+        assert inst.session_url is not None
+    finally:
+        await runner.stop(inst.instance_id)
+
+
+@pytest.mark.parametrize("archived", [False, True])
+async def test_reattach_from_the_pointer_does_not_relink_an_ended_session(
+    runner_config, monkeypatch, archived
+):
+    # The pointer keeps naming the first session, so a clauster restart reseeded the dead
+    # link. `rediscover` alone must fix it: the read-only CLI path never polls.
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    config, claude_json = runner_config
+    runner = _make_runner(runner_config)
+    inst = await runner.spawn("alpha")
+    try:
+        if inst.bridge_start_ticks is None:
+            pytest.skip("no CLI-format procStart on this OS")
+        starter = inst.starter_session_id
+        assert starter is not None and inst.bridge_debug_log_path is not None
+        path = pointers.pointer_path_for(runner._project_path("alpha"), runner.claude_projects_dir)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "sessionId": starter,
+                    "environmentId": inst.environment_id,
+                    "source": "standalone",
+                    "pid": inst.bridge_pid,
+                    "procStart": str(inst.bridge_start_ticks),
+                }
+            )
+        )
+        if archived:
+            _append(inst.bridge_debug_log_path, _archive_line(starter))
+
+        restarted = SessionRunner(config, claude_json=claude_json)
+        real_lookup = pointers.pointer_for_project
+        monkeypatch.setattr(
+            "clauster.rediscovery.pointers.pointer_for_project",
+            lambda p, *_a: real_lookup(p, restarted.claude_projects_dir),
+        )
+        await restarted.rediscover(persist=False)
+        again = restarted.get_instance(inst.instance_id)
+        assert again is not None and again.status is InstanceStatus.RUNNING
+        assert again.starter_session_id == starter
+        if archived:
+            assert again.session_url is None
+            assert again.url == f"https://claude.ai/code?environment={inst.environment_id}"
+        else:
+            assert again.session_url == f"https://claude.ai/code/{starter}?from=cli"
+    finally:
+        await runner.stop(inst.instance_id)
+
+
+async def test_adopted_bridge_has_no_log_so_it_uses_the_environment_link(
+    runner_config, monkeypatch
+):
+    runner = _make_runner(runner_config)
+    monkeypatch.setattr(
+        "clauster.pointers.pointer_for_project",
+        lambda path: _FakePtr() if path.name == "alpha" else None,
+    )
+    monkeypatch.setattr("clauster.runner.procutil.is_live_standard_bridge", lambda *a, **k: True)
+    monkeypatch.setattr(
+        "clauster.runner.procutil.proc_cwd",
+        lambda pid: (runner_config[0].projects_root / "alpha").resolve(),
+    )
+    inst = await runner.adopt("alpha")
+    assert inst.starter_session_id == "session_x"  # kept as a known value for redaction
+    assert inst.session_url is None
+    assert inst.url == "https://claude.ai/code?environment=env_x"
+
+
+async def test_retire_pass_leaves_pty_and_hosted_rows_alone(runner_config):
+    runner = _make_runner(runner_config)
+    pty = RemoteControlInstance(
+        project="alpha", label="a", resume_mode="pty", starter_session_id="session_pty"
+    )
+    hosted = RemoteControlInstance(
+        project="beta", label="b", channel="hosted", starter_session_id="session_hosted"
+    )
+    runner._registry._instances[pty.instance_id] = pty
+    runner._registry._instances[hosted.instance_id] = hosted
+    await runner._retire_ended_starters()
+    assert pty.session_url is not None  # no log, but a pty bridge is out of scope
+    assert hosted.session_url is not None
+
+
+async def test_retire_pass_skips_a_row_replaced_during_the_scan(runner_config, monkeypatch):
+    runner = _make_runner(runner_config)
+    row = RemoteControlInstance(project="alpha", label="a", starter_session_id="session_old")
+    runner._registry._instances[row.instance_id] = row
+
+    def _replaced_mid_scan(_path, _sid, _env):
+        row.starter_session_id = "session_new"  # a spawn landed while the thread ran
+        return LinkEvidence.ARCHIVED
+
+    monkeypatch.setattr(runner._session_ends, "evidence", _replaced_mid_scan)
+    await runner._retire_ended_starters()
+    assert row.session_url == "https://claude.ai/code/session_new?from=cli"
+
+
+@pytest.mark.parametrize("field", ["bridge_debug_log_path", "bridge_raw_log_path"])
+async def test_retire_pass_skips_a_row_whose_log_changed_during_the_scan(
+    runner_config, tmp_path, monkeypatch, field
+):
+    runner = _make_runner(runner_config)
+    row = RemoteControlInstance(
+        project="alpha",
+        label="a",
+        starter_session_id="session_same",
+        bridge_debug_log_path=tmp_path / "old.log",
+        bridge_raw_log_path=tmp_path / "old.raw.log",
+    )
+    runner._registry._instances[row.instance_id] = row
+
+    def _moved_mid_scan(_path, _sid, _env):
+        setattr(row, field, tmp_path / "new.log")  # same session id, new process
+        return LinkEvidence.ARCHIVED
+
+    monkeypatch.setattr(runner._session_ends, "evidence", _moved_mid_scan)
+    await runner._retire_ended_starters()
+    assert row.session_url is not None
+
+
+async def test_pointer_built_pty_card_keeps_its_link_with_no_log(runner_config):
+    # The two modes stay separate: only a standard row loses the link for having no log.
+    ptr = _FakePtr()
+    built = {
+        mode: Rediscovery._instance_from_pointer(
+            "alpha",
+            ptr,
+            label="alpha",
+            spawn_mode="same-dir",
+            permission_mode="default",
+            resume_mode=mode,
+            bridge_proc_start=None,
+            keeper_pid=None,
+            keeper_start_ticks=None,
+            instance_id=None,
+        )
+        for mode in ("pty", "standard")
+    }
+    assert built["pty"].session_url == "https://claude.ai/code/session_x?from=cli"
+    assert built["standard"].session_url is None
+
+
+@pytest.mark.parametrize(("ended", "polled"), [(False, True), (True, True), (True, False)])
+async def test_resume_does_not_relink_a_session_that_ended(
+    runner_config, monkeypatch, ended, polled
+):
+    # The archive line is in the old log and the pointer can seed the same id again, so
+    # the resumed row must keep what the old row learned, even if no poll read that line.
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    runner = _make_runner(runner_config)
+    first = await runner.spawn("alpha")
+    sid = "session_01RESUMEDBBBBBBBBBBB"
+    first.starter_session_id = sid
+    if ended:
+        assert first.bridge_debug_log_path is not None
+        _append(first.bridge_debug_log_path, _archive_line(sid))
+    if polled:
+        await runner.poll_once()
+    await runner.stop(first.instance_id)
+
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "resume")
+
+    class FakePtr:
+        pid, proc_start = 1, "1000"
+        environment_id = "env_01TESTENVAAAAAAAAAAAAAAAA"
+        session_id = sid
+
+    monkeypatch.setattr("clauster.pointers.pointer_for_project", lambda *a, **k: FakePtr())
+    resumed = await runner.resume(first.instance_id)
+    try:
+        assert resumed.status is InstanceStatus.RUNNING
+        assert resumed.starter_session_id == sid
+        if ended:
+            assert resumed.session_url is None
+        else:
+            assert resumed.session_url == f"https://claude.ai/code/{sid}?from=cli"
+    finally:
+        await runner.stop(first.instance_id)
+
+
+@pytest.mark.parametrize("polled", [False, True])
+async def test_plain_start_after_stop_does_not_relink_an_ended_session(
+    runner_config, monkeypatch, polled
+):
+    # A new row with a new id: nothing is carried from the old row, and the pointer can
+    # still name the archived session when the anchor probe could not reach the API.
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    runner = _make_runner(runner_config)
+    first = await runner.spawn("alpha")
+    sid = "session_01RESUMEDBBBBBBBBBBB"
+    first.starter_session_id = sid
+    assert first.bridge_debug_log_path is not None
+    _append(first.bridge_debug_log_path, _archive_line(sid))
+    if polled:
+        await runner.poll_once()
+    await runner.stop(first.instance_id)
+
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "resume")
+
+    class FakePtr:
+        pid, proc_start = 1, "1000"
+        environment_id = "env_01TESTENVAAAAAAAAAAAAAAAA"
+        session_id = sid
+
+    monkeypatch.setattr("clauster.pointers.pointer_for_project", lambda *a, **k: FakePtr())
+    # No Forget: Forget also empties the pointer's session id, so it cannot seed this.
+    second = await runner.spawn("alpha")
+    try:
+        assert second.instance_id != first.instance_id
+        assert second.status is InstanceStatus.RUNNING
+        assert second.starter_session_id == sid
+        assert second.session_url is None  # before any poll of the new row
+    finally:
+        await runner.stop(second.instance_id)
+
+
+async def test_resume_does_not_carry_mere_doubt(runner_config, monkeypatch):
+    # A row with no usable log hides its link on doubt. The resumed bridge has a log that
+    # can vouch for the session, so the link must come back.
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    runner = _make_runner(runner_config)
+    first = await runner.spawn("alpha")
+    sid = "session_01RESUMEDBBBBBBBBBBB"
+    first.starter_session_id = sid
+    first.set_starter_vouched(False)
+    assert first.session_url is None
+    first.bridge_debug_log_path = None
+    first.bridge_raw_log_path = None
+    await runner.stop(first.instance_id)
+
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "resume")
+
+    class FakePtr:
+        pid, proc_start = 1, "1000"
+        environment_id = "env_01TESTENVAAAAAAAAAAAAAAAA"
+        session_id = sid
+
+    monkeypatch.setattr("clauster.pointers.pointer_for_project", lambda *a, **k: FakePtr())
+    resumed = await runner.resume(first.instance_id)
+    try:
+        await runner.poll_once()
+        assert resumed.session_url == f"https://claude.ai/code/{sid}?from=cli"
+    finally:
+        await runner.stop(first.instance_id)
+
+
+async def test_doubt_clears_when_the_log_starts_to_vouch(runner_config, tmp_path):
+    runner = _make_runner(runner_config)
+    log = tmp_path / "alpha-1-1.log"
+    log.write_text("2026-11-17T01:25:00.000Z [DEBUG] [bridge:init] starting\n")
+    row = RemoteControlInstance(
+        project="alpha",
+        label="a",
+        environment_id="env_x",
+        starter_session_id="session_x",
+        bridge_debug_log_path=log,
+    )
+    runner._registry._instances[row.instance_id] = row
+    await runner._retire_ended_starters()
+    assert row.session_url is None  # the log does not name this environment yet
+    _append(log, "2026-11-17T01:25:01.000Z [DEBUG] [bridge:api] x environment_id=env_x\n")
+    await runner._retire_ended_starters()
+    assert row.session_url is not None
+
+
+async def test_a_read_error_leaves_the_link_as_it_was(runner_config, monkeypatch):
+    runner = _make_runner(runner_config)
+    row = RemoteControlInstance(project="alpha", label="a", starter_session_id="session_x")
+    runner._registry._instances[row.instance_id] = row
+    monkeypatch.setattr(runner._session_ends, "evidence", lambda *_a: LinkEvidence.READ_ERROR)
+    await runner._retire_ended_starters()
+    assert row.session_url is not None
+    row.set_starter_vouched(False)
+    await runner._retire_ended_starters()
+    assert row.session_url is None
+
+
+async def test_retire_pass_reads_the_public_log_when_the_raw_file_is_missing(
+    runner_config, tmp_path
+):
+    # Redaction turned on after the bridge started: the row names a .raw.log that was never
+    # created, and the bridge still writes the public log.
+    runner = _make_runner(runner_config)
+    public = tmp_path / "alpha-1-1.log"
+    public.write_text("2026-11-17T01:25:00.000Z [DEBUG] x environment_id=env_x\n")
+    row = RemoteControlInstance(
+        project="alpha",
+        label="a",
+        environment_id="env_x",
+        starter_session_id="session_x",
+        bridge_debug_log_path=public,
+        bridge_raw_log_path=tmp_path / "alpha-1-1.raw.log",
+    )
+    runner._registry._instances[row.instance_id] = row
+    await runner._retire_ended_starters()
+    assert row.session_url is not None  # a missing raw file is not a dead session
+    _append(public, _archive_line("session_x"))
+    await runner._retire_ended_starters()
+    assert row.session_url is None
+
+
+async def test_retire_pass_failure_never_breaks_the_tick(runner_config, monkeypatch, caplog):
+    runner = _make_runner(runner_config)
+    row = RemoteControlInstance(project="alpha", label="a", starter_session_id="session_x")
+    runner._registry._instances[row.instance_id] = row
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("scan failed")
+
+    monkeypatch.setattr(runner._session_ends, "evidence", _boom)
+    await runner._retire_ended_starters()
+    assert row.session_url is not None
+    assert "could not check for ended starter sessions" in caplog.text
+
+
+# ----- TASK-561: GC keeps the pointer's identity and its age ------------------------------
+
+
+def test_prune_keeps_identity_and_does_not_reset_the_mtime(runner_config):
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    pointer = _write_nonlive_pointer(runner, "alpha")
+    identity = {
+        "dir": str((config.projects_root / "alpha").resolve()),
+        "machineId": "machine-01",
+        "accountUuid": "11111111-2222-3333-4444-555555555555",
+        "organizationUuid": "66666666-7777-8888-9999-000000000000",
+    }
+    pointer.write_text(json.dumps({**json.loads(pointer.read_text()), **identity}))
+    _age(pointer, 20)
+    aged = pointer.stat().st_mtime_ns
+
+    runner._prune_one_pointer(config.projects_root / "alpha", _prune_cutoff())
+
+    assert _anchor_dropped(pointer)
+    data = json.loads(pointer.read_text())
+    assert {key: data[key] for key in identity} == identity
+    assert pointer.stat().st_mtime_ns == aged  # the CLI's TTL reads this
+
+    # A second GC run finds nothing to do and still leaves the age alone.
+    content = pointer.read_bytes()
+    runner._prune_one_pointer(config.projects_root / "alpha", _prune_cutoff())
+    assert pointer.read_bytes() == content
+    assert pointer.stat().st_mtime_ns == aged

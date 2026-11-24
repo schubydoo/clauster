@@ -218,6 +218,44 @@ def test_force_restart_archives_env_drops_pointer_and_skips_session(runner_confi
         client.delete(f"/api/instances/{iid}")
 
 
+def test_open_qr_panel_reloads_when_the_link_changes(runner_config):
+    # TASK-557: an open panel must refetch when the link moves, or it keeps showing the code
+    # of the session that ended. The link itself must stay out of the image URL.
+    app, _runner = _bridge_app(runner_config)
+    with TestClient(app) as client:
+        page = client.get("/").text
+    assert "this.refreshOpenQrs(this._byId, byId);" in page
+    assert "this.refreshOpenQrs({ [body.rk]: this._byId[body.rk] }, { [body.rk]: body });" in page
+    assert "(before.session_url || before.url) !== (row.session_url || row.url)" in page
+    assert '"/qr?t=" + (this.qrNonce[name] || 0);' in page
+
+
+def test_force_restart_carries_the_old_pointers_identity(runner_config, monkeypatch):
+    # TASK-561: the CLI copies identity from the pointer it reuses, so a replacement written
+    # without it would keep this environment on the 4-hour TTL for good.
+    app, runner, _fake = _force_app(runner_config, monkeypatch)
+    with TestClient(app) as client:
+        iid = client.post("/api/instances", json={"project": "alpha"}).json()["instance_id"]
+        pointer = _seed_pointer(runner)
+        identity = {
+            "dir": str(runner._project_path("alpha")),
+            "machineId": "machine-01",
+            "accountUuid": "11111111-2222-3333-4444-555555555555",
+            "organizationUuid": "66666666-7777-8888-9999-000000000000",
+        }
+        pointer.write_text(json.dumps({**json.loads(pointer.read_text()), **identity}))
+
+        r = client.post(f"/api/instances/{iid}/force-restart")
+        assert r.status_code == 200, r.text
+        if runner.get_instance(iid).bridge_start_ticks is None:
+            pytest.skip("no CLI-format procStart on this OS, so no pointer is written")
+        written = json.loads(pointer.read_text())
+        assert written["sessionId"] == ""
+        assert written["environmentId"] == r.json()["environment_id"]
+        assert {key: written[key] for key in identity} == identity
+        client.delete(f"/api/instances/{iid}")
+
+
 def test_force_restarted_bridge_reattaches_running_after_a_clauster_restart(
     runner_config, monkeypatch
 ):

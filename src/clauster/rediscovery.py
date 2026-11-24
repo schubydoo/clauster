@@ -1780,7 +1780,7 @@ class Rediscovery:
         the pointer to a row. :meth:`rediscover` passes one derived from the pointer
         (:func:`_pointer_instance_id`); :meth:`adopt` passes ``None`` for a random one.
         """
-        return RemoteControlInstance(
+        instance = RemoteControlInstance(
             instance_id=instance_id if instance_id is not None else new_instance_id(),
             project=name,
             label=label,
@@ -1815,6 +1815,12 @@ class Rediscovery:
             starter_session_id=ptr.session_id or None,
             url=f"https://claude.ai/code?environment={ptr.environment_id}",
         )
+        # The pointer keeps naming the first session after it ends (TASK-557), and with no
+        # log nothing can show that it is still live, so the row uses the environment link.
+        # Standard only: this builder also makes pty cards, and their links are not in scope.
+        if resume_mode == "standard" and bridge_debug_log_path is None:
+            instance.set_starter_vouched(False)
+        return instance
 
     async def adopt(self, name: str) -> RemoteControlInstance:
         """Take over a live *standard* external bridge as a managed instance (#330).

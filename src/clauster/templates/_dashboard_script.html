@@ -5408,6 +5408,7 @@
             // Browser notifications (#541): fire on a status TRANSITION, before we swap
             // in the new maps — diffed by rk so every pty session is tracked (#779).
             this.notifyOnTransitions(this._byId, byId);
+            this.refreshOpenQrs(this._byId, byId);
             this.instances = next;
             this.ptySessions = pty;
             this._byId = byId;
@@ -5626,6 +5627,8 @@
       // so an action's response lands without waiting for the next poll.
       _absorbRow(body) {
         this._stamp(body);
+        // Before the row is replaced: the next poll compares against this response.
+        this.refreshOpenQrs({ [body.rk]: this._byId[body.rk] }, { [body.rk]: body });
         if (body.resume_mode === "pty") {
           const at = this.ptySessions.findIndex((s) => s.instance_id === body.instance_id);
           if (at >= 0) this.ptySessions.splice(at, 1, body); else this.ptySessions.push(body);
@@ -5693,7 +5696,8 @@
       // Falls back to `url` (the environment link) like the QR route and the MCP engine do
       // (`session_url or url`): a bridge with no starter session (Force restart's
       // --no-create-session-in-dir) never gets a session_url, and without the fallback its
-      // row spun on "Preparing connect link…" forever.
+      // row spun on "Preparing connect link…" forever. session_url also goes null once the
+      // starter session ends, so the link then opens the bridge's environment.
       sessionUrlOf(key) {
         const row = this.rowOf(key) || {};
         const u = row.session_url || row.url;
@@ -5953,8 +5957,8 @@
         return n + (n === 1 ? " live session" : " live sessions");
       },
       // Show the expander for any STANDARD bridge with at least one live session. The row's
-      // "Open in Claude" link is the bridge CONNECT URL (it opens the bridge, where you pick
-      // or start a session) — distinct from these per-session claude.ai/code deep links, which
+      // "Open in Claude" link opens the starter session while it is live, then the bridge
+      // CONNECT URL (where you pick or start a session) — distinct from these deep links, which
       // jump straight into a specific working session, so even a single session is worth a
       // direct link. pty bridges are single-session by construction (issue #570).
       hasBridgeSessions(rk) {
@@ -6313,6 +6317,18 @@
         if (!id) return "";
         return ROOT + "/api/instances/" + encodeURIComponent(id)
           + "/qr?t=" + (this.qrNonce[name] || 0);
+      },
+      // An open panel must follow the link when the starter session ends, or a Resume or
+      // Force restart moves it. A new nonce refetches the image; the link itself stays out
+      // of the query string, because a session id must not reach an access log.
+      refreshOpenQrs(prev, next) {
+        for (const [rk, row] of Object.entries(next)) {
+          const before = prev[rk];
+          if (this.qrOpen[rk] && before &&
+              (before.session_url || before.url) !== (row.session_url || row.url)) {
+            this.qrNonce[rk] = Date.now();
+          }
+        }
       },
       toggleQr(name) {
         const opening = !this.qrOpen[name];

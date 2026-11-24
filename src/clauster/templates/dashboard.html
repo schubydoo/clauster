@@ -1040,8 +1040,8 @@
                    x-show="!!restartError[i.rk]" x-cloak x-text="restartError[i.rk]">
               </div>
               {# Live-session list (#570): a STANDARD remote-control bridge can host several
-                 concurrent sessions, and the row's "Open in Claude" link is only the bridge
-                 CONNECT URL — not a per-session jump. Expand to list every live session under
+                 concurrent sessions, and the row's "Open in Claude" link opens only the starter
+                 session or the bridge CONNECT URL. Expand to list every live session under
                  the bridge with a direct per-session deep link + uptime. Shown from the first
                  live session (hasBridgeSessions); pty bridges are single-session and keep their
                  own link. Short-UUID labels only — friendly names deferred. x-text everywhere
