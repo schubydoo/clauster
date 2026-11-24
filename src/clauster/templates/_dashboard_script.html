@@ -5693,7 +5693,8 @@
       // Falls back to `url` (the environment link) like the QR route and the MCP engine do
       // (`session_url or url`): a bridge with no starter session (Force restart's
       // --no-create-session-in-dir) never gets a session_url, and without the fallback its
-      // row spun on "Preparing connect link…" forever.
+      // row spun on "Preparing connect link…" forever. session_url also goes null once the
+      // starter session ends, so the link then opens the bridge's environment.
       sessionUrlOf(key) {
         const row = this.rowOf(key) || {};
         const u = row.session_url || row.url;
@@ -5953,8 +5954,8 @@
         return n + (n === 1 ? " live session" : " live sessions");
       },
       // Show the expander for any STANDARD bridge with at least one live session. The row's
-      // "Open in Claude" link is the bridge CONNECT URL (it opens the bridge, where you pick
-      // or start a session) — distinct from these per-session claude.ai/code deep links, which
+      // "Open in Claude" link opens the starter session while it is live, then the bridge
+      // CONNECT URL (where you pick or start a session) — distinct from these deep links, which
       // jump straight into a specific working session, so even a single session is worth a
       // direct link. pty bridges are single-session by construction (issue #570).
       hasBridgeSessions(rk) {

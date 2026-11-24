@@ -20,7 +20,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal, TypeGuard
 
-from pydantic import BaseModel, Field, computed_field
+from pydantic import BaseModel, Field, PrivateAttr, computed_field
 
 from . import redact
 from .config import SANDBOX_REMOVED_NOTE, PermissionMode, ResumeMode, SessionChannel, SpawnMode
@@ -226,6 +226,9 @@ class RemoteControlInstance(BaseModel):
     daemon_last_seq: int = 0  # highest daemon frame seq seen; reattach cursor across restarts
     hosted_log_path: Path | None = None  # redacted on-disk mirror of the hosted stream
     is_orphan: bool = False  # CL-8: live pid that Clauster could not reattach (no session)
+    # The starter session that must no longer be linked (TASK-557). Private: it is never
+    # serialized or persisted, because each process derives it again from the bridge log.
+    _ended_session_id: str | None = PrivateAttr(default=None)
 
     def model_post_init(self, context: Any, /) -> None:
         """Store the ids this record was built with for exact-value redaction (#1621)."""
@@ -284,11 +287,21 @@ class RemoteControlInstance(BaseModel):
         """Primary "Open session in Claude" deep link.
 
         Lands directly in the ready starter session named after the project
-        (feature 5). ``url`` is the secondary "New session" composer link.
+        (feature 5). ``url`` is the secondary "New session" composer link, and every
+        consumer falls back to it when this is ``None``: no starter session, or one that
+        :meth:`retire_starter_session` marked as ended (TASK-557).
         """
-        if self.starter_session_id is None:
+        if self.starter_session_id is None or self.starter_session_id == self._ended_session_id:
             return None
         return f"https://claude.ai/code/{self.starter_session_id}?from=cli"
+
+    def retire_starter_session(self) -> None:
+        """Stop linking the current starter session; a different starter id links again.
+
+        ``starter_session_id`` itself stays: the pointer would seed the same id back, and
+        the id remains a known value for exact-value redaction.
+        """
+        self._ended_session_id = self.starter_session_id
 
     @computed_field  # type: ignore[prop-decorator]
     @property

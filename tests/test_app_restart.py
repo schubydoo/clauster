@@ -218,6 +218,32 @@ def test_force_restart_archives_env_drops_pointer_and_skips_session(runner_confi
         client.delete(f"/api/instances/{iid}")
 
 
+def test_force_restart_carries_the_old_pointers_identity(runner_config, monkeypatch):
+    # TASK-561: the CLI copies identity from the pointer it reuses, so a replacement written
+    # without it would keep this environment on the 4-hour TTL for good.
+    app, runner, _fake = _force_app(runner_config, monkeypatch)
+    with TestClient(app) as client:
+        iid = client.post("/api/instances", json={"project": "alpha"}).json()["instance_id"]
+        pointer = _seed_pointer(runner)
+        identity = {
+            "dir": str(runner._project_path("alpha")),
+            "machineId": "machine-01",
+            "accountUuid": "11111111-2222-3333-4444-555555555555",
+            "organizationUuid": "66666666-7777-8888-9999-000000000000",
+        }
+        pointer.write_text(json.dumps({**json.loads(pointer.read_text()), **identity}))
+
+        r = client.post(f"/api/instances/{iid}/force-restart")
+        assert r.status_code == 200, r.text
+        if runner.get_instance(iid).bridge_start_ticks is None:
+            pytest.skip("no CLI-format procStart on this OS, so no pointer is written")
+        written = json.loads(pointer.read_text())
+        assert written["sessionId"] == ""
+        assert written["environmentId"] == r.json()["environment_id"]
+        assert {key: written[key] for key in identity} == identity
+        client.delete(f"/api/instances/{iid}")
+
+
 def test_force_restarted_bridge_reattaches_running_after_a_clauster_restart(
     runner_config, monkeypatch
 ):

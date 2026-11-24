@@ -127,7 +127,12 @@ def _write_pointer(claude_projects_dir: Path, project_path: Path, *, pid: int = 
 
 
 def test_clear_pointer_absent_returns_false(tmp_path: Path):
-    assert pointers.clear_pointer(Path("/no/such/project"), claude_projects_dir=tmp_path) is False
+    assert (
+        pointers.clear_pointer(
+            Path("/no/such/project"), claude_projects_dir=tmp_path, keep_mtime=False
+        )
+        is False
+    )
 
 
 def _kept_env_only(path: Path) -> bool:
@@ -148,7 +153,7 @@ def test_clear_pointer_drops_anchor_keeps_env_and_backs_up(tmp_path: Path):
     proj = Path("/mnt/nas/projects/alpha")
     path = _write_pointer(tmp_path, proj)
     original = path.read_bytes()
-    assert pointers.clear_pointer(proj, claude_projects_dir=tmp_path) is True
+    assert pointers.clear_pointer(proj, claude_projects_dir=tmp_path, keep_mtime=False) is True
     assert _kept_env_only(path)
     assert path.with_name(path.name + ".bak").read_bytes() == original
     assert pointers.load_pointer(path) is not None  # still a valid pointer to our reader
@@ -160,10 +165,13 @@ def test_clear_pointer_already_stripped_is_a_noop(tmp_path: Path):
     # A second clear must not rewrite: the stale-pointer GC reads the mtime for its TTL.
     proj = Path("/mnt/nas/projects/alpha")
     path = _write_pointer(tmp_path, proj)
-    assert pointers.clear_pointer(proj, claude_projects_dir=tmp_path, backup=False) is True
+    assert (
+        pointers.clear_pointer(proj, claude_projects_dir=tmp_path, backup=False, keep_mtime=False)
+        is True
+    )
     before = path.stat().st_mtime_ns
     content = path.read_bytes()
-    assert pointers.clear_pointer(proj, claude_projects_dir=tmp_path) is False
+    assert pointers.clear_pointer(proj, claude_projects_dir=tmp_path, keep_mtime=False) is False
     assert path.stat().st_mtime_ns == before
     assert path.read_bytes() == content
     assert not path.with_name(path.name + ".bak").exists()  # no backup for a no-op
@@ -179,7 +187,10 @@ def test_clear_pointer_rewrites_when_the_second_read_fails(
     parsed = pointers.load_pointer(path)
     path.write_text("{not json")
     monkeypatch.setattr(pointers, "load_pointer", lambda _p: parsed)
-    assert pointers.clear_pointer(proj, claude_projects_dir=tmp_path, backup=False) is True
+    assert (
+        pointers.clear_pointer(proj, claude_projects_dir=tmp_path, backup=False, keep_mtime=False)
+        is True
+    )
     assert _kept_env_only(path)
 
 
@@ -189,7 +200,10 @@ def test_clear_pointer_strips_a_cli_pointer_with_empty_session_but_lists(tmp_pat
     path = _write_pointer(tmp_path, proj)
     data = json.loads(path.read_text()) | {"sessionId": "", "activeSessionIds": ["session_old"]}
     path.write_text(json.dumps(data))
-    assert pointers.clear_pointer(proj, claude_projects_dir=tmp_path, backup=False) is True
+    assert (
+        pointers.clear_pointer(proj, claude_projects_dir=tmp_path, backup=False, keep_mtime=False)
+        is True
+    )
     assert _kept_env_only(path)
 
 
@@ -198,7 +212,10 @@ def test_clear_pointer_without_env_id_removes_it(tmp_path: Path):
     proj = Path("/mnt/nas/projects/alpha")
     path = _write_pointer(tmp_path, proj)
     path.write_text(json.dumps(json.loads(path.read_text()) | {"environmentId": ""}))
-    assert pointers.clear_pointer(proj, claude_projects_dir=tmp_path, backup=False) is True
+    assert (
+        pointers.clear_pointer(proj, claude_projects_dir=tmp_path, backup=False, keep_mtime=False)
+        is True
+    )
     assert not path.exists()
 
 
@@ -214,7 +231,10 @@ def test_clear_pointer_drops_session_lists(tmp_path: Path):
         "parkedProjectThreadSessionIds": ["session_old"],
     }
     path.write_text(json.dumps(data))
-    assert pointers.clear_pointer(proj, claude_projects_dir=tmp_path, backup=False) is True
+    assert (
+        pointers.clear_pointer(proj, claude_projects_dir=tmp_path, backup=False, keep_mtime=False)
+        is True
+    )
     assert _kept_env_only(path)
 
 
@@ -231,7 +251,7 @@ def test_clear_pointer_rewrite_failure_leaves_pointer_and_no_temp(
 
     monkeypatch.setattr(pointers.atomicio, "replace_with_retry", _boom)
     with pytest.raises(OSError, match="rename failed"):
-        pointers.clear_pointer(proj, claude_projects_dir=tmp_path, backup=False)
+        pointers.clear_pointer(proj, claude_projects_dir=tmp_path, backup=False, keep_mtime=False)
     assert path.read_bytes() == original
     assert [p.name for p in path.parent.iterdir()] == ["bridge-pointer.json"]
 
@@ -244,14 +264,17 @@ def test_clear_pointer_leaves_directory_mode_alone(tmp_path: Path):
     proj = Path("/mnt/nas/projects/alpha")
     path = _write_pointer(tmp_path, proj)
     path.parent.chmod(0o755)
-    pointers.clear_pointer(proj, claude_projects_dir=tmp_path, backup=False)
+    pointers.clear_pointer(proj, claude_projects_dir=tmp_path, backup=False, keep_mtime=False)
     assert path.parent.stat().st_mode & 0o777 == 0o755
 
 
 def test_clear_pointer_no_backup_when_disabled(tmp_path: Path):
     proj = Path("/mnt/nas/projects/alpha")
     path = _write_pointer(tmp_path, proj)
-    assert pointers.clear_pointer(proj, claude_projects_dir=tmp_path, backup=False) is True
+    assert (
+        pointers.clear_pointer(proj, claude_projects_dir=tmp_path, backup=False, keep_mtime=False)
+        is True
+    )
     assert _kept_env_only(path)
     assert not path.with_name(path.name + ".bak").exists()
 
@@ -261,7 +284,7 @@ def test_clear_pointer_refuses_live(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     path = _write_pointer(tmp_path, proj)
     monkeypatch.setattr(pointers, "is_live", lambda ptr: True)
     with pytest.raises(pointers.PointerStillLive):
-        pointers.clear_pointer(proj, claude_projects_dir=tmp_path)
+        pointers.clear_pointer(proj, claude_projects_dir=tmp_path, keep_mtime=False)
     assert path.exists()  # a live anchor is never yanked
 
 
@@ -272,7 +295,7 @@ def test_clear_pointer_removes_malformed(tmp_path: Path):
     pdir.mkdir(parents=True)
     path = pdir / "bridge-pointer.json"
     path.write_text("{not json")
-    assert pointers.clear_pointer(proj, claude_projects_dir=tmp_path) is True
+    assert pointers.clear_pointer(proj, claude_projects_dir=tmp_path, keep_mtime=False) is True
     assert not path.exists()
 
 
@@ -287,7 +310,7 @@ def test_clear_pointer_removes_a_hostile_pointer(tmp_path: Path):
     path.parent.mkdir(parents=True)
     path.write_text("[" * 100_000)
 
-    assert pointers.clear_pointer(proj, claude_projects_dir=tmp_path) is True
+    assert pointers.clear_pointer(proj, claude_projects_dir=tmp_path, keep_mtime=False) is True
     assert not path.exists()
     assert path.with_name(path.name + ".bak").exists()  # recoverable
 
@@ -303,7 +326,7 @@ def test_clear_pointer_backup_failure_still_clears(
         raise OSError("disk full")
 
     monkeypatch.setattr(Path, "write_bytes", _boom)
-    assert pointers.clear_pointer(proj, claude_projects_dir=tmp_path) is True
+    assert pointers.clear_pointer(proj, claude_projects_dir=tmp_path, keep_mtime=False) is True
     assert _kept_env_only(path)
     assert not path.with_name(path.name + ".bak").exists()
 
@@ -359,6 +382,7 @@ def test_write_reuse_pointer_writes_the_stripped_shape(tmp_path: Path):
         environment_id="env_01NEWENVAAAAAAAAAAAAAAAAA",
         pid=4242,
         proc_start="83353327",
+        identity={},
         claude_projects_dir=tmp_path,
     )
     path = pointers.pointer_path_for(proj, tmp_path)
@@ -372,11 +396,177 @@ def test_write_reuse_pointer_writes_the_stripped_shape(tmp_path: Path):
     assert pointers.load_pointer(path) is not None  # our reader accepts what we write
 
 
+def test_write_reuse_pointer_carries_the_identity(tmp_path: Path):
+    # TASK-561: on a reuse the CLI copies identity from the pointer it read, so a pointer
+    # written without it would hold the 4-hour TTL for the life of the environment.
+    proj = Path("/mnt/nas/projects/alpha")
+    assert pointers.write_reuse_pointer(
+        proj,
+        environment_id="env_01NEWENVAAAAAAAAAAAAAAAAA",
+        pid=4242,
+        proc_start="83353327",
+        identity={"dir": str(proj), **_IDENTITY_IDS},
+        claude_projects_dir=tmp_path,
+    )
+    data = json.loads(pointers.pointer_path_for(proj, tmp_path).read_text())
+    assert data["sessionId"] == ""
+    assert data["dir"] == str(proj)
+    assert {key: data[key] for key in _IDENTITY_IDS} == _IDENTITY_IDS
+
+
 def test_write_reuse_pointer_never_overwrites(tmp_path: Path):
     proj = Path("/mnt/nas/projects/alpha")
     path = _write_pointer(tmp_path, proj)
     original = path.read_bytes()
     assert not pointers.write_reuse_pointer(
-        proj, environment_id="env_01X", pid=1, proc_start="1", claude_projects_dir=tmp_path
+        proj,
+        environment_id="env_01X",
+        pid=1,
+        proc_start="1",
+        identity={},
+        claude_projects_dir=tmp_path,
     )
     assert path.read_bytes() == original
+
+
+# ----- identity fields (TASK-561) ----------------------------------------------------
+
+_IDENTITY_IDS = {
+    "machineId": "machine-01",
+    "accountUuid": "11111111-2222-3333-4444-555555555555",
+    "organizationUuid": "66666666-7777-8888-9999-000000000000",
+}
+
+
+def _write_full_pointer(tmp_path: Path, proj: Path, **overrides) -> Path:
+    """Write a pointer in the shape claude 2.1.330 writes, identity and session lists included."""
+    path = _write_pointer(tmp_path, proj)
+    data = json.loads(path.read_text())
+    data.update(
+        {
+            "dir": str(proj),
+            **_IDENTITY_IDS,
+            "environmentRevivedAt": 1_700_000_000_000,
+            "activeSessionIds": ["session_01A"],
+            "activeSessionIdsPersistedAt": 1_700_000_000_000,
+            "projectThreadSessionIds": ["session_01B"],
+            "projectThreadSessionIdsPersistedAt": 1_700_000_000_000,
+            "parkedProjectThreadSessionIds": ["session_01C"],
+            "parkedProjectThreadSessionIdsPersistedAt": 1_700_000_000_000,
+            **overrides,
+        }
+    )
+    path.write_text(json.dumps(data))
+    return path
+
+
+def test_clear_pointer_keeps_identity_and_empties_the_session_state(tmp_path: Path):
+    proj = Path("/mnt/nas/projects/alpha")
+    path = _write_full_pointer(tmp_path, proj)
+    assert pointers.clear_pointer(proj, claude_projects_dir=tmp_path, keep_mtime=False) is True
+    assert json.loads(path.read_text()) == {
+        "sessionId": "",
+        "environmentId": "env_01RHE7cHW3DawXjGRp5Ae3va",
+        "source": "standalone",
+        "pid": 81750,
+        "procStart": "2590192",
+        "dir": str(proj),
+        **_IDENTITY_IDS,
+    }
+
+
+def test_clear_pointer_with_identity_is_a_noop_the_second_time(tmp_path: Path):
+    # The compare must include the identity, or every GC run rewrites the file.
+    proj = Path("/mnt/nas/projects/alpha")
+    path = _write_full_pointer(tmp_path, proj)
+    assert pointers.clear_pointer(proj, claude_projects_dir=tmp_path, keep_mtime=False) is True
+    os.utime(path, (1_600_000_000, 1_600_000_000))
+    before = path.stat().st_mtime_ns
+    content = path.read_bytes()
+    assert pointers.clear_pointer(proj, claude_projects_dir=tmp_path, keep_mtime=False) is False
+    assert path.stat().st_mtime_ns == before
+    assert path.read_bytes() == content
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"dir": 7},
+        {"dir": ""},
+        {"dir": "x" * 4097},
+        {"dir": "é" * 2049},  # 2049 characters, but 4098 UTF-8 bytes
+        {"machineId": None},
+        {"machineId": ""},
+        {"accountUuid": "has space"},
+        {"accountUuid": "line\n"},
+        {"organizationUuid": "x" * 257},
+    ],
+)
+def test_clear_pointer_never_copies_a_value_the_cli_schema_refuses(tmp_path: Path, bad: dict):
+    # One bad value fails the CLI's schema, and the CLI then deletes the whole pointer.
+    proj = Path("/mnt/nas/projects/alpha")
+    path = _write_full_pointer(tmp_path, proj, **bad)
+    assert pointers.clear_pointer(proj, claude_projects_dir=tmp_path, keep_mtime=False) is True
+    data = json.loads(path.read_text())
+    assert next(iter(bad)) not in data
+    assert data["environmentId"] == "env_01RHE7cHW3DawXjGRp5Ae3va"
+
+
+def test_clear_pointer_keep_mtime_restores_the_age_after_a_rewrite(tmp_path: Path):
+    proj = Path("/mnt/nas/projects/alpha")
+    path = _write_full_pointer(tmp_path, proj)
+    os.utime(path, (1_600_000_000, 1_600_000_000))
+    before = path.stat().st_mtime_ns
+    assert pointers.clear_pointer(proj, claude_projects_dir=tmp_path, keep_mtime=True) is True
+    assert json.loads(path.read_text())["sessionId"] == ""
+    assert path.stat().st_mtime_ns == before
+
+
+def test_clear_pointer_without_keep_mtime_makes_the_file_fresh(tmp_path: Path):
+    # Poison handling and Forget rewrite for the next start, which needs a fresh file.
+    proj = Path("/mnt/nas/projects/alpha")
+    path = _write_full_pointer(tmp_path, proj)
+    os.utime(path, (1_600_000_000, 1_600_000_000))
+    before = path.stat().st_mtime_ns
+    assert pointers.clear_pointer(proj, claude_projects_dir=tmp_path, keep_mtime=False) is True
+    assert path.stat().st_mtime_ns > before
+
+
+def test_clear_pointer_survives_a_failed_mtime_restore(tmp_path, monkeypatch, caplog):
+    proj = Path("/mnt/nas/projects/alpha")
+    path = _write_full_pointer(tmp_path, proj)
+
+    def _boom(*_a, **_k):
+        raise OSError("read-only")
+
+    monkeypatch.setattr(pointers.os, "utime", _boom)
+    assert pointers.clear_pointer(proj, claude_projects_dir=tmp_path, keep_mtime=True) is True
+    assert json.loads(path.read_text())["sessionId"] == ""
+    assert "could not restore the mtime" in caplog.text
+
+
+def test_reusable_identity_returns_this_folders_fields(tmp_path: Path):
+    proj = Path("/mnt/nas/projects/alpha")
+    _write_full_pointer(tmp_path, proj)
+    assert pointers.reusable_identity(proj, claude_projects_dir=tmp_path) == {
+        "dir": str(proj),
+        **_IDENTITY_IDS,
+    }
+
+
+def test_reusable_identity_refuses_another_folders_pointer(tmp_path: Path):
+    # `a_b` and `a-b` share one sanitized directory, so the file can describe another folder.
+    proj = Path("/mnt/nas/projects/a_b")
+    _write_full_pointer(tmp_path, proj, dir="/mnt/nas/projects/a-b")
+    assert pointers.reusable_identity(proj, claude_projects_dir=tmp_path) == {}
+
+
+def test_reusable_identity_is_empty_without_a_readable_pointer(tmp_path: Path):
+    proj = Path("/mnt/nas/projects/alpha")
+    assert pointers.reusable_identity(proj, claude_projects_dir=tmp_path) == {}
+    path = _write_pointer(tmp_path, proj)
+    assert pointers.reusable_identity(proj, claude_projects_dir=tmp_path) == {}  # no identity
+    path.write_text("{not json")
+    assert pointers.reusable_identity(proj, claude_projects_dir=tmp_path) == {}
+    path.write_text("[1]")
+    assert pointers.reusable_identity(proj, claude_projects_dir=tmp_path) == {}

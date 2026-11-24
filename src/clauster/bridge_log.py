@@ -10,6 +10,7 @@ bridge debug log:
     [bridge:work] Starting poll loop spawnMode=same-dir maxSessions=32 environmentId=env_<ULID>
     [bridge:session] sessionId=[REDACTED] pid=<pid>
     [bridge:session] sessionId=[REDACTED] failed exit_code=<n> pid=<pid>
+    [bridge:api] POST /v1/code/sessions/cse_<ULID>/archive
     [bridge:shutdown] SIGINT received, shutting down
 """
 
@@ -40,6 +41,15 @@ _RE_TRUST_ERROR = re.compile(r"Workspace not trusted", re.IGNORECASE)
 _RE_END_SESSION_GONE = re.compile(
     r'"subtype":\s*"end_session"[^{}]*"reason":\s*"(archived|deleted)"'
     r'|"reason":\s*"(archived|deleted)"[^{}]*"subtype":\s*"end_session"'
+)
+# TASK-557: a multi-session bridge archives a session when it completes, and this request is
+# the only line that names the session (the `exited status=` line masks the id). claude
+# 2.1.330 posts to `/v1/sessions/session_<id>/archive` or `/v1/code/sessions/cse_<id>/archive`.
+# Anchored to a whole log line, so session text quoted inside a `[bridge:ws]` frame cannot
+# match. A forged line could only move the link to the environment link.
+_RE_SESSION_ARCHIVED = re.compile(
+    r"\S+ \[[A-Z]+\] \[bridge:api\] POST /v1/(?:code/)?sessions/"
+    r"(?:cse|session)_([A-Za-z0-9_-]+)/archive\s*"
 )
 
 
@@ -91,3 +101,19 @@ def parse_bridge_markers(text: str) -> BridgeMarkers:
         m.poison_reason = hit.group(1) or hit.group(2)
 
     return m
+
+
+def session_key(session_id: str) -> str:
+    """Return the id part shared by the ``session_<id>`` and ``cse_<id>`` forms."""
+    return session_id.removeprefix("session_").removeprefix("cse_")
+
+
+def archived_session_key(line: str) -> str | None:
+    """Return the :func:`session_key` a whole log line archives, or ``None``."""
+    hit = _RE_SESSION_ARCHIVED.fullmatch(line)
+    return hit.group(1) if hit is not None else None
+
+
+def environment_ids_in(line: str) -> set[str]:
+    """Return every environment id that one log line names."""
+    return {*_RE_ENV_ID.findall(line), *_RE_ENV_ID_ALT.findall(line)}

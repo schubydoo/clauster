@@ -106,6 +106,7 @@ class PollLoop:
         hosted_provider: Callable[[], Callable[[], list[RemoteControlInstance]] | None],
         rediscover: Callable[[], Awaitable[None]],
         prune_stale_pointers: Callable[[], Awaitable[None]],
+        retire_ended_starters: Callable[[], Awaitable[None]],
     ) -> None:
         """Bind to config + the shared registry/record and the injected runner helpers.
 
@@ -139,6 +140,7 @@ class PollLoop:
         self._hosted_provider = hosted_provider
         self._rediscover = rediscover
         self._prune_stale_pointers = prune_stale_pointers
+        self._retire_ended_starters = retire_ended_starters
         # The reconciled working-session cache produced by `poll_once`. Owned here; the
         # runner re-exposes it as a proxy property for its query methods and the tests.
         self._sessions: list[WorkingSession] = []
@@ -404,6 +406,9 @@ class PollLoop:
         # is degraded: a bridge pinned at STARTING must not stay pinned for as long as that
         # probe keeps failing.
         await self._promote_ready_unwatched(pid_is_ours, side_effects=side_effects)
+        # Also above the cross-check, for the same reason: a degraded `agents --json` must not
+        # leave a card linking a session that ended (TASK-557).
+        await self._retire_ended_starters()
 
         try:
             sessions = await asyncio.to_thread(inspector.list_working_sessions, self._binary)

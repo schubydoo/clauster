@@ -122,6 +122,7 @@ component_management:
         - src/clauster/inspector.py
         - src/clauster/supervisor.py
         - src/clauster/bridge_log.py
+        - src/clauster/session_ends.py # TASK-557 — which sessions a bridge log says ended
         - src/clauster/atomicio.py
     - component_id: hosted
       name: hosted channel
