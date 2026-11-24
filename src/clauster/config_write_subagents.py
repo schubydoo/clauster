@@ -115,12 +115,7 @@ from .config_write_mcp import (
 )
 from .config_write_permissions import RECOGNIZED_MODES, is_bypass_mode
 from .config_write_settings import _orphan_sentinel_path
-from .config_write_skills import (
-    MAX_FILE_BYTES,
-    _masked_whole,
-    _may_hold_masked,
-    _secret_arg_views,
-)
+from .config_write_skills import _mask_header_values
 
 #: The directory name holding subagent files under ``.claude/`` at either scope.
 AGENTS_DIRNAME = "agents"
@@ -1800,28 +1795,16 @@ def _rewrite_values(text: str, target: dict[str, Any], *, stored: str | None) ->
 def _unloaded_header_view(header: str) -> str:
     """Return the view of a frontmatter ``header`` that the shared seam refuses.
 
-    Every non-blank line is masked whole in two cases, because Claude Code's YAML 1.2 can
-    read a header that PyYAML refuses and the line masks do not see every value (TASK-558):
-
-    * the header does not compose, or is over the size cap, and its text can spell a value
-      the editor masks (:func:`~clauster.config_write_skills._may_hold_masked`: also through
-      a backslash escape or a binary tag);
-    * it composes and a server has a secret-named flag in ``args``, read from the loaded
-      text, so an escape in the key or the flag name is read too.
-
-    Any other header is masked line by line and stays readable, so the operator can repair
-    it. A save cannot keep a mask in such a header (:func:`_keep_masked_values`).
+    The Skills editor's header view, then its line masks (TASK-558): every by-place and
+    loaded-value mask of :func:`~clauster.config_write_skills._mask_header_values`, which
+    masks each non-blank line whole where it cannot prove that PyYAML reads the header as
+    Claude Code does (the header does not compose, is over the size cap, holds ``---``, a
+    YAML 1.1-only line break, a flow ``?``, or syntax YAML 1.2 refuses). Then
+    :func:`~clauster.config_write.redact_secret_lines`, the view this fallback had before,
+    so the result masks at least what that view masked. A save cannot keep a mask in such
+    a header (:func:`_keep_masked_values`).
     """
-    whole = "".join(_masked_whole(line) for line in header.splitlines(keepends=True))
-    if len(header.encode("utf-8")) > MAX_FILE_BYTES:
-        return whole
-    try:
-        root = yaml.compose(cw.cli_frontmatter_text(header), Loader=yaml.SafeLoader)
-    except (*cw._CHECK_FAILURES, RecursionError):
-        return whole if _may_hold_masked(header) else cw.redact_secret_lines(header)
-    if root is not None and _secret_arg_views(root):
-        return whole
-    return cw.redact_secret_lines(header)
+    return cw.redact_secret_lines(_mask_header_values(header, readable=True))
 
 
 def _mask_agent_text(text: str) -> str | None:

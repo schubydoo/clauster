@@ -573,6 +573,76 @@ def test_a_refused_header_that_composes_reads_the_loaded_flag(tmp_path: Path, it
     assert path.read_bytes() == stored.encode()
 
 
+#: Headers the shared seam refuses where PyYAML and Claude Code's YAML 1.2 can disagree, or
+#: where a by-place value sits beside a YAML 1.1-only spelling. Each hides ``HELD_B``.
+_READ_ANOTHER_WAY = [
+    # A flow `?`: a mapping key to PyYAML, a plain value to YAML 1.2.
+    f"mcpServers:\n  - gh:\n      command: c\n      args: [--token, ?{HELD_B}]\n",
+    # A quoted value that goes on at column 0: the CLI's retry reads a real server.
+    f'description2: "d: e\nmcpServers:\n  - gh:\n      command: c\n'
+    f'      args: [--token, {HELD_B}]\nz: end"\n',
+    f'description2: "d: e\nmcpServers:\n  - gh:\n      command: c\n      args:\n'
+    f'        - --password\n        - {HELD_B}\nz: end"\n',
+    f'description2: "d: e\nmcpServers:\n  - gh:\n      command: c\n'
+    f'      env: {{FOO: {HELD_B}}}\nz: end"\n',
+    # A by-place value beside a YAML 1.1-only boolean, which is all the seam refuses.
+    f"mcpServers:\n  - gh:\n      command: c\n      env: {{DEBUG: yes, FOO: {HELD_B}}}\n",
+    f"mcpServers:\n  - gh:\n      type: http\n      url: https://e.example.com\n"
+    f"      headers: {{X-Key: {HELD_B}, X-On: yes}}\n",
+]
+
+
+@pytest.mark.parametrize("header", _READ_ANOTHER_WAY)
+def test_a_header_read_another_way_hides_the_value(tmp_path: Path, header: str) -> None:
+    stored = f"---\nname: my-agent\ndescription: d\n{header}---\nbody\n"
+    with pytest.raises(cw.InvalidCandidateError):
+        sub.parse_frontmatter(stored)  # the fallback is the path under test
+    root, path = _place_agent(tmp_path, stored)
+    doc = sub._read_agent(root, "my-agent", "project")
+    assert HELD_B not in doc["content"] and HELD_B not in json.dumps(doc["frontmatter"])
+    with pytest.raises(cw.InvalidCandidateError):
+        sub._write_agent(root, "my-agent", doc["content"], doc["hash"])
+    assert path.read_bytes() == stored.encode()
+
+
+def _old_fallback(text: str) -> str:
+    """Return the view origin/main gave a header the seam refuses: the line masks alone."""
+    match = sub._FRONTMATTER_RE.match(text)
+    assert match is not None
+    return text[: match.start(1)] + cw.redact_secret_lines(match.group(1)) + text[match.end(1) :]
+
+
+#: Every refused header in this file, each a whole stored file.
+_REFUSED = [
+    *(_agent(form).replace("command: npx\n", "command: npx\t# note\n") for form in _FORMS),
+    *(
+        f"---\nname: my-agent\ndescription: d\n{header}---\nbody\n"
+        for header in [*_READ_ANOTHER_WAY, f"token: {HELD_A}\t# c\nmcpServers: [\n"]
+    ),
+    f"---\nname: my-agent\ndescription: d\napi_key: |\n  {HELD_A}\nx: [\t# n\n---\nbody\n",
+    "---\nname: my-agent\nmcpServers:\n  a: {command: x}\nmcpServers:\n  b: {command: y}\n---\n",
+]
+
+
+@pytest.mark.parametrize("stored", _REFUSED)
+def test_no_refused_header_is_masked_less_than_before(tmp_path: Path, stored: str) -> None:
+    # Differential against origin/main's fallback: every line it masked is masked now, and
+    # no value it hid shows now.
+    with pytest.raises(cw.InvalidCandidateError):
+        sub.parse_frontmatter(stored)
+    root, _path = _place_agent(tmp_path, stored)
+    now = sub._read_agent(root, "my-agent", "project")["content"]
+    before = _old_fallback(stored)
+    lines = stored.splitlines()
+    assert len(now.splitlines()) == len(lines) == len(before.splitlines())
+    for raw, old, new in zip(lines, before.splitlines(), now.splitlines(), strict=True):
+        if old != raw:
+            assert new != raw
+    for value in (HELD_A, HELD_B):
+        if value not in before:
+            assert value not in now
+
+
 @pytest.mark.parametrize(
     "header",
     [
@@ -594,7 +664,7 @@ def test_another_broken_header_stays_readable_for_repair(tmp_path: Path, header:
 def test_an_oversized_refused_header_is_masked_whole_without_a_parse(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(sub, "MAX_FILE_BYTES", 40)
+    monkeypatch.setattr(sk, "MAX_FILE_BYTES", 40)
     stored = f"---\nname: my-agent\ndescription: d\t# note\nx-pad: {'p' * 40}\n---\nbody\n"
     root, _path = _place_agent(tmp_path, stored)
     assert "name: my-agent\n" not in sub._read_agent(root, "my-agent", "project")["content"]

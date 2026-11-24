@@ -636,17 +636,13 @@ Each field is masked as the tab that owns its shape masks it:
 
 The Markdown body after the frontmatter is never masked or changed. Comments in
 the frontmatter are not masked either. Do not put a secret in the body or in a
-comment. If the frontmatter is not valid YAML, the editor cannot read its
-fields. It then masks the frontmatter line by line, as the Skills editor does,
-and that misses a secret under a key that does not look secret. Claude Code can
-still read some of these files, so every line that is not blank shows as
-`********` in two cases:
-
-- The text cannot be parsed and holds `mcpServers`, `hooks`, a URL, a backslash
-  escape or a binary tag.
-- The text can be parsed and a server has a secret-named flag in `args`.
-
-A masked value
+comment. If the
+[subagent frontmatter checks](#subagent-frontmatter-checks) refuse the
+frontmatter, for example because it is not valid YAML, the editor cannot read
+its fields. It then masks the frontmatter as the Skills editor masks the
+frontmatter of `SKILL.md` (see below). Claude Code can still read some of these
+files. So if Clauster cannot be sure that it reads the YAML as Claude Code
+does, every line that is not blank shows as `********`. A masked value
 in such a file cannot be kept, so type the real values when you repair it. If
 the file holds masked values and its frontmatter is valid YAML only after Claude
 Code adds quotes to some values, the editor shows those values with the quotes,
