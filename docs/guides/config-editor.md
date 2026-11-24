@@ -275,25 +275,27 @@ digits, or only letters, or only digits. Do not put a secret there.
 
 The value of a secret-named flag in `args` shows as `********`. A flag is
 secret-named when its name holds `token`, `secret`, `password`, `passwd`,
-`api-key`, `api_key`, `apikey`, `auth`, `credential` or `bearer`, in any letter
-case. For example, `--api-key=abc` shows as `--api-key=********`. If the flag
-and its value are two items (`--token`, `abc`), the second item shows as
-`********`.
+`api-key`, `api_key`, `apikey`, `auth` (but not `author` or `authors`),
+`credential` or `bearer`, in any letter case. For example, `--api-key=abc` shows
+as `--api-key=********`. If the flag and its value are two items (`--token`,
+`abc`), the second item shows as `********`.
 
 This masking is best effort, because Clauster reads only the flag name. These
-values show in clear, so put a secret in `env`, which is always masked:
+cases show in clear. Put a secret in `env`, which is always masked.
 
 - A secret after a flag with another name, or in an item with no flag.
 - A separate value that starts with `-`, because it reads as the next flag.
 - The item after a `--no-...` flag, because such a flag takes no value.
+- A flag and its value in one item, separated by a space, such as `--token abc`.
 
-A flag that is not a credential can match too. For example, the value of
-`--max-tokens` also shows as `********`.
+A flag that is not a credential can also show a mask. For example, the value of
+`--max-tokens` shows as `********`.
 
-This masking applies to the editor views only. Claude Code 2.1.330 does not
-write the `args` of a server to its debug log, but it does write what the server
-prints to stderr. If a server prints its own `args`, the value can show in the
-bridge log stream in the dashboard.
+This masking applies to the editor views only. In tests with Claude Code
+2.1.330, the debug log did not hold the `args` of a server when the server
+connected, failed to start, exited, or sent invalid output. The log did hold
+what the server printed to stderr. If a server prints its own `args`, the value
+can show in the bridge log stream in the dashboard.
 
 If you leave the mask in place, the save keeps the stored value. A `url` that
 holds a mask keeps the stored URL only when every visible character of it is
@@ -636,7 +638,10 @@ The Markdown body after the frontmatter is never masked or changed. Comments in
 the frontmatter are not masked either. Do not put a secret in the body or in a
 comment. If the frontmatter is not valid YAML, the editor cannot read its
 fields. It then masks the frontmatter line by line, as the Skills editor does,
-and that misses a secret under a key that does not look secret. A masked value
+and that misses a secret under a key that does not look secret. If such a
+frontmatter holds `mcpServers` and a secret-named flag, every line that is not
+blank shows as `********`, because Claude Code can still read some of these
+files. A masked value
 in such a file cannot be kept, so type the real values when you repair it. If
 the file holds masked values and its frontmatter is valid YAML only after Claude
 Code adds quotes to some values, the editor shows those values with the quotes,
@@ -656,8 +661,8 @@ refused, and nothing is written, in these cases:
 - A masked value in an `http`, `sse` or `ws` server when you changed its `type`
   or any character of a URL in it. Clauster compares the URL text exactly and
   never parses it.
-- A masked `env` value in a stdio server when you changed its `command` or any
-  element of its `args`.
+- A masked `env` value or `args` item in a stdio server when you changed its
+  `command` or any element of its `args`.
 - A masked hook value when the [Hooks tab](#the-hooks-tab) rules cannot keep it.
 
 Type the real value again to save the change. If a secret is on a value with a

@@ -2120,6 +2120,7 @@ def _secret_arg_views(root: yaml.Node) -> list[tuple[yaml.ScalarNode, str]]:
     wanted = _MASKED_UNDER["mcpServers"]
     stack: list[yaml.Node] = [value for value, keys in _field_values(root) if keys == wanted]
     seen: set[int] = set()
+    read: set[int] = set()  # many servers can alias one long `args` list
     found: dict[int, tuple[yaml.ScalarNode, str]] = {}
     while stack:
         node = stack.pop()
@@ -2135,7 +2136,9 @@ def _secret_arg_views(root: yaml.Node) -> list[tuple[yaml.ScalarNode, str]]:
                     isinstance(key, yaml.ScalarNode)
                     and key.value == "args"
                     and isinstance(value, yaml.SequenceNode)
+                    and id(value) not in read
                 ):
+                    read.add(id(value))
                     texts = [
                         n.value if isinstance(n, yaml.ScalarNode) else None for n in value.value
                     ]

@@ -63,6 +63,8 @@ def test_the_value_of_a_secret_named_flag_is_masked(args: list, shown: list) -> 
         ["--no-auth", "server.py"],  # a --no-* flag takes no value
         ["token=x"],  # not a flag
         ["--token x"],  # one item with a space is not a flag and a value
+        ["--token abc", "next"],  # so the item after it is not its value
+        ["--NO-auth", "server.py"],  # the --no-* check ignores letter case
         ["-"],
         ["--"],
         ["--token", 1],  # not a string: a validator refuses it
@@ -419,6 +421,56 @@ def test_args_outside_mcp_servers_are_not_read_as_server_args(tmp_path: Path) ->
     assert "[--token, keep-me]" in _skill_view(tmp_path)[0]
 
 
+def test_only_a_server_args_list_is_read_as_args(tmp_path: Path) -> None:
+    # An `args` key under `hooks`, and another list under a server, are not server args.
+    stored = (
+        "---\ndescription: d\nhooks:\n  Stop:\n    - hooks:\n        - type: command\n"
+        "          command: run\n          args: [--token, keep-hook]\n"
+        "mcpServers:\n  gh:\n    command: npx\n    other: [--token, keep-list]\n---\nRun it.\n"
+    )
+    _place_skill(tmp_path, stored)
+    content = _skill_view(tmp_path)[0]
+    assert "keep-hook" in content and "keep-list" in content
+
+
+def test_a_cyclic_args_header_ends(tmp_path: Path) -> None:
+    stored = (
+        "---\nmcpServers: &m\n  gh:\n    command: npx\n"
+        "    args: &a [--token, *a]\n    x: *m\n---\n"
+    )
+    _place_skill(tmp_path, stored)
+    assert "--token" in _skill_view(tmp_path)[0]
+
+
+def test_an_args_list_shared_by_many_servers_is_read_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = 0
+    real = cw.mask_secret_args
+
+    def counting(args: list) -> list:
+        nonlocal calls
+        calls += 1
+        return real(args)
+
+    monkeypatch.setattr(cw, "mask_secret_args", counting)
+    servers = "".join(f"  s{i}:\n    command: npx\n    args: *a\n" for i in range(50))
+    stored = f"---\nx-base: &a [--token, {HELD_B}]\nmcpServers:\n{servers}---\nRun it.\n"
+    _place_skill(tmp_path, stored)
+    _skill_view(tmp_path)
+    assert calls == 1
+
+
+def test_a_value_masked_by_two_rules_shows_one_mask(tmp_path: Path) -> None:
+    # Under `env` every value is masked, and this `args` key flags the same node again.
+    stored = (
+        "---\nmcpServers:\n  gh:\n    command: npx\n"
+        f"    env: {{args: [--token, {HELD_B}]}}\n---\nRun it.\n"
+    )
+    _place_skill(tmp_path, stored)
+    assert f"    env: {{args: [{MASK}, {MASK}]}}\n" in _skill_view(tmp_path)[0]
+
+
 # --- the Subagents editor --------------------------------------------------------------------
 
 
@@ -454,6 +506,32 @@ def test_a_subagent_masks_each_form(tmp_path: Path, form: str) -> None:
     args = doc["frontmatter"]["mcpServers"][0]["gh"]["args"]
     assert args[1:] == ["--token", MASK]
     assert args[0].endswith(f"={MASK}")
+
+
+@pytest.mark.parametrize("form", list(_FORMS))
+def test_a_subagent_header_pyyaml_refuses_hides_each_form(tmp_path: Path, form: str) -> None:
+    # A tab before a comment: PyYAML refuses it, and Claude Code's YAML 1.2 reads it.
+    stored = _agent(form).replace("command: npx\n", "command: npx\t# note\n")
+    root, path = _place_agent(tmp_path, stored)
+    doc = sub._read_agent(root, "my-agent", "project")
+    for field in (doc["content"], json.dumps(doc["frontmatter"])):
+        assert HELD_A not in field and HELD_B not in field
+    with pytest.raises(cw.InvalidCandidateError):
+        sub._write_agent(root, "my-agent", doc["content"], doc["hash"])
+    assert path.read_bytes() == stored.encode()
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        "name: my-agent\ndescription: --token=x\t# note\n",  # no mcpServers
+        "name: my-agent\nmcpServers:\n  - a:\n      command: x\t# note\n",  # no secret flag
+    ],
+)
+def test_another_broken_header_stays_readable_for_repair(tmp_path: Path, header: str) -> None:
+    root, _path = _place_agent(tmp_path, f"---\n{header}---\nbody\n")
+    doc = sub._read_agent(root, "my-agent", "project")
+    assert "name: my-agent\n" in doc["content"]
 
 
 @pytest.mark.parametrize("form", list(_FORMS))

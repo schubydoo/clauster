@@ -115,6 +115,7 @@ from .config_write_mcp import (
 )
 from .config_write_permissions import RECOGNIZED_MODES, is_bypass_mode
 from .config_write_settings import _orphan_sentinel_path
+from .config_write_skills import _masked_whole
 
 #: The directory name holding subagent files under ``.claude/`` at either scope.
 AGENTS_DIRNAME = "agents"
@@ -1799,7 +1800,10 @@ def _mask_agent_text(text: str) -> str | None:
     order mark is kept. A file with no frontmatter fence is all body and is returned as it
     is. A header that does not load is masked line by line
     (:func:`~clauster.config_write.redact_secret_lines`), the best that can be done without
-    its structure. ``None`` when the view cannot be written in place
+    its structure. If it names ``mcpServers`` and holds a secret-named flag, each line is
+    masked whole: Claude Code's YAML 1.2 can read a header that PyYAML refuses, and the line
+    masks do not see every ``args`` form (TASK-558). Any other such header stays readable,
+    so the operator can repair it. ``None`` when the view cannot be written in place
     (:data:`MASK_UNAVAILABLE_NOTE`); the caller then shows nothing.
     """
     bom = "\ufeff" if text.startswith("\ufeff") else ""
@@ -1812,7 +1816,13 @@ def _mask_agent_text(text: str) -> str | None:
         with cw.refuse_check_failures("frontmatter"):
             view = frontmatter_view(frontmatter)
     except cw.InvalidCandidateError:
-        masked = cw.redact_secret_lines(match.group(1))
+        header = match.group(1)
+        if "mcpservers" in header.casefold() and any(
+            cw._SECRET_KEY_RE.search(flag["name"]) for flag in cw._ARG_FLAG_RE.finditer(header)
+        ):
+            masked = "".join(_masked_whole(line) for line in header.splitlines(keepends=True))
+        else:
+            masked = cw.redact_secret_lines(header)
         return bom + core[: match.start(1)] + masked + core[match.end(1) :]
     shown = _rewrite_values(core, view, stored=None)
     return None if shown is None else bom + shown
