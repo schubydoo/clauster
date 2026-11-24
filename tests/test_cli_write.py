@@ -209,7 +209,22 @@ def test_start_ending_in_error_exits_1_with_the_reason_on_stderr(cfg, capsys):
     assert "bridge abc12345 (alpha) failed to start: not logged in run claude login" in (
         captured.err
     )
-    assert "clauster logs abc12345" in captured.err
+    assert "clauster logs" not in captured.err  # this row has no log to point at
+
+
+def test_start_failure_names_the_log_only_when_it_has_content(cfg, capsys, tmp_path):
+    log = tmp_path / "bridge.log"
+    inst = _inst(status=InstanceStatus.ERROR, error_detail="x", bridge_debug_log_path=log)
+    _FakeEngine.outcome = SpawnOutcome(instance=inst, created=True)
+
+    assert main(["start", "-c", cfg, "alpha"]) == 1  # the file does not exist
+    assert "clauster logs" not in capsys.readouterr().err
+    log.write_bytes(b"")
+    assert main(["start", "-c", cfg, "alpha"]) == 1  # the file is empty
+    assert "clauster logs" not in capsys.readouterr().err
+    log.write_bytes(b"a line\n")
+    assert main(["start", "-c", cfg, "alpha"]) == 1
+    assert "read its log with: clauster logs abc12345" in capsys.readouterr().err
 
 
 def test_start_json_ending_in_error_keeps_its_shape_and_exits_1(cfg, capsys):

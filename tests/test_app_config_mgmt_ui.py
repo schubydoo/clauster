@@ -607,8 +607,11 @@ def test_marketplace_remove_renders_only_where_the_scope_declares_it(write_confi
     assert 'if (op === "remove" && !this.configMgmtMarketAtScope({ name: name })) return;' in html
     # TASK-514: a row no scope declares says how to finish, and what that command costs; the
     # result banner keeps the warning a Remove returned.
-    assert "run `claude plugin marketplace remove " in html
+    assert '"` in a terminal."' in html and "m.removeCommand" in html
+    assert 'claude plugin marketplace remove " + m.name' not in html  # server-built only
+    assert "Clauster shows no command for this name" in html
     assert "uninstalls its plugins in every scope and project" in html
+    assert """warned ? '[data-test="cm-save-warnings"]'""" in html
     assert 'Local scope." + manual;' in html and "return none + tail + manual;" in html
     assert "if (!(await this._configMgmtTakeWarnings(res, () => c.gen === gen))) return;" in html
     assert "data-test=\"'cm-market-readonly-' + m.name\"" in html

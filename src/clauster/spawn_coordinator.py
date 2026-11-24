@@ -872,6 +872,8 @@ class SpawnCoordinator:
             # Binary unresolvable / not executable: fail the instance cleanly
             # instead of leaving it stuck in STARTING.
             _log.warning("spawn of %s failed to launch: %s", name, exc)
+            # Redacted and bounded like every other `error_detail` writer (TASK-515).
+            instance.error_detail = redact.redact_for_disk(str(exc))[-2000:]
             instance.status = InstanceStatus.ERROR
             await self._registry._persist()
             # created=True: a new registry row exists (in ERROR), not a reused one.
@@ -1252,6 +1254,8 @@ class SpawnCoordinator:
             )
         except (OSError, ClaudeNotFound) as exc:
             _log.warning("pty spawn of %s failed to launch: %s", name, exc)
+            # Redacted and bounded like every other `error_detail` writer (TASK-515).
+            instance.error_detail = redact.redact_for_disk(str(exc))[-2000:]
             instance.status = InstanceStatus.ERROR
             await self._registry._persist()
             return instance

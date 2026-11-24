@@ -468,6 +468,7 @@ async def test_spawn_pty_launch_failure_sets_error(runner_config, tmp_path, monk
     out = await runner._spawn_pty(inst, proj, "alpha", log_path, "default", resume=False)
 
     assert out.status is InstanceStatus.ERROR
+    assert out.error_detail == "openpty: too many open files"  # TASK-515: the reason is kept
     assert persisted == [True]  # the ERROR state was persisted, not swallowed
 
 

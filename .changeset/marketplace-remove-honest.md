@@ -2,4 +2,4 @@
 default: patch
 ---
 
-The Plugins tab now warns when Claude Code still lists a marketplace after Remove, and says how to finish the removal.
+The Plugins tab now warns when a marketplace Remove leaves it listed or uninstalls plugins, and says how to finish the removal.

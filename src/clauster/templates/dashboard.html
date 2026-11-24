@@ -3723,7 +3723,7 @@
                         {# TASK-527: the list is one pool for the host. Remove works only where
                            this scope's settings file declares the marketplace; any other row
                            says so, with a link to a scope of this project that declares it. #}
-                        <div class="text-secondary small" x-show="!configMgmtMarketAtScope(m)" x-cloak
+                        <div class="text-secondary small text-break" x-show="!configMgmtMarketAtScope(m)" x-cloak
                              :data-test="'cm-market-readonly-' + m.name">
                           <span x-text="configMgmtMarketElsewhereNote(m)"></span>
                           <button type="button" class="btn btn-link btn-sm p-0 align-baseline"

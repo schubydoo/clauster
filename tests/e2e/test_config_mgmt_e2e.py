@@ -3011,6 +3011,23 @@ def test_config_mgmt_marketplaces_remove_only_where_the_scope_declares(
     browser.expect_visible('[data-test="cm-market-remove-market"]')
 
 
+def test_config_mgmt_marketplace_note_shows_no_command_for_a_hostile_name(
+    browser: AgentBrowser, config_mgmt_hostile_marketplace_server: Server
+) -> None:
+    """A listed name that holds shell syntax never reaches a command to copy (TASK-514)."""
+    _open_modal(browser, config_mgmt_hostile_marketplace_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-plugins"]')
+    browser.expect_text(
+        '[data-test="cm-market-readonly-loose"]',
+        "run `claude plugin marketplace remove loose` in a terminal",
+    )
+    for name in ("x; touch /tmp/p", "y`id`$(id)"):
+        selector = f"[data-test='cm-market-readonly-{name}']"
+        browser.expect_text(selector, "Clauster shows no command for this name")
+        assert "claude plugin marketplace remove" not in browser.get_text(selector)
+
+
 def test_config_mgmt_marketplaces_unreadable_declarations_offer_no_remove(
     browser: AgentBrowser, config_mgmt_plugins_server: Server
 ) -> None:

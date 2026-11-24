@@ -54,6 +54,8 @@ def _print_start_failure(instance: RemoteControlInstance) -> None:
 
     ``error_detail`` is already redacted and bounded where it is stored. It can hold several
     lines of bridge output, so its whitespace is collapsed for a single diagnostic line.
+    The ``clauster logs`` hint prints only when the log has content: a launch that failed
+    before the process ran wrote none, and the hint would lead to empty output.
     """
     short_id = instance.instance_id[:8]
     reason = " ".join((instance.error_detail or "").split()) or "no reason was captured"
@@ -61,7 +63,13 @@ def _print_start_failure(instance: RemoteControlInstance) -> None:
         f"clauster: bridge {short_id} ({instance.project}) failed to start: {reason}",
         file=sys.stderr,
     )
-    print(f"clauster: read its log with: clauster logs {short_id}", file=sys.stderr)
+    log_path = instance.bridge_raw_log_path or instance.bridge_debug_log_path
+    try:
+        has_log = log_path is not None and log_path.stat().st_size > 0
+    except OSError:
+        has_log = False
+    if has_log:
+        print(f"clauster: read its log with: clauster logs {short_id}", file=sys.stderr)
 
 
 def cmd_start(
