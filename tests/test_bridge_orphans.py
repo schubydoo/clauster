@@ -302,6 +302,95 @@ async def test_failed_cross_check_withdraws_the_still_running_claim(
     assert runner.orphaned_sessions_by_instance() == {}
 
 
+async def test_link_is_dropped_when_the_row_crashed_again_during_the_read(
+    runner_config, monkeypatch, children
+):
+    holder = {}
+    runner, inst = _runner(runner_config, monkeypatch, lambda *a, **k: [holder["s"]])
+    holder["s"] = _alpha_session(runner)
+    real = inspector.link_orphans
+
+    def _resume_and_crash_meanwhile(sessions, logs):
+        links = real(sessions, logs)
+        inst.bridge_raw_log_path = LOG_DIR / "alpha-1795127999999-2.log"
+        inst.bridge_debug_log_path = inst.bridge_raw_log_path
+        return links
+
+    monkeypatch.setattr("clauster.poll_loop.inspector.link_orphans", _resume_and_crash_meanwhile)
+
+    await runner.poll_once()
+
+    assert inst.status is InstanceStatus.CRASHED
+    assert holder["s"].attribution is Attribution.EXTERNAL
+
+
+async def test_poll_links_through_the_private_log_when_redaction_splits_it(
+    runner_config, monkeypatch, children
+):
+    holder = {}
+    raw = LOG_DIR / "alpha-1795127464176-1.raw.log"
+    runner, inst = _runner(runner_config, monkeypatch, lambda *a, **k: [holder["s"]])
+    inst.bridge_raw_log_path = raw
+    holder["s"] = _alpha_session(runner)
+    children[500] = (SESSION_ID, LOG_DIR / f"alpha-1795127464176-1.raw-{SESSION_ID}.log")
+
+    await runner.poll_once()
+
+    assert holder["s"].attribution is Attribution.ORPHANED
+
+
+async def test_survivor_is_never_published_as_external(runner_config, monkeypatch, children):
+    holder = {}
+    runner, _inst = _runner(runner_config, monkeypatch, lambda *a, **k: [holder["s"]])
+    holder["s"] = _alpha_session(runner)
+    real = inspector.link_orphans
+    seen = []
+
+    def _watch(sessions, logs):
+        seen.append(any(s is holder["s"] for s in runner._sessions))
+        return real(sessions, logs)
+
+    monkeypatch.setattr("clauster.poll_loop.inspector.link_orphans", _watch)
+
+    await runner.poll_once()
+
+    assert seen == [False]
+    assert runner._sessions == [holder["s"]]
+
+
+async def test_link_failure_still_publishes_the_sessions(
+    runner_config, monkeypatch, children, caplog
+):
+    holder = {}
+    runner, _inst = _runner(runner_config, monkeypatch, lambda *a, **k: [holder["s"]])
+    holder["s"] = _alpha_session(runner)
+
+    def _fail(sessions, logs):
+        raise OSError(24, "secret-argv-text")
+
+    monkeypatch.setattr("clauster.poll_loop.inspector.link_orphans", _fail)
+
+    await runner.poll_once()
+
+    assert runner._sessions == [holder["s"]]
+    assert holder["s"].attribution is Attribution.EXTERNAL
+    assert "could not link surviving sessions: OSError" in caplog.text
+    assert "secret-argv-text" not in caplog.text
+
+
+async def test_shared_pid_labels_only_the_eligible_entry(runner_config, monkeypatch, children):
+    holder = {}
+    runner, _inst = _runner(runner_config, monkeypatch, lambda *a, **k: holder["s"])
+    alpha = runner._discovered()["alpha"].path
+    background = _session(cwd=str(alpha)).model_copy(update={"kind": "background"})
+    holder["s"] = [_session(cwd=str(alpha)), background]
+
+    await runner.poll_once()
+
+    assert holder["s"][0].attribution is Attribution.ORPHANED
+    assert holder["s"][1].attribution is Attribution.UNTRACKED
+
+
 def test_clear_orphan_links_touches_only_orphaned_sessions():
     orphan = _session(pid=1, attribution=Attribution.ORPHANED, parent="row")
     tracked = _session(pid=2, attribution=Attribution.TRACKED, parent="live")
@@ -345,11 +434,20 @@ def test_dashboard_carries_the_crashed_row_copy(runner_config):
     page = TestClient(create_app(config)).get("/").text
     assert 'data-test="bridge-survivor-note"' in page
     assert "/api/sessions/orphaned" in page
-    assert "Its session is still running" in page
+    assert "The session of this bridge is still running" in page
     assert "Resume reattaches a session in a new process." in page
     assert "shell commands and subagents in the old process end" in page
     # No "Resume to continue" beside a warning that Resume restarts the running session.
     assert '(this.survivingSessions(name).length ? "." : tail)' in page
+    # No Resume effect beside "stop it first".
+    assert "if (this.resumeBlockedReason(key)) return lead;" in page
+    # A live session stays visible: no idle line, a count on the group, a note on the project.
+    assert 'x-show="!hasLive() && !survivingCount()"' in page
+    assert "' still running'" in page
+    assert 'data-test="project-survivor-note"' in page
+    # The button that restarts the session is described by the warning.
+    assert ':aria-describedby="resumeDescribedBy(i.rk)"' in page
+    assert ":id=\"'survivor-note-' + i.rk\"" in page
 
 
 def test_mcp_lists_a_surviving_session_once_under_its_row(runner_config, monkeypatch):

@@ -297,6 +297,17 @@ def reconcile(
     return sessions
 
 
+def may_link(session: WorkingSession, crashed_logs: dict[str, Path]) -> bool:
+    """Whether a session is one that :func:`link_orphans` may relabel.
+
+    TRACKED too: a lone worktree bridge claims by containment, even a crashed one that a
+    live sibling keeps in the candidate list.
+    """
+    return session.attribution is Attribution.EXTERNAL or (
+        session.attribution is Attribution.TRACKED and session.parent_instance in crashed_logs
+    )
+
+
 def link_orphans(sessions: list[WorkingSession], crashed_logs: dict[str, Path]) -> dict[int, str]:
     """Map the pid of each session that outlived a crashed bridge to that bridge's id.
 
@@ -314,12 +325,7 @@ def link_orphans(sessions: list[WorkingSession], crashed_logs: dict[str, Path]) 
     instance_of = {log: iid for iid, log in crashed_logs.items() if claims[log] == 1}
     links: dict[int, str] = {}
     for s in sessions:
-        # TRACKED too: a lone worktree bridge claims by containment, even a crashed one
-        # that a live sibling keeps in the candidate list.
-        if not (
-            s.attribution is Attribution.EXTERNAL
-            or (s.attribution is Attribution.TRACKED and s.parent_instance in crashed_logs)
-        ):
+        if not may_link(s, crashed_logs):
             continue
         child = procutil.session_child_debug_file(s.pid)
         if child is None:

@@ -478,6 +478,12 @@
               </div>
             </template>
 
+            <!-- A crashed bridge left a session running (TASK-562). It has no External note. -->
+            <div class="mt-2 small text-warning-emphasis" data-test="project-survivor-note"
+                 x-show="projectSurvivorCount('{{ p.name }}')" x-cloak>
+              A crashed bridge left a session running here. Its row is under Recent.
+            </div>
+
             <!-- external (unmanaged) session note — expandable per-session detail -->
             <div class="mt-2" data-test="external-indicator" x-show="hasExternal('{{ p.name }}')" x-cloak>
               <button type="button" data-test="external-toggle"

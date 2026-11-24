@@ -212,7 +212,8 @@ class PollLoop:
         links = await asyncio.to_thread(inspector.link_orphans, sessions, logs)
         for s in sessions:
             iid = links.get(s.pid)
-            if iid is None:
+            # `may_link` again: the map is by pid, and two entries can share one.
+            if iid is None or not inspector.may_link(s, logs):
                 continue
             inst = self._registry._instances.get(iid)
             # Judged again after the await: a Resume may have replaced this bridge meanwhile.
@@ -559,7 +560,12 @@ class PollLoop:
             sessions, managed, hosted_pids, hosted_cwds, worktree_roots, owned_pids_by_instance
         )
         # Before the list is published, so a reader never sees a survivor flash EXTERNAL.
-        await self._link_orphans(reconciled)
+        try:
+            await self._link_orphans(reconciled)
+        except Exception as exc:
+            # The type only: the walk reads argvs, which hold the session URL. The list still
+            # publishes unlinked, so one bad read cannot freeze a stale "still running".
+            _log.warning("could not link surviving sessions: %s", type(exc).__name__)
         self._sessions = reconciled
         # Drop a non-live managed instance whose project has a live EXTERNAL session:
         # the bridge IS alive, just unmanaged (flag-form/tmux), so the persisted record

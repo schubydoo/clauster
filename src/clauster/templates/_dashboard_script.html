@@ -5428,9 +5428,9 @@
           // multi-session expander only; a failed fetch just collapses to the starter link.
           if (tRes.ok) this.trackedSessions = await tRes.json();
           else { this.trackedSessions = {}; }
-          // Advisory like the two above: a failed fetch shows the plain crashed row.
+          // Unlike the two above, a failed fetch keeps the last value: this one carries the
+          // warning that Resume restarts a running session. The server withdraws it itself.
           if (oRes.ok) this._absorbOrphaned(await oRes.json());
-          else { this.orphanedSessions = {}; }
           // Hosted sessions live in a separate registry (HostedManager); only poll
           // them when the claustrum channel is configured.
           if (CLAUSTRUM_ENABLED) {
@@ -5857,17 +5857,38 @@
         if (!s.length) return null;
         const pids = s.map((x) => x.pid).join(", ");
         const lead = s.length === 1
-          ? "Its session is still running (pid " + pids + ")."
-          : s.length + " sessions from this bridge are still running (pids " + pids + ").";
+          ? "The session of this bridge is still running (pid " + pids + ")."
+          : s.length + " sessions of this bridge are still running (pids " + pids + ").";
+        // Blocked: resumeBlockedReason renders next to this and says Resume cannot run.
+        if (this.resumeBlockedReason(key)) return lead;
         return lead + " Resume reattaches a session in a new process. The conversation " +
           "continues, but shell commands and subagents in the old process end. " +
-          "If that work must finish, wait before you press Resume.";
+          "If that work must finish, wait for it before you press Resume.";
+      },
+      // The Resume button's description: why it cannot run, and what it does to a survivor.
+      resumeDescribedBy(key) {
+        const ids = [];
+        if (this.resumeBlockedReason(key)) ids.push("resume-blocked-" + key);
+        if (this.survivorNoteOf(key)) ids.push("survivor-note-" + key);
+        return ids.length ? ids.join(" ") : null;
+      },
+      projectSurvivorCount(name) {
+        return this.endedBridges()
+          .filter((i) => i.project === name)
+          .reduce((n, i) => n + this.survivingSessions(i.rk).length, 0);
       },
       // A live session must not hide in a collapsed group: open Recent once per crashed row.
+      // A row is forgotten only when it stops being crashed, so a poll that briefly lists no
+      // survivor does not reopen a group the operator closed.
       _absorbOrphaned(next) {
+        const seen = {};
+        for (const id of Object.keys(this._orphanRowsSeen)) {
+          if ((this.rowOf(id) || {}).status === "crashed") seen[id] = true;
+        }
         const ids = Object.keys(next);
-        if (ids.some((id) => !this._orphanRowsSeen[id])) this.recentOpen = true;
-        this._orphanRowsSeen = Object.fromEntries(ids.map((id) => [id, true]));
+        if (ids.some((id) => !seen[id])) this.recentOpen = true;
+        for (const id of ids) seen[id] = true;
+        this._orphanRowsSeen = seen;
         this.orphanedSessions = next;
       },
       externalCount(name) {
