@@ -2159,9 +2159,13 @@
               <select class="form-select form-select-sm" id="cm-project" data-test="cm-project"
                       x-model="configMgmt.project" @change="configMgmtReload()">
                 {# TASK-521: a project removed since it was picked stays named in the box as a
-                   disabled choice, instead of the box showing a stale or blank pick. #}
+                   disabled choice, instead of the box showing a stale or blank pick. It must
+                   be :selected itself: x-model only re-applies when configMgmt.project changes,
+                   so when the old option is removed the browser would show the first listed
+                   project while the model still names the removed one. #}
                 <template x-if="configMgmtProjectGone()">
-                  <option :value="configMgmt.project" disabled data-test="cm-project-gone-option"
+                  <option :value="configMgmt.project" disabled :selected="true"
+                          data-test="cm-project-gone-option"
                           x-text="configMgmt.project + ' (not found)'"></option>
                 </template>
                 <template x-for="p in projectNames" :key="p">
@@ -2174,7 +2178,7 @@
               {# Always mounted and empty while the pick is valid: a status region shown by
                  x-show is skipped by screen readers, a text change is announced.
                  text-warning-emphasis: plain text-warning misses AA contrast on white. #}
-              <div class="text-warning-emphasis small" role="status" data-test="cm-project-gone"
+              <div class="text-warning-emphasis text-break small" role="status" data-test="cm-project-gone"
                    :class="configMgmtProjectGone() ? 'mt-1' : ''"
                    x-text="configMgmtProjectGoneText()"></div>
             </div>

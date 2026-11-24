@@ -4066,6 +4066,10 @@ def test_config_mgmt_picker_drops_a_removed_project_and_says_so(
     browser.expect_text(gone, "gamma is no longer on this host. Pick another project.")
     browser.expect_attr(gone, "role", "status")
     browser.expect_count('[data-test="cm-project-gone-option"]', 1)  # an <option> has no box
+    # The box itself shows the removed pick, not the first listed project.
+    assert browser.eval_json("document.querySelector('[data-test=\"cm-project\"]').value") == (
+        "gamma"
+    )
     # Nothing loads or saves for it: the pick-a-project note shows instead of the editor.
     browser.expect_visible('[data-test="cm-need-project"]')
     browser.expect_hidden('[data-test="cm-view-claude-md"]')

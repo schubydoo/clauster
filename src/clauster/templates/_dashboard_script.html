@@ -78,6 +78,9 @@
     reg.host.style.height = Math.ceil(naturalH * scale) + padTop + padBottom + "px";
   }
   const PROJECT_NAMES = [{% for p in projects %}{{ p.name | tojson }}{% if not loop.last %}, {% endif %}{% endfor %}];
+  // TASK-521: the one /api/projects read in flight (refreshProjectNames). A Promise, so it
+  // lives here, not in Alpine state: the reactive Proxy breaks a Promise's own methods.
+  let projectNamesInflight = null;
   const INITIAL_TRUST = { {% for p in projects %}{{ p.name | tojson }}: {{ p.trust_state.value | tojson }}{% if not loop.last %}, {% endif %}{% endfor %} };
   const DEFAULT_SPAWN_MODE = {{ default_spawn_mode | tojson }};
   const DEFAULT_PERMISSION_MODE = {{ default_permission_mode | tojson }};
@@ -195,8 +198,8 @@
       // (_addProjectName) and opening the config window re-reads it from the server
       // (refreshProjectNames). PROJECT_NAMES itself stays the page-load list.
       projectNames: [...PROJECT_NAMES],
-      _projectNamesSeq: 0,          // the newest refreshProjectNames answer wins
-      _projectNamesLoading: false,  // single-flight: one /api/projects read at a time
+      _projectNamesSeq: 0,  // a list write since a read started drops that read's answer
+      projectNamesTimeoutMs: 15000,  // deadline for one /api/projects read (TASK-521)
       // rk -> a STANDARD bridge row (rk = instance_id), N per project (#1109/#1143). The
       // one deliberate exception is start()'s optimistic placeholder, whose identity is
       // not minted yet, so `_stamp` falls its rk back to the project name.
@@ -333,7 +336,7 @@
           confirm: "", busy: false, ops: 0, deletingName: "",
           // TASK-551: a save landed but skipped its list reload (an editor opened during
           // it); Cancel reloads (_configMgmtReloadStale). Cleared by any list load.
-          listStale: false, staleLoading: false,
+          listStale: false, staleLoading: false, staleGen: 0,
         },
         // MCP servers (#773 slice D): a list surface — the {name: entry} map edited
         // per-entry as JSON, add/edit/delete across all three scopes via the
@@ -344,7 +347,7 @@
           editing: false, isNew: false,
           name: "", entryText: "", orig: "",
           confirm: "", busy: false, ops: 0, deletingName: "",
-          listStale: false, staleLoading: false,  // TASK-551, as for subagents
+          listStale: false, staleLoading: false, staleGen: 0,  // TASK-551, as for subagents
           // TASK-272 fields editor: `mode` is "fields" or "raw"; `f` holds the form (see
           // _mcpBlankFields); `fieldsError` says why an entry can't be shown as fields;
           // `base` is the loaded (masked) entry, the baseline for the retype check.
@@ -371,7 +374,7 @@
           converted: "",
           confirm: "", busy: false, ops: 0, deletingName: "",
           listId: 0,  // guards the folder-list fetch (see _loadSkills)
-          listStale: false, staleLoading: false,  // TASK-551, as for subagents
+          listStale: false, staleLoading: false, staleGen: 0,  // TASK-551, as for subagents
           // Visibility (TASK-249): the `skillOverrides` settings key, all three scopes. One
           // row per listed skill folder and per key already in the file, so a key that
           // matches no folder stays visible and removable. `stored` is the map as read;
@@ -1174,12 +1177,13 @@
       // so Alpine's reactive Proxy sees the change (avoids the frame-drop class #310/#315).
       recomputeProjectRanks() {
         // Name sort: rank by the stable A–Z position (the Jinja render order == PROJECT_NAMES
-        // order), so `projectRanks` stays POPULATED in every sort. The page-load list, NOT
-        // projectNames, on purpose: a project created since stays unranked, and an unranked
-        // row is never capped out (projectVisible), so a just-created project always shows. That keeps projectVisible's
+        // order), so `projectRanks` stays POPULATED in every sort. That keeps projectVisible's
         // reactive dep set stable and the cap correctly re-applied on the return-to-A–Z path
         // (#585 symptom (b)). The `:style` order binding still no-ops in name sort (it's gated on
         // `projectSort !== 'name'`), so these ranks only drive the cap, not a visual reorder.
+        // The page-load list, NOT projectNames, on purpose (TASK-521): a project created
+        // since stays unranked, and projectVisible never caps out an unranked row, so a
+        // just-created project always shows.
         if (this.projectSort === "name") {
           const ranks = {};
           PROJECT_NAMES.forEach((n, i) => { ranks[n] = i; });
@@ -3228,13 +3232,16 @@
         if (key === this._configMgmtViewKey()) sec.listStale = true;
       },
       // `load` is the section's list loader, which clears `listStale` when its list lands.
-      // Single-flight per section: a second Cancel during the reload starts no second one.
+      // Single-flight per section and gen: a second Cancel during the reload starts no
+      // second one. A New or Edit since then bumped gen and voided that reload, so a Cancel
+      // after it starts a fresh one; only the newest reload clears `staleLoading`.
       _configMgmtReloadStale(sec, load) {
-        if (!sec.listStale || sec.staleLoading) return;
-        sec.staleLoading = true;
+        const gen = this.configMgmt.gen;
+        if (!sec.listStale || (sec.staleLoading && sec.staleGen === gen)) return;
+        sec.staleLoading = true; sec.staleGen = gen;
         Promise.resolve().then(load)
           .catch((e) => console.error(e))
-          .finally(() => { sec.staleLoading = false; });
+          .finally(() => { if (sec.staleGen === gen) sec.staleLoading = false; });
       },
       async _configMgmtWriteErr(res) {
         const c = this.configMgmt;
@@ -7013,19 +7020,29 @@
         this.projectNames = projects.map((p) => p && p.name).filter((n) => typeof n === "string");
       },
       // Re-read the discovered projects, so one removed on disk leaves the list too.
-      // Single-flight; a failed read keeps the current list (the picker shows what it had).
-      async refreshProjectNames() {
-        if (this._projectNamesLoading) return;
-        this._projectNamesLoading = true;
+      // Single-flight: a second caller (a reopen during the read) waits on the same read
+      // rather than going on with the old list. A failed read keeps the current list.
+      refreshProjectNames() {
+        if (!projectNamesInflight) {
+          projectNamesInflight = this._readProjectNames()
+            .finally(() => { projectNamesInflight = null; });
+        }
+        return projectNamesInflight;
+      },
+      // Bounded, like the readiness loads, so a hung read cannot hold the window open on
+      // "Loading…" or block every later refresh.
+      async _readProjectNames() {
         const seq = this._projectNamesSeq;
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), this.projectNamesTimeoutMs);
         try {
-          const res = await fetch(ROOT + "/api/projects");
+          const res = await fetch(ROOT + "/api/projects", { signal: ctrl.signal });
           if (this._authExpired(res) || !res.ok) return;
           const list = await res.json();
           if (seq !== this._projectNamesSeq || !Array.isArray(list)) return;
           this._setProjectNames(list);
-        } catch (e) { /* keep the current list */ }
-        finally { this._projectNamesLoading = false; }
+        } catch (e) { console.error("project list refresh failed; keeping the current list", e); }
+        finally { clearTimeout(timer); }
       },
       async _spawn(name) {
         this.errors[name] = null;

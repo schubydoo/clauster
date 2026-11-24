@@ -847,6 +847,8 @@ def test_open_rereads_the_project_list_before_it_loads(write_config):
     assert "if (c.gen !== gen || !c.open) return;" in then
     assert "c.project = this.projectNames[0];" in then
     assert "this.configMgmtReload();" in then
+    # ...and ONLY there: a reload before the list lands could read a removed project.
+    assert body.count("this.configMgmtReload();") == 1
     assert "c.loading = true;" in body
 
 
@@ -868,7 +870,11 @@ def test_picker_names_a_removed_project_and_announces_it(write_config):
     assert '<template x-if="configMgmtProjectGone()">' in picker
     assert 'data-test="cm-project-gone-option"' in picker
     option = picker[picker.index("<option", picker.index("configMgmtProjectGone()")) :]
-    assert " disabled " in option[: option.index(">")]
+    tag = option[: option.index(">")]
+    assert " disabled " in tag
+    # It holds the selection itself: x-model does not re-apply when only the options
+    # change, so the browser would otherwise show the first listed project.
+    assert ':selected="true"' in tag
     # An always-mounted status region: its text changes, it is never shown by x-show.
     status = picker[picker.index('data-test="cm-project-gone"') :]
     status = status[: status.index("</div>")]
@@ -894,6 +900,8 @@ def test_a_save_that_skips_its_reload_marks_the_list_stale(write_config, section
     # made the save return without its list reload, and nothing ever reloaded it.
     body = _between(_html(write_config, _ON), start, end)
     assert "const key = this._configMgmtViewKey();" in body
+    # Read before the request: the view the write was sent from, not the one after it.
+    assert body.index("const key = this._configMgmtViewKey();") < body.index("await fetch(")
     assert "if (c.gen !== gen) { if (res.ok) this._configMgmtMarkStale(" in body
     assert "editing) { this._configMgmtMarkStale(" in body
 
@@ -946,8 +954,11 @@ def test_cancel_reloads_a_stale_list(write_config, start, end, reload):
 def test_stale_reload_is_single_flight_and_cleared_by_any_list_load(write_config):
     html = _html(write_config, _ON)
     helper = _between(html, "_configMgmtReloadStale(sec, load) {", "async _configMgmtWriteErr(")
-    assert "if (!sec.listStale || sec.staleLoading) return;" in helper
-    assert ".finally(() => { sec.staleLoading = false; });" in helper
+    assert "if (!sec.listStale || (sec.staleLoading && sec.staleGen === gen)) return;" in helper
+    # A New or Edit since the reload started voided it, so a later Cancel starts its own,
+    # and only the newest reload clears the in-flight flag.
+    assert "sec.staleLoading = true; sec.staleGen = gen;" in helper
+    assert ".finally(() => { if (sec.staleGen === gen) sec.staleLoading = false; });" in helper
     # Only a write to the list still on screen marks it: a switch loads its own list.
     mark = _between(html, "_configMgmtMarkStale(sec, key) {", "_configMgmtReloadStale(")
     assert "if (key === this._configMgmtViewKey()) sec.listStale = true;" in mark

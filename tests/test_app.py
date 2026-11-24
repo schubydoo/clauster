@@ -692,11 +692,20 @@ def test_refresh_project_names_is_single_flight_and_fails_soft(write_config):
     # TASK-521: opening the config window re-reads the discovered projects, one request at a
     # time, and keeps the list it has when the read fails.
     page = _client(write_config).get("/").text
-    body = _script_fn(page, "async refreshProjectNames() {")
-    assert "if (this._projectNamesLoading) return;" in body
-    assert 'fetch(ROOT + "/api/projects")' in body
-    assert "if (seq !== this._projectNamesSeq || !Array.isArray(list)) return;" in body
-    assert "finally { this._projectNamesLoading = false; }" in body
+    # A second caller waits on the read in flight instead of going on with the old list.
+    shared = _script_fn(page, "refreshProjectNames() {")
+    assert "if (!projectNamesInflight) {" in shared
+    assert "return projectNamesInflight;" in shared
+    assert ".finally(() => { projectNamesInflight = null; });" in shared
+    assert "let projectNamesInflight = null;" in page  # script scope, not Alpine state
+    read = _script_fn(page, "async _readProjectNames() {")
+    assert 'fetch(ROOT + "/api/projects", { signal: ctrl.signal })' in read
+    assert "setTimeout(() => ctrl.abort(), this.projectNamesTimeoutMs)" in read  # bounded
+    assert "if (seq !== this._projectNamesSeq || !Array.isArray(list)) return;" in read
+    assert "console.error(" in read  # a failed read keeps the list but leaves a trace
+    # The answer REPLACES the list (a merge would keep a removed project offered).
+    replace = _script_fn(page, "_setProjectNames(projects) {")
+    assert "this.projectNames = projects.map((p) => p && p.name)" in replace
 
 
 def test_project_row_order_style_uses_object_not_clobbering_string():
