@@ -1949,9 +1949,23 @@
         if (c.scope !== "user") p.set("project", c.project);
         return p.toString();
       },
-      _configMgmtLoadErr(res) {
+      // A failed load's banner text: the backend's reason when the response carries one
+      // (TASK-512), such as a settings file that is not valid JSON and where. The detail is
+      // already in the response, so nothing new reaches the browser, and every caller shows
+      // it with x-text. Starlette's bare "Not Found" (a route this server does not have) and a
+      // body that is not JSON keep the status message. Async: each caller re-checks its own
+      // load is still current after the await, before it writes the banner.
+      async _configMgmtLoadErr(res) {
+        const detail = await this._configMgmtLoadDetail(res);
+        if (detail) return detail;
         if (res.status === 404) return "This config surface is unavailable.";
         return "Failed to load (" + res.status + ").";
+      },
+      // The backend's string `detail` for a failed load, or "" when there is none to show.
+      async _configMgmtLoadDetail(res) {
+        const d = await res.json().catch(() => null);
+        const detail = d && typeof d.detail === "string" ? d.detail.trim() : "";
+        return detail === "Not Found" ? "" : detail;
       },
       // Reload the active surface for the current scope/project. Bumps `gen` so a
       // slower earlier fetch can't clobber this one; each surface loader re-checks it.
@@ -2001,7 +2015,9 @@
           if (!res.ok) {
             // Clear so a failed switch never leaves the previous target's JSON visible.
             st.text = ""; st.orig = ""; st.hash = null;
-            c.error = this._configMgmtLoadErr(res); return null;
+            const msg = await this._configMgmtLoadErr(res);
+            if (c.gen === myGen) c.error = msg;
+            return null;
           }
           const d = await res.json();
           if (c.gen !== myGen) return null;  // re-check across the json() await before writing state
@@ -2021,7 +2037,9 @@
             // Clear so a failed switch never leaves the PREVIOUS target's content
             // visible under the error banner (the surface view stays shown on error).
             c.claudeMd.content = ""; c.claudeMd.orig = ""; c.claudeMd.hash = null; c.claudeMd.exists = false;
-            c.error = this._configMgmtLoadErr(res); return;
+            const msg = await this._configMgmtLoadErr(res);
+            if (c.gen === myGen) c.error = msg;
+            return;
           }
           const d = await res.json();
           if (c.gen !== myGen) return;  // re-check across the json() await before writing state
@@ -2089,7 +2107,13 @@
           );
           if (c.gen !== myGen) return;
           if (this._authExpired(res)) return;
-          if (!res.ok) { c.settings.effectiveError = "Could not load merged view (" + res.status + ")."; return; }
+          if (!res.ok) {
+            const detail = await this._configMgmtLoadDetail(res);
+            if (c.gen !== myGen) return;
+            c.settings.effectiveError = detail ? "Could not load merged view: " + detail
+              : "Could not load merged view (" + res.status + ").";
+            return;
+          }
           const d = await res.json();
           if (c.gen !== myGen) return;  // re-check across the json() await before writing state
           c.settings.effective = d.effective || {};
@@ -3220,7 +3244,12 @@
           const res = await fetch(ROOT + "/api/config-write/subagents?" + this._configMgmtQuery());
           if (c.gen !== myGen) return;
           if (this._authExpired(res)) return;
-          if (!res.ok) { c.subagents.list = []; c.error = this._configMgmtLoadErr(res); return; }
+          if (!res.ok) {
+            c.subagents.list = [];
+            const msg = await this._configMgmtLoadErr(res);
+            if (c.gen === myGen) c.error = msg;
+            return;
+          }
           const d = await res.json();
           if (c.gen !== myGen) return;
           c.subagents.list = d.agents || [];
@@ -3239,9 +3268,9 @@
       // requires the frontmatter `name:` to equal the filename, so rather than making the
       // operator type it twice and keep them in sync, inject/replace the top-level `name:`
       // in the content's YAML frontmatter from the Name box at save time. Creates a
-      // frontmatter block if the doc has none. `name` is a validated identifier (lowercase
-      // letters, digits, hyphens), so it never needs YAML quoting. Only the top-level
-      // `name:` line is touched (the `m` flag anchors to line-start — nested keys are safe).
+      // frontmatter block if the doc has none. Only the top-level `name:` line is touched
+      // (the `m` flag anchors to line-start — nested keys are safe). See _agentNameYaml for
+      // how the name is written.
       _syncAgentName(content, name) {
         const nm = (name || "").trim();
         if (!nm) return content;  // canSave blocks a blank name; nothing to inject
@@ -3263,8 +3292,19 @@
         // a YAML loader takes the LAST value on duplicate keys, so replacing only the
         // first could leave a stale name that still mismatches the filename (422).
         yaml = yaml.replace(/^name[ \t]*:.*(?:\n|$)/gm, "").replace(/\n+$/, "");
-        yaml = "name: " + nm + (yaml ? "\n" + yaml : "");
+        yaml = "name: " + this._agentNameYaml(nm) + (yaml ? "\n" + yaml : "");
         return "---\n" + yaml + "\n---" + rest;
+      },
+      // The name as a YAML scalar that reads back as the same string (TASK-466). A valid
+      // name (the backend's _NAME_RE) stays plain, as before, unless YAML reads that word
+      // as another type: PyYAML (YAML 1.1) loads yes/no/on/off/true/false/null as a boolean
+      // or null, and Claude Code's YAML 1.2 loads true/false/null so. Anything else (a name
+      // the backend will refuse) is quoted too, so its 422 names the name, not a YAML error.
+      // JSON.stringify gives a double-quoted scalar both YAML versions read as that string.
+      _agentNameYaml(nm) {
+        const plain = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(nm)
+          && !["yes", "no", "on", "off", "true", "false", "null"].includes(nm);
+        return plain ? nm : JSON.stringify(nm);
       },
       async configMgmtOpenAgent(name) {
         const c = this.configMgmt, s = c.subagents;
@@ -3277,7 +3317,11 @@
           );
           if (c.gen !== gen) return;
           if (this._authExpired(res)) return;
-          if (!res.ok) { c.error = this._configMgmtLoadErr(res); return; }
+          if (!res.ok) {
+            const msg = await this._configMgmtLoadErr(res);
+            if (c.gen === gen) c.error = msg;
+            return;
+          }
           const d = await res.json();
           if (c.gen !== gen) return;
           s.editing = true; s.isNew = false; s.name = d.name || name;
@@ -3398,7 +3442,10 @@
           if (c.gen !== myGen) return;
           if (this._authExpired(res)) return;
           if (!res.ok) {
-            m.list = []; m.hash = null; m.conversions = []; c.error = this._configMgmtLoadErr(res); return;
+            m.list = []; m.hash = null; m.conversions = [];
+            const msg = await this._configMgmtLoadErr(res);
+            if (c.gen === myGen) c.error = msg;
+            return;
           }
           const d = await res.json();
           if (c.gen !== myGen) return;
@@ -4110,8 +4157,12 @@
           const res = await fetch(ROOT + "/api/config-write/skills?" + q);
           if (c.skills.listId !== listId) return;
           if (this._authExpired(res)) return;
-          if (!res.ok) { c.skills.list = []; c.error = this._configMgmtLoadErr(res); }
-          else {
+          if (!res.ok) {
+            c.skills.list = [];
+            const msg = await this._configMgmtLoadErr(res);
+            if (c.skills.listId !== listId) return;
+            c.error = msg;
+          } else {
             const d = await res.json();
             if (c.skills.listId !== listId) return;
             const skills = d.skills || [];
@@ -4128,8 +4179,11 @@
             const res = await fetch(ROOT + "/api/config-write/skills?scope=user");
             if (c.skills.listId !== listId) return;
             if (this._authExpired(res)) return;
-            if (!res.ok) { if (!c.error) c.error = "User skills: " + this._configMgmtLoadErr(res); }
-            else {
+            if (!res.ok) {
+              const msg = await this._configMgmtLoadErr(res);
+              if (c.skills.listId !== listId) return;
+              if (!c.error) c.error = "User skills: " + msg;
+            } else {
               const d = await res.json();
               if (c.skills.listId !== listId) return;
               names = names.concat((d.skills || []).map(sk => sk.name));
@@ -4219,9 +4273,9 @@
             // JSON), never empty rows: a save from empty rows would clear the real map.
             // The banner gets it too (unless the folder list already put an error there):
             // the panel's own status node may have been hidden while its text was set.
-            const d = await res.json().catch(() => ({}));
+            const msg = await this._configMgmtLoadErr(res);
             if (ov.loadId !== id) return;
-            ov.error = (d && typeof d.detail === "string" && d.detail) || this._configMgmtLoadErr(res);
+            ov.error = msg;
             if (!c.error) c.error = ov.error;
             return true;
           }
@@ -4390,7 +4444,11 @@
           const res = await fetch(ROOT + "/api/config-write/skills/file?" + this._configMgmtQuery({ name: name }));
           if (c.gen !== gen) return;
           if (this._authExpired(res)) return;
-          if (!res.ok) { c.error = this._configMgmtLoadErr(res); return; }
+          if (!res.ok) {
+            const msg = await this._configMgmtLoadErr(res);
+            if (c.gen === gen) c.error = msg;
+            return;
+          }
           const d = await res.json();
           if (c.gen !== gen) return;
           s.editing = true; s.isNew = false; s.name = d.name || name;
@@ -4512,7 +4570,12 @@
           const res = await fetch(ROOT + "/api/config-write/plugins?" + this._configMgmtQuery());
           if (c.gen !== myGen) return;
           if (this._authExpired(res)) return;
-          if (!res.ok) { pl.list = []; pl.marketplaces = []; c.error = this._configMgmtLoadErr(res); return; }
+          if (!res.ok) {
+            pl.list = []; pl.marketplaces = [];
+            const msg = await this._configMgmtLoadErr(res);
+            if (c.gen === myGen) c.error = msg;
+            return;
+          }
           const d = await res.json();
           if (c.gen !== myGen) return;
           pl.list = d.plugins || [];
@@ -4541,7 +4604,9 @@
             // Surface the failure rather than showing a misleading empty "No
             // marketplaces" — the plugins list may have loaded fine while this
             // second fetch failed (fail closed, never silently).
-            pl.marketplaces = []; c.error = this._configMgmtLoadErr(mres);
+            pl.marketplaces = [];
+            const msg = await this._configMgmtLoadErr(mres);
+            if (c.gen === myGen) c.error = msg;
           }
         } catch (e) { if (c.gen === myGen) c.error = "Failed to load plugins."; }
       },

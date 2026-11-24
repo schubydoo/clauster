@@ -21,6 +21,7 @@ from fastapi.testclient import TestClient
 from clauster.app import create_app
 from clauster.config import load_config
 from clauster.config_write_skills import SKILL_OVERRIDE_VALUES
+from clauster.config_write_subagents import MAX_NAME_CHARS
 
 _OFF = ""
 _ON = "config_write:\n  enabled: true\n"
@@ -324,6 +325,36 @@ def test_subagents_surface_present_when_enabled(write_config):
     assert 'data-test="cm-agent-name-hint"' in html
     assert "_syncAgentName(" in html
     assert "const AGENT_TEMPLATE =" in html
+
+
+def test_subagent_name_box_takes_the_backend_length_cap(write_config):
+    # TASK-468: the box cannot hold a name longer than the server accepts, and the rule
+    # (with the same number) is read with the box, so a cut paste is not a surprise.
+    html = _html(write_config, _ON)
+    box = re.search(r'<input[^>]*id="cm-agent-name"[^>]*>', html)
+    assert box is not None
+    assert f'maxlength="{MAX_NAME_CHARS}"' in box.group(0)
+    assert 'aria-describedby="cm-agent-name-rule"' in box.group(0)
+    rule = re.search(r'id="cm-agent-name-rule"[^>]*>(.*?)</div>', html, re.S)
+    assert rule is not None
+    assert f"At most {MAX_NAME_CHARS} characters." in " ".join(rule.group(1).split())
+
+
+def test_subagent_name_is_written_as_a_yaml_string(write_config):
+    # TASK-466: the injected `name:` goes through _agentNameYaml, which quotes the seven
+    # YAML keyword names (the browser E2E runs it against both YAML loaders).
+    html = _html(write_config, _ON)
+    assert 'yaml = "name: " + this._agentNameYaml(nm)' in html
+    assert '["yes", "no", "on", "off", "true", "false", "null"].includes(nm)' in html
+
+
+def test_config_load_error_shows_the_server_detail(write_config):
+    # TASK-512: every config-modal load error goes through the async helper that reads the
+    # server's string `detail`, and each caller awaits it.
+    html = _html(write_config, _ON)
+    assert "async _configMgmtLoadErr(res) {" in html
+    assert 'typeof d.detail === "string"' in html
+    assert re.search(r"(?<!await )this\._configMgmtLoadErr\(", html) is None
 
 
 def test_subagent_editor_shows_the_mcp_conversion_note(write_config):

@@ -88,6 +88,8 @@ server's ``command`` or ``args`` changed.
 
 from __future__ import annotations
 
+import errno
+import os
 import re
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -140,8 +142,20 @@ _NAME_RE = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
 #: atomic writer's temp file, ``<name>.md.<8 random chars>.tmp`` (``tempfile.mkstemp``),
 #: 16 characters over the name, so 239 + 16 is 255. The name is ASCII (see
 #: :data:`_NAME_RE`), so characters and bytes agree. ⚠️ This is the POSIX bound. On Windows
-#: without long paths, the 260-character limit on the WHOLE path can bind first.
+#: without long paths, the 260-character limit on the WHOLE path can bind first: the write
+#: path maps that failure to a 422 that names the limit (:func:`_path_too_long_error`).
 MAX_NAME_CHARS = 239
+
+#: How many characters the atomic writer's temp file name adds to ``<name>``:
+#: ``.md.`` + 8 random characters + ``.tmp`` (see :data:`MAX_NAME_CHARS`).
+_TEMP_NAME_EXTRA_CHARS = 16
+
+#: The longest path a Windows host without long paths opens: ``MAX_PATH`` is 260
+#: characters, and that count includes the terminating NUL.
+_WINDOWS_MAX_PATH_CHARS = 259
+
+#: ``ERROR_FILENAME_EXCED_RANGE``: the Windows error for a file name or path that is too long.
+_WINERROR_FILENAME_EXCED_RANGE = 206
 
 #: Claude Code's built-in subagents — compiled into the CLI, never files on disk.
 #: Matched case-insensitively against a candidate name (``Explore``/``Plan`` are
@@ -883,6 +897,13 @@ def validate_frontmatter(candidate: Any, *, expected_name: str | None = None) ->
         raise cw.InvalidCandidateError(f"frontmatter is missing required keys: {sorted(missing)}")
 
     name = candidate["name"]
+    if not isinstance(name, str):
+        # A plain `yes`, `no`, `on`, `off`, `true`, `false` or `null` loads as a boolean or
+        # null, so "must be lowercase letters" would name the wrong problem (TASK-466).
+        raise cw.InvalidCandidateError(
+            "frontmatter 'name' must be a string. YAML reads some plain words, such as yes, "
+            'no, on, off, true, false and null, as other types: quote it, as in name: "yes"'
+        )
     if not is_valid_agent_name(name):
         raise cw.InvalidCandidateError(
             "frontmatter 'name' must be lowercase letters, digits, and hyphens "
@@ -2067,6 +2088,12 @@ def _write_agent(root: Path, name: str, content: str, expected_hash: str | None)
     except FileNotFoundError:
         current = b""
         found = False
+    except OSError as exc:
+        # Windows can refuse a too-long path here with another error (TASK-468).
+        too_long = _path_too_long_error(target, name, exc)
+        if too_long is None:
+            raise
+        raise too_long from exc
     if found and _is_read_only_file(target, current):
         raise ReadOnlyAgentError(f"{name!r} is a plugin-provided subagent (read-only)")
 
@@ -2087,7 +2114,54 @@ def _write_agent(root: Path, name: str, content: str, expected_hash: str | None)
         elif cw.hash_bytes(current_bytes or b"") != expected_hash:
             raise cw.StaleConfigWriteError(f"{name}.md changed on disk since it was loaded")
 
-    fw.write_file(root, f"{name}.md", content, verify=_verify_unchanged)
+    try:
+        fw.write_file(root, f"{name}.md", content, verify=_verify_unchanged)
+    except OSError as exc:
+        too_long = _path_too_long_error(target, name, exc)
+        if too_long is None:
+            raise
+        raise too_long from exc
+
+
+def _is_windows() -> bool:
+    """Return whether this host is Windows: a seam, so a POSIX test can take that branch."""
+    return os.name == "nt"
+
+
+def _path_too_long_error(target: Path, name: str, exc: OSError) -> cw.InvalidCandidateError | None:
+    """Return the 422 for a write that failed because its path is too long, else ``None``.
+
+    :data:`MAX_NAME_CHARS` keeps the file NAME under ``NAME_MAX``, but on Windows without
+    long paths the WHOLE path must fit in :data:`_WINDOWS_MAX_PATH_CHARS`, which depends on
+    where the project lives. That failure is not a typed error: ``mkstemp`` raises a plain
+    ``OSError`` (usually ``FileNotFoundError``), which escaped the route as a 500 (TASK-468).
+    The longest path the write opens is the temp file's, so that is the length compared.
+    Any other ``OSError`` returns ``None`` and the caller re-raises it unchanged.
+    """
+    longest = len(str(target.parent)) + 1 + len(name) + _TEMP_NAME_EXTRA_CHARS
+    # FileNotFoundError only: with long paths ON, another error on a long path (access
+    # denied, say) is a real failure, and naming the limit would hide it.
+    windows_limit = (
+        _is_windows() and isinstance(exc, FileNotFoundError) and longest > _WINDOWS_MAX_PATH_CHARS
+    )
+    if windows_limit or getattr(exc, "winerror", None) == _WINERROR_FILENAME_EXCED_RANGE:
+        room = _WINDOWS_MAX_PATH_CHARS - (longest - len(name))
+        fix = (
+            f"use a name of at most {room} characters"
+            if room > 0
+            else "move the project to a shorter path"
+        )
+        return cw.InvalidCandidateError(
+            f"the path for subagent {name!r} is too long: {longest} characters with the "
+            f"temporary file, and Windows without long paths allows {_WINDOWS_MAX_PATH_CHARS}. "
+            f"To save it, {fix}, or turn on long paths in Windows"
+        )
+    if exc.errno == errno.ENAMETOOLONG:
+        return cw.InvalidCandidateError(
+            f"the path for subagent {name!r} is too long for this file system "
+            f"({longest} characters with the temporary file). Use a shorter name"
+        )
+    return None
 
 
 def write_user_agent(

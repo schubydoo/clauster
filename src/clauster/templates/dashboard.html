@@ -3338,9 +3338,18 @@
               <!-- EDITOR mode -->
               <div x-show="configMgmt.subagents.editing" x-cloak data-test="cm-agent-editor">
                 <label class="form-label small" for="cm-agent-name">Name</label>
-                <input type="text" class="form-control form-control-sm mb-2" id="cm-agent-name" data-test="cm-agent-name"
+                {# TASK-468: maxlength is the backend's cap (MAX_NAME_CHARS), so the box cannot
+                   hold a name the server refuses for its length. The rule is stated below the box,
+                   so a paste that maxlength cuts short is not a surprise. On Windows without long
+                   paths the whole path can bind first; that save gets a 422 that names the limit. #}
+                <input type="text" class="form-control form-control-sm" id="cm-agent-name" data-test="cm-agent-name"
                        {{ NO_AUTOFILL }} spellcheck="false" x-model="configMgmt.subagents.name"
+                       maxlength="{{ AGENT_NAME_MAX }}" aria-describedby="cm-agent-name-rule"
                        :readonly="!configMgmt.subagents.isNew" placeholder="my-agent">
+                <div class="form-hint small mt-1 mb-2" id="cm-agent-name-rule" data-test="cm-agent-name-rule">
+                  Lowercase letters, digits and hyphens. Start with a letter. At most
+                  {{ AGENT_NAME_MAX }} characters.
+                </div>
                 {# TASK-449.5: the backend rewrote the file's old `mcpServers` mapping as the list
                    form on load. Say so before the operator saves, since the shown text is no
                    longer byte-identical to the file on disk. Above the label, so the label stays

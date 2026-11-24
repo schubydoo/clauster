@@ -15,9 +15,12 @@ touched.
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import sys
+import tempfile
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -25,6 +28,7 @@ import yaml
 from fastapi.testclient import TestClient
 
 from _growth import count_ops
+from clauster import config_file_writer as fw
 from clauster import config_write as cw
 from clauster import config_write_subagents as sub
 from clauster.app import create_app
@@ -218,6 +222,178 @@ def test_over_long_name_is_a_typed_error_not_an_oserror(tmp_path: Path, op: str)
             sub.write_project_agent(tmp_path, name, _content(name), None)
         else:
             sub.delete_project_agent(tmp_path, name)
+
+
+# --- TASK-468: a whole path too long for the host is a 422 that names the limit ----------
+
+_REAL_MKSTEMP = tempfile.mkstemp
+
+
+def _mkstemp_failing_past(limit: int, exc_for: Callable[[], OSError]) -> Callable[..., object]:
+    """Return a ``mkstemp`` that fails like Windows when the temp path is over ``limit``."""
+
+    def _mkstemp(*args: object, **kwargs: object) -> object:
+        path = f"{kwargs['dir']}{os.sep}{kwargs['prefix']}{'x' * 8}{kwargs['suffix']}"
+        if len(path) > limit:
+            raise exc_for()
+        return _REAL_MKSTEMP(*args, **kwargs)  # type: ignore[call-overload]
+
+    return _mkstemp
+
+
+def _enoent() -> OSError:
+    # What `os.open` raises on Windows for a path over MAX_PATH without long paths.
+    return FileNotFoundError(errno.ENOENT, "No such file or directory")
+
+
+def _agents_parent(project: Path) -> Path:
+    agents = sub.project_agents_dir(project)
+    agents.mkdir(parents=True, exist_ok=True)
+    return agents.resolve()
+
+
+def test_windows_path_limit_is_a_422_that_names_the_longest_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Simulates a Windows host without long paths on any OS: the write path counts the
+    # temp file against 259 characters, and `mkstemp` fails past it the way Windows does.
+    monkeypatch.setattr(sub, "_is_windows", lambda: True)
+    monkeypatch.setattr(fw.tempfile, "mkstemp", _mkstemp_failing_past(259, _enoent))
+    room = 259 - (len(str(_agents_parent(tmp_path))) + 1 + 16)
+    assert 0 < room < sub.MAX_NAME_CHARS  # the host limit binds before the name cap
+    fits = "a" * room
+    sub.write_project_agent(tmp_path, fits, _content(fits), None)  # the boundary saves
+    too_long = "a" * (room + 1)
+    with pytest.raises(cw.InvalidCandidateError) as exc_info:
+        sub.write_project_agent(tmp_path, too_long, _content(too_long), None)
+    message = str(exc_info.value)
+    assert "Windows without long paths allows 259" in message
+    assert f"use a name of at most {room} characters" in message
+    assert isinstance(exc_info.value.__cause__, FileNotFoundError)
+    assert not (sub.project_agents_dir(tmp_path) / f"{too_long}.md").exists()
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="making the deep project needs the long paths this test simulates being off",
+)
+def test_windows_path_limit_names_a_shorter_project_path_when_no_name_fits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sub, "_is_windows", lambda: True)
+    monkeypatch.setattr(fw.tempfile, "mkstemp", _mkstemp_failing_past(259, _enoent))
+    deep = tmp_path / ("d" * 120) / ("e" * 120)
+    deep.mkdir(parents=True)
+    with pytest.raises(cw.InvalidCandidateError, match="move the project to a shorter path"):
+        sub.write_project_agent(deep, "a", _content("a"), None)
+
+
+def test_windows_short_path_oserror_is_not_reported_as_too_long(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Only a path over the limit is mapped. Any other failure keeps its own type.
+    monkeypatch.setattr(sub, "_is_windows", lambda: True)
+    monkeypatch.setattr(fw.tempfile, "mkstemp", _mkstemp_failing_past(0, _enoent))
+    with pytest.raises(FileNotFoundError):
+        sub.write_project_agent(tmp_path, "short", _content("short"), None)
+
+
+def test_windows_long_path_with_another_error_keeps_that_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # With long paths on, a long path can fail for a real reason; that is not the limit.
+    monkeypatch.setattr(sub, "_is_windows", lambda: True)
+    denied = _mkstemp_failing_past(259, lambda: PermissionError(errno.EACCES, "denied"))
+    monkeypatch.setattr(fw.tempfile, "mkstemp", denied)
+    name = "a" * sub.MAX_NAME_CHARS
+    with pytest.raises(PermissionError):
+        sub.write_project_agent(tmp_path, name, _content(name), None)
+
+
+def _winerror_206() -> OSError:
+    exc = OSError(errno.EINVAL, "The filename or extension is too long")
+    exc.winerror = 206  # type: ignore[attr-defined]
+    return exc
+
+
+@pytest.mark.parametrize(
+    ("exc_for", "expected"),
+    [
+        (lambda: OSError(errno.ENAMETOOLONG, "File name too long"), "too long for this file"),
+        (_winerror_206, "Windows without long paths allows 259"),
+    ],
+    ids=["enametoolong", "winerror-206"],
+)
+def test_a_too_long_path_error_from_the_os_is_a_422(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exc_for, expected: str
+) -> None:
+    monkeypatch.setattr(sub, "_is_windows", lambda: False)
+    monkeypatch.setattr(fw.tempfile, "mkstemp", _mkstemp_failing_past(0, exc_for))
+    with pytest.raises(cw.InvalidCandidateError, match=expected):
+        sub.write_project_agent(tmp_path, "my-agent", _content(), None)
+
+
+@pytest.mark.parametrize(
+    ("exc_for", "raised"),
+    [(_winerror_206, cw.InvalidCandidateError), (lambda: PermissionError(13, "no"), OSError)],
+    ids=["too-long", "other"],
+)
+def test_the_pre_write_read_maps_only_a_too_long_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exc_for, raised: type
+) -> None:
+    # The write first reads the current file (the read-only check). Windows can refuse a
+    # long path there with an error that is not FileNotFoundError.
+    real_read = Path.read_bytes
+
+    def _read(self: Path) -> bytes:
+        if self.name == "my-agent.md":
+            raise exc_for()
+        return real_read(self)
+
+    monkeypatch.setattr(Path, "read_bytes", _read)
+    with pytest.raises(raised):
+        sub.write_project_agent(tmp_path, "my-agent", _content(), None)
+    assert not (sub.project_agents_dir(tmp_path) / "my-agent.md").exists()
+
+
+def test_posix_oserror_that_is_not_about_length_is_reraised(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sub, "_is_windows", lambda: False)
+    denied = _mkstemp_failing_past(0, lambda: PermissionError(errno.EACCES, "denied"))
+    monkeypatch.setattr(fw.tempfile, "mkstemp", denied)
+    with pytest.raises(PermissionError):
+        sub.write_project_agent(tmp_path, "my-agent", _content(), None)
+
+
+# --- TASK-466: a YAML-keyword name is a string only when quoted ---------------------------
+
+_YAML_KEYWORD_NAMES = ("yes", "no", "on", "off", "true", "false", "null")
+
+
+@pytest.mark.parametrize("name", _YAML_KEYWORD_NAMES)
+def test_quoted_yaml_keyword_name_saves_and_reads_back_as_the_name(
+    tmp_path: Path, name: str
+) -> None:
+    # The form the dashboard writes for these names. Both loaders must read the string:
+    # PyYAML (YAML 1.1, this surface's checks) and YAML 1.2 (what Claude Code parses).
+    header = f'name: "{name}"\ndescription: d'
+    sub.write_project_agent(tmp_path, name, f"---\n{header}\n---\nbody\n", None)
+    doc = sub.read_project_agent(tmp_path, name)
+    assert doc["exists"] is True and doc["editable"] is True
+    assert doc["frontmatter"]["name"] == name
+    assert yaml.safe_load(header)["name"] == name
+    assert cw.yaml12_view(header)["name"] == name
+
+
+@pytest.mark.parametrize("name", _YAML_KEYWORD_NAMES)
+def test_plain_yaml_keyword_name_is_refused_with_a_quoting_hint(name: str) -> None:
+    # PyYAML loads each one as a boolean or null. The refusal says so, instead of the
+    # old "must be lowercase letters, digits, and hyphens", which `yes` already is.
+    text = f"---\nname: {name}\ndescription: d\n---\nbody\n"
+    with pytest.raises(cw.InvalidCandidateError, match="'name' must be a string") as exc_info:
+        sub.validate_agent_content(text, expected_name=name)
+    assert 'quote it, as in name: "yes"' in str(exc_info.value)
 
 
 def test_builtin_agent_names_match_the_documented_list() -> None:
@@ -2197,6 +2373,37 @@ def test_route_saves_the_documented_mcp_list_and_refuses_the_mapping(
     agents = projects_root / "alpha" / ".claude" / "agents"
     assert not (agents / "map-agent.md").exists()
     assert (agents / "list-agent.md").read_bytes() == listed.encode("utf-8")
+
+
+def test_route_windows_path_limit_is_a_422_not_a_500(
+    write_config, tmp_path, projects_root, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # TASK-468 through the route: the simulated Windows failure was an OSError the route's
+    # ConfigWriteError mapper never caught, so TestClient raised it (a 500 in production).
+    monkeypatch.setattr(sub, "_is_windows", lambda: True)
+    monkeypatch.setattr(fw.tempfile, "mkstemp", _mkstemp_failing_past(259, _enoent))
+    name = "a" * sub.MAX_NAME_CHARS
+    body = {"scope": "project", "project": "alpha", "confirm": "alpha", "content": _content(name)}
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.put(_agent_url(name), json=body)
+    assert resp.status_code == 422, resp.text
+    assert "Windows without long paths allows 259" in resp.json()["detail"]
+
+
+def test_route_longest_name_on_this_host_saves_or_names_the_limit(
+    write_config, tmp_path, projects_root
+) -> None:
+    # No simulation: on a host whose paths fit (Linux, macOS, Windows with long paths) the
+    # longest name saves; on Windows without long paths it is the 422 above, never a 500.
+    name = "a" * sub.MAX_NAME_CHARS
+    body = {"scope": "project", "project": "alpha", "confirm": "alpha", "content": _content(name)}
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.put(_agent_url(name), json=body)
+    if resp.status_code == 422:
+        assert sys.platform == "win32", resp.text
+        assert "Windows without long paths allows 259" in resp.json()["detail"]
+    else:
+        assert resp.status_code == 200, resp.text
 
 
 def test_route_get_returns_the_converted_list_form_and_put_saves_it(

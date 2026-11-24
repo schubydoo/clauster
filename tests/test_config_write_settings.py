@@ -558,6 +558,32 @@ def test_route_invalid_scope_is_422(write_config, tmp_path) -> None:
         assert c.put(_URL, json={"scope": "bogus", "settings": {}}).status_code == 422
 
 
+@pytest.mark.parametrize(
+    ("raw", "reason"),
+    [
+        (b'{"env": {sk-ant-api03-SECRETVALUE: 1}}', "is not valid JSON: Expecting property name"),
+        (b'{"env": "sk-ant-\xff-SECRETVALUE"}', "is not valid UTF-8 (at byte 16)"),
+    ],
+    ids=["broken-json", "not-utf8"],
+)
+def test_route_local_load_of_a_broken_file_names_the_reason_not_the_content(
+    write_config, tmp_path, projects_root, raw: bytes, reason: str
+) -> None:
+    # TASK-512: the dashboard now shows this `detail` in the load banner. It must say what
+    # is wrong and where, and carry no byte of the file (the codec's own message quoted
+    # the bad byte, so the UTF-8 detail gives the position only).
+    local = projects_root / "alpha" / ".claude" / "settings.local.json"
+    local.parent.mkdir(parents=True)
+    local.write_bytes(raw)
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.get(f"{_URL}?scope=local&project=alpha")
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert reason in detail
+    assert "SECRETVALUE" not in detail and "sk-ant" not in detail
+    assert "\\xff" not in detail and "0xff" not in detail
+
+
 def test_route_bogus_scope_404_when_disabled(write_config, tmp_path) -> None:
     # Invisible-surface invariant (#819/#768 ordering fix): the capability gate
     # runs BEFORE the scope-enum check, so a bogus scope 404s (not 422) when
