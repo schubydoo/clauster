@@ -3148,22 +3148,28 @@ class SessionRunner:
             inst.instance_id: (
                 inst.starter_session_id,
                 inst.environment_id,
-                inst.bridge_raw_log_path or inst.bridge_debug_log_path,
+                inst.bridge_raw_log_path,
+                inst.bridge_debug_log_path,
             )
             for inst in self._registry._instances.values()
             if inst.channel == "remote-control"
             and inst.resume_mode == "standard"
             and inst.session_url is not None
         }
-        keep = {target[2] for target in targets.values() if target[2] is not None}
 
         def _scan() -> list[str]:
             """Read the logs off the loop: the tracker's lock is held across a file read."""
-            self._session_ends.keep_only(keep)
+            # The raw file is missing when redaction was turned on after this bridge started:
+            # the bridge still writes the public log then.
+            sources = {
+                iid: raw if raw is not None and raw.exists() else public
+                for iid, (_sid, _env, raw, public) in targets.items()
+            }
+            self._session_ends.keep_only({p for p in sources.values() if p is not None})
             return [
                 iid
-                for iid, (sid, env, path) in targets.items()
-                if sid is not None and self._session_ends.has_ended(path, sid, env)
+                for iid, (sid, env, _raw, _public) in targets.items()
+                if sid is not None and self._session_ends.has_ended(sources[iid], sid, env)
             ]
 
         try:
@@ -3177,7 +3183,7 @@ class SessionRunner:
             if (
                 inst is not None
                 and inst.starter_session_id == targets[iid][0]
-                and (inst.bridge_raw_log_path or inst.bridge_debug_log_path) == targets[iid][2]
+                and (inst.bridge_raw_log_path, inst.bridge_debug_log_path) == targets[iid][2:]
             ):
                 inst.retire_starter_session()
 

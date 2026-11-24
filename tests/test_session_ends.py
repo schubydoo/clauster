@@ -55,6 +55,8 @@ def test_another_sessions_archive_does_not_end_this_one(tmp_path):
         # Session text quoted inside a websocket frame must not count.
         f'2026-11-17T02:23:01.000Z [DEBUG] [bridge:ws] <<< {{"text":"POST /v1/code/sessions/'
         f'{_CSE}/archive"}}\n',
+        # A frame that quotes the whole log line, prefix included.
+        f'2026-11-17T02:23:01.000Z [DEBUG] [bridge:ws] <<< {{"text":"{_ARCHIVED.strip()}"}}\n',
         f"2026-11-17T02:23:01.000Z [DEBUG] [bridge:api] GET /v1/code/sessions/{_CSE}/archive\n",
         f"2026-11-17T02:23:01.000Z [DEBUG] [bridge:api] POST /v1/code/sessions/{_CSE}/unarchive\n",
     ],
@@ -101,6 +103,15 @@ def test_a_truncated_log_is_read_from_the_start(tmp_path):
     assert tracker.has_ended(path, _SID, _ENV) is False
     path.write_bytes((_REGISTERED + _ARCHIVED).encode())  # shorter than the old offset
     assert tracker.has_ended(path, _SID, _ENV) is True
+
+
+def test_lines_are_found_across_read_chunks(tmp_path, monkeypatch):
+    # A chunk boundary inside the line must neither lose it nor read it twice as two halves.
+    monkeypatch.setattr("clauster.session_ends._READ_SIZE", 7)
+    path = _log(tmp_path, _REGISTERED + "x\n" + _ARCHIVED)
+    tracker = SessionEndTracker()
+    assert tracker.has_ended(path, _SID, _ENV) is True
+    assert tracker._logs[path].offset == path.stat().st_size
 
 
 def test_no_log_path_cannot_vouch_for_the_session():

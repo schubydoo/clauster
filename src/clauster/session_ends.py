@@ -13,13 +13,15 @@ from __future__ import annotations
 import logging
 import os
 import threading
-from collections.abc import Collection
+from collections.abc import Collection, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import bridge_log
 
 _log = logging.getLogger("clauster.session_ends")
+
+_READ_SIZE = 1024 * 1024
 
 
 @dataclass
@@ -78,16 +80,31 @@ class SessionEndTracker:
             if os.fstat(fh.fileno()).st_size < state.offset:
                 state.offset = 0  # truncated or replaced: what it already said stays true
             fh.seek(state.offset)
-            for raw in fh:
-                if not raw.endswith(b"\n"):
-                    break  # still being written: read it whole on the next pass
-                state.offset += len(raw)
-                # Byte filters first: almost no line of a debug log needs a decode.
-                if b"/archive" in raw:
-                    key = bridge_log.archived_session_key(raw.decode("utf-8", "replace"))
+            pending = b""
+            while chunk := fh.read(_READ_SIZE):
+                data = pending + chunk
+                end = data.rfind(b"\n") + 1
+                pending = data[end:]  # still being written: read it whole on the next pass
+                if not end:
+                    continue
+                state.offset += end
+                complete = data[:end]
+                for line in _lines_naming(complete, b"/archive"):
+                    key = bridge_log.archived_session_key(line)
                     if key is not None:
                         state.archived.add(key)
-                if b"nvironment" in raw:
-                    state.environments |= bridge_log.environment_ids_in(
-                        raw.decode("utf-8", "replace")
-                    )
+                for line in _lines_naming(complete, b"nvironment"):
+                    state.environments |= bridge_log.environment_ids_in(line)
+
+
+def _lines_naming(data: bytes, needle: bytes) -> Iterator[str]:
+    """Yield each line of newline-terminated ``data`` that holds ``needle``.
+
+    Searches the bytes first, because almost no line of a debug log needs a decode.
+    """
+    at = data.find(needle)
+    while at >= 0:
+        start = data.rfind(b"\n", 0, at) + 1
+        stop = data.index(b"\n", at)
+        yield data[start:stop].decode("utf-8", "replace")
+        at = data.find(needle, stop + 1)

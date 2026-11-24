@@ -832,6 +832,8 @@ class SpawnCoordinator:
             # here would resume into a new, empty worktree and orphan the one holding the
             # session's uncommitted work.
             instance.worktree_name = resume_target.worktree_name
+            if instance.resume_mode == "standard":
+                instance.carry_ended_session(resume_target)
         # Register under instance_id — the stable UUID minted by RemoteControlInstance
         # (via new_instance_id default_factory) or carried over from the instance
         # being resumed, NOT the project name.

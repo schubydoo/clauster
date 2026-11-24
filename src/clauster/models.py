@@ -303,6 +303,14 @@ class RemoteControlInstance(BaseModel):
         """
         self._ended_session_id = self.starter_session_id
 
+    def carry_ended_session(self, previous: RemoteControlInstance) -> None:
+        """Keep ``previous``'s ended session id on the row that replaces it at a Resume.
+
+        The archive line is in the old bridge's log, and the pointer can seed the same id
+        into the new row, so the new log alone would report that session as live.
+        """
+        self._ended_session_id = previous._ended_session_id
+
     @computed_field  # type: ignore[prop-decorator]
     @property
     def claude_session_uuid_usable(self) -> bool:

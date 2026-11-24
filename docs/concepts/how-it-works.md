@@ -76,8 +76,8 @@ The **Open in Claude** link opens the bridge's first session while that session
 is live. After that session ends, the link and the QR code open the bridge's
 environment, where you pick or start a session. Clauster reads the end of the
 session from the bridge's debug log on its next poll. If it has no log for the
-bridge, for example after you adopt an external bridge, it uses the environment
-link from the start.
+standard bridge, for example after you adopt an external bridge, it uses the
+environment link from the start.
 
 The dashboard's live log view is Clauster tailing the bridge's debug log file
 and streaming it to your browser over a WebSocket, with session URLs and

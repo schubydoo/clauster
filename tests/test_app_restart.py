@@ -218,6 +218,16 @@ def test_force_restart_archives_env_drops_pointer_and_skips_session(runner_confi
         client.delete(f"/api/instances/{iid}")
 
 
+def test_open_qr_panel_reloads_when_the_link_changes(runner_config):
+    # TASK-557: the image URL must change when session_url goes null, or an open panel keeps
+    # showing the code of the session that ended.
+    app, _runner = _bridge_app(runner_config)
+    with TestClient(app) as client:
+        page = client.get("/").text
+    assert '(this.rowOf(name) || {}).session_url ? "s" : "e"' in page
+    assert '"&link=" + linkState' in page
+
+
 def test_force_restart_carries_the_old_pointers_identity(runner_config, monkeypatch):
     # TASK-561: the CLI copies identity from the pointer it reuses, so a replacement written
     # without it would keep this environment on the 4-hour TTL for good.

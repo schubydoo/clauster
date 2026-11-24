@@ -1817,7 +1817,8 @@ class Rediscovery:
         )
         # The pointer keeps naming the first session after it ends (TASK-557), and with no
         # log nothing can show that it is still live, so the row uses the environment link.
-        if bridge_debug_log_path is None:
+        # Standard only: this builder also makes pty cards, and their links are not in scope.
+        if resume_mode == "standard" and bridge_debug_log_path is None:
             instance.retire_starter_session()
         return instance
 

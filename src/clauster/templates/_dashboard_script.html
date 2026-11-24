@@ -6312,8 +6312,11 @@
       qrSrc(name) {
         const id = this.bridgeIdOf(name);
         if (!id) return "";
+        // The link state is in the URL so that an open panel reloads when the starter
+        // session ends: the code then opens the environment, not the ended session.
+        const linkState = (this.rowOf(name) || {}).session_url ? "s" : "e";
         return ROOT + "/api/instances/" + encodeURIComponent(id)
-          + "/qr?t=" + (this.qrNonce[name] || 0);
+          + "/qr?t=" + (this.qrNonce[name] || 0) + "&link=" + linkState;
       },
       toggleQr(name) {
         const opening = !this.qrOpen[name];

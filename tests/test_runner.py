@@ -4807,6 +4807,108 @@ async def test_retire_pass_skips_a_row_replaced_during_the_scan(runner_config, m
     assert row.session_url == "https://claude.ai/code/session_new?from=cli"
 
 
+async def test_retire_pass_skips_a_row_whose_log_changed_during_the_scan(
+    runner_config, tmp_path, monkeypatch
+):
+    runner = _make_runner(runner_config)
+    row = RemoteControlInstance(
+        project="alpha",
+        label="a",
+        starter_session_id="session_same",
+        bridge_debug_log_path=tmp_path / "old.log",
+    )
+    runner._registry._instances[row.instance_id] = row
+
+    def _moved_mid_scan(_path, _sid, _env):
+        row.bridge_debug_log_path = tmp_path / "new.log"  # same session id, new process
+        return True
+
+    monkeypatch.setattr(runner._session_ends, "has_ended", _moved_mid_scan)
+    await runner._retire_ended_starters()
+    assert row.session_url is not None
+
+
+async def test_pointer_built_pty_card_keeps_its_link_with_no_log(runner_config):
+    # The two modes stay separate: only a standard row loses the link for having no log.
+    ptr = _FakePtr()
+    built = {
+        mode: Rediscovery._instance_from_pointer(
+            "alpha",
+            ptr,
+            label="alpha",
+            spawn_mode="same-dir",
+            permission_mode="default",
+            resume_mode=mode,
+            bridge_proc_start=None,
+            keeper_pid=None,
+            keeper_start_ticks=None,
+            instance_id=None,
+        )
+        for mode in ("pty", "standard")
+    }
+    assert built["pty"].session_url == "https://claude.ai/code/session_x?from=cli"
+    assert built["standard"].session_url is None
+
+
+@pytest.mark.parametrize("ended", [False, True])
+async def test_resume_does_not_relink_a_session_that_ended(runner_config, monkeypatch, ended):
+    # The archive line is in the old log and the pointer can seed the same id again, so
+    # the resumed row must keep what the old row learned.
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    runner = _make_runner(runner_config)
+    first = await runner.spawn("alpha")
+    sid = "session_01RESUMEDBBBBBBBBBBB"
+    first.starter_session_id = sid
+    if ended:
+        assert first.bridge_debug_log_path is not None
+        _append(first.bridge_debug_log_path, _archive_line(sid))
+    await runner.poll_once()
+    await runner.stop(first.instance_id)
+
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "resume")
+
+    class FakePtr:
+        pid, proc_start = 1, "1000"
+        environment_id = "env_01TESTENVAAAAAAAAAAAAAAAA"
+        session_id = sid
+
+    monkeypatch.setattr("clauster.pointers.pointer_for_project", lambda *a, **k: FakePtr())
+    resumed = await runner.resume(first.instance_id)
+    try:
+        assert resumed.status is InstanceStatus.RUNNING
+        assert resumed.starter_session_id == sid
+        if ended:
+            assert resumed.session_url is None
+        else:
+            assert resumed.session_url == f"https://claude.ai/code/{sid}?from=cli"
+    finally:
+        await runner.stop(first.instance_id)
+
+
+async def test_retire_pass_reads_the_public_log_when_the_raw_file_is_missing(
+    runner_config, tmp_path
+):
+    # Redaction turned on after the bridge started: the row names a .raw.log that was never
+    # created, and the bridge still writes the public log.
+    runner = _make_runner(runner_config)
+    public = tmp_path / "alpha-1-1.log"
+    public.write_text("2026-11-17T01:25:00.000Z [DEBUG] x environment_id=env_x\n")
+    row = RemoteControlInstance(
+        project="alpha",
+        label="a",
+        environment_id="env_x",
+        starter_session_id="session_x",
+        bridge_debug_log_path=public,
+        bridge_raw_log_path=tmp_path / "alpha-1-1.raw.log",
+    )
+    runner._registry._instances[row.instance_id] = row
+    await runner._retire_ended_starters()
+    assert row.session_url is not None  # a missing raw file is not a dead session
+    _append(public, _archive_line("session_x"))
+    await runner._retire_ended_starters()
+    assert row.session_url is None
+
+
 async def test_retire_pass_failure_never_breaks_the_tick(runner_config, monkeypatch, caplog):
     runner = _make_runner(runner_config)
     row = RemoteControlInstance(project="alpha", label="a", starter_session_id="session_x")
