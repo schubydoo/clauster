@@ -494,7 +494,7 @@ save is refused (`422`) and the settings file is not changed. This occurs when
 you rename an `env` variable that shows a mask, or when you edit or copy a list
 entry that shows a mask. Type the real value again. In a list, Clauster matches
 each masked entry to the one stored entry that reads the same, so you can
-delete, add and reorder the other entries. A masked entry that reads the same
+delete and reorder entries, the masked ones included, and add new ones. A masked entry that reads the same
 as another one cannot be matched. Then the list must keep its length, and each
 mask must stay in its place. All masks look the same, so to change one masked
 entry of such a list, type the real value of every masked entry in that list.
