@@ -42,7 +42,7 @@ from ..claude_md import (
     read_claude_md,
     write_claude_md,
 )
-from ..config import BYPASS_DESKTOP_HINT, PERMISSION_LABELS
+from ..config import BYPASS_DESKTOP_HINT, CEILING_GATED_MODES, PERMISSION_LABELS
 from ..dependencies import (
     CloneJobsDep,
     CloneTasksDep,
@@ -243,6 +243,9 @@ async def api_project_row(
             # <option> text and the bypass hint render identically here.
             "permission_labels": PERMISSION_LABELS,
             "bypass_desktop_hint": BYPASS_DESKTOP_HINT,
+            # The row's first permission mode reads these two, as in the grid (TASK-480).
+            "default_permission_mode": config.instance_defaults.permission_mode,
+            "ceiling_gated_modes": sorted(CEILING_GATED_MODES),
             # Gate the #837 "Resolve in Server approvals" link on config-write being
             # enabled (its target panel + /api/config-write/* routes 404 when off).
             # The full-page render passes this via _dashboard_context(); the fragment

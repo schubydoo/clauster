@@ -370,6 +370,8 @@ DESKTOP_ONLY_KEYS: dict[str, str] = {
 #: :data:`SCOPE_LIMITED_VALUES` and :data:`DESKTOP_ONLY_KEYS`. A key that only managed
 #: settings or ``~/.claude.json`` hold, a Desktop-only key and a carved key
 #: (:data:`OWNED_KEY_TABS`) are left out, as is ``env``, which has its own table.
+#: ``tests/settings_row_key_types_snapshot.json`` pins every entry (TASK-501): change the
+#: snapshot with the table.
 ROW_KEY_TYPES: dict[str, str | tuple[str, ...]] = {
     # Model and output
     "advisorModel": "string",

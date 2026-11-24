@@ -10,12 +10,14 @@ experimental hosted ``browser`` channel.
 
 from __future__ import annotations
 
+import json
 import sys
 
+import pytest
 from fastapi.testclient import TestClient
 
 from clauster.app import create_app
-from clauster.config import load_config
+from clauster.config import CEILING_GATED_MODES, PERMISSION_LABELS, load_config
 
 # A per-project ceiling that surfaces the gated bypassPermissions option/gate.
 _BYPASS_CEILING = "projects:\n  alpha:\n    allow_bypass_permissions: true\n"
@@ -200,5 +202,89 @@ def test_no_below_the_row_trust_or_bypass_alert(write_config) -> None:
     # in-popover version is a single labelled group. Assert the in-popover markers are
     # the only trust/bypass confirm surfaces.
     assert row.count("I trust the files in this directory") == 1
-    assert row.count("run tools without asking. Type the project name to confirm.") == 1
+    assert row.count("Type the project name to confirm.</p>") == 1
     assert 'x-show="errorOf' in row  # the transient-error alert is untouched
+
+
+def _default_mode(mode: str, extra: str = "") -> str:
+    return f"instance_defaults:\n  permission_mode: {mode}\n{extra}"
+
+
+@pytest.mark.parametrize("mode", ["inherit", "bypassPermissions"])
+@pytest.mark.parametrize("path", ["/", "/api/projects/alpha/row"])
+def test_gated_default_without_ceiling_starts_at_ask_and_says_why(
+    write_config, mode: str, path: str
+) -> None:
+    # TASK-480: the gated default has no <option> on a project without the ceiling, so
+    # the select showed blank and Run sent a mode the server refuses (403). The row now
+    # starts at "default" and says why, in a hint the select is described by. The grid
+    # and the fragment route render the same row.
+    page = _client(write_config, _default_mode(mode)).get(path).text
+    row = page[page.index('data-project="alpha"') :]
+    row = row[: row.index('data-test="launch-pop-end"')]
+    assert "x-data=\"projectRow('alpha', 'default')\"" in row
+    assert 'aria-describedby="perm-effect-alpha perm-gated-alpha"' in row
+    note = row[row.index('data-test="perm-default-gated"') :]
+    note = " ".join(note[: note.index("</p>")].split())
+    label = PERMISSION_LABELS[mode]["short"]
+    assert (
+        f"The configured default, {label}, needs <code>allow_bypass_permissions</code> for"
+        " this project, so it starts at Ask each time." in note
+    )
+
+
+@pytest.mark.parametrize(
+    ("mode", "extra"),
+    [("inherit", _BYPASS_CEILING), ("bypassPermissions", _BYPASS_CEILING), ("plan", "")],
+)
+def test_allowed_default_starts_at_the_configured_mode(write_config, mode, extra) -> None:
+    # With the ceiling on (or a mode it does not gate) the configured default is offered,
+    # so the row starts there and shows no note.
+    row = _client(write_config, _default_mode(mode, extra)).get("/api/projects/alpha/row").text
+    assert f"x-data=\"projectRow('alpha', '{mode}')\"" in row
+    assert 'data-test="perm-default-gated"' not in row
+    assert 'aria-describedby="perm-effect-alpha"' in row
+
+
+def test_inherit_takes_the_same_typed_confirm_as_bypass(write_config) -> None:
+    # TASK-480: start() opens the typed confirm for every ceiling-gated mode, and the
+    # page carries the same set as the backend gate.
+    page = _client(write_config, _BYPASS_CEILING).get("/").text
+    assert f"const CEILING_GATED_MODES = {json.dumps(sorted(CEILING_GATED_MODES))};" in page
+    start = page[page.index("async start(name) {") :]
+    start = start[: start.index("await this._spawn(name);")]
+    assert "if (CEILING_GATED_MODES.includes(this.permMode[name])) {" in start
+    assert "this.confirmBypass[name] = true;" in start
+    # The gate names the mode it confirms: inherit gets its own text and button label.
+    row = page[page.index('data-project="alpha"') :]
+    gate = row[row.index('data-test="bypass-confirm"') : row.index('data-test="launch-pop-end"')]
+    assert "x-show=\"permMode['alpha'] === 'inherit'\"" in gate
+    assert "x-show=\"permMode['alpha'] !== 'inherit'\"" in gate
+    assert "If that is bypassPermissions, they run tools without asking." in gate
+    assert "'Start with no forced mode' : 'Start with bypass'" in gate
+    assert ":disabled=\"(bypassTyped['alpha'] || '') !== 'alpha'\"" in gate
+    # The gate starts permMode, so the picker is locked while either gate is open.
+    select = row[row.index('<select id="perm-alpha"') :]
+    select = select[: select.index(">")]
+    assert ":disabled=\"confirmTrust['alpha'] || confirmBypass['alpha']\"" in select
+    radio = row[row.index(":name=\"'lm-alpha'\"") :]
+    radio = radio[: radio.index(">")]
+    assert ":disabled=\"confirmTrust['alpha'] || confirmBypass['alpha']\"" in radio
+
+
+def test_leaving_desktop_never_snaps_back_to_bypass(write_config) -> None:
+    # A bypassPermissions start mode is not a valid target when leaving Desktop.
+    page = _client(write_config).get("/").text
+    clamp = page[page.index("clampPermForMode() {") :]
+    clamp = clamp[: clamp.index("\n      },")]
+    assert 'this.lperm = startPerm === "bypassPermissions" ? "default" : startPerm;' in clamp
+
+
+def test_typed_confirm_mismatch_names_the_gated_mode(write_config) -> None:
+    # TASK-480: the inherit gate reuses the bypass typed confirm, so its mismatch error must
+    # name No forced mode, as the gate's heading and button do (review nit on PR 1953).
+    page = _client(write_config).get("/").text
+    confirm = page[page.index("confirmBypassStart(name) {") :]
+    confirm = confirm[: confirm.index("\n      },")]
+    assert '(this.permMode[name] === "inherit" ? "No forced mode." : "bypass.")' in confirm
+    assert '"Type the project name exactly to confirm bypass."' not in confirm

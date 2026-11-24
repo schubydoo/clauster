@@ -39,6 +39,7 @@ instance_defaults:
   spawn_mode: same-dir       # same-dir | worktree (git repos) | session
   # `inherit` passes NO --permission-mode flag — the session starts in its own default mode.
   # Gated like bypassPermissions: refused (403) on a project without allow_bypass_permissions.
+  # The dashboard's launch picker starts such a project at `default` instead, and says why.
   permission_mode: default   # default | plan | acceptEdits | auto | dontAsk | bypassPermissions | inherit
   capacity: 32               # max sessions within one bridge (claude --capacity)
   # allow_force_restart: true   # Force restart button: archives the bridge's env, no session (default: false)

@@ -26,6 +26,8 @@ import pytest
 if TYPE_CHECKING:
     from _driver import AgentBrowser
 
+    from .conftest import Server
+
 pytestmark = pytest.mark.e2e
 
 # Run axe over only the WCAG 2.0/2.1 A + AA rule tags and fail on the two highest
@@ -136,3 +138,38 @@ def test_login_page_has_no_serious_a11y_violations(
 
     violations = browser.eval_json(_AXE_RUN)
     assert violations == [], f"login a11y violations (serious/critical): {violations}"
+
+
+# [page scrollWidth, page clientWidth, rendered header tools, rightmost tool edge]
+_HEADER_FIT = (
+    "(() => { const d = document.documentElement;"
+    " const tools = [...document.querySelectorAll('header.navbar .navbar-tools > *')]"
+    ".filter((e) => e.getClientRects().length > 0);"
+    " return [d.scrollWidth, d.clientWidth, tools.length,"
+    " Math.max(...tools.map((e) => e.getBoundingClientRect().right))]; })()"
+)
+
+
+def test_dashboard_header_fits_a_320px_viewport(
+    browser: AgentBrowser, advanced_config_server: Server, e2e_password: str
+) -> None:
+    """At 320 px the header tools wrap instead of pushing the page sideways (TASK-501).
+
+    Auth and config-write are both on, so the header holds its widest set: the readiness
+    pill, the two config buttons, the theme toggle, help and Log out. In one row that
+    set is about 395 px wide.
+    """
+    url = advanced_config_server.url
+    browser.goto(f"{url}/login")
+    browser.fill("#password", e2e_password)
+    browser.click('button[type="submit"]')
+    browser.expect_url(f"{url}/")
+    browser.expect_visible("#project-grid")
+    browser.set_viewport(320, 800)  # the session closes after the test, so no restore
+    browser.expect_visible('header.navbar button[type="submit"]')  # Log out
+    scroll_w, client_w, shown, right = browser.eval_json(_HEADER_FIT)
+    # Six tools, so the check measured the widest header and is not vacuous.
+    assert shown >= 6, shown
+    assert client_w == 320, client_w
+    assert scroll_w <= client_w, (scroll_w, client_w)
+    assert right <= client_w + 0.5, right

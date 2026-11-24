@@ -1,0 +1,227 @@
+{
+  "advisorModel": "string",
+  "agent": "string",
+  "agentPushNotifEnabled": "boolean",
+  "allowedHttpHookUrls": "list",
+  "allowedMcpServers": "list",
+  "alwaysThinkingEnabled": "boolean",
+  "apiKeyHelper": "string",
+  "appendPlugins": "list",
+  "askUserQuestionTimeout": [
+    "60s",
+    "5m",
+    "10m",
+    "never"
+  ],
+  "attribution": "object",
+  "autoCompactEnabled": "boolean",
+  "autoCompactWindow": "number",
+  "autoContinueAtUsageLimit": "boolean",
+  "autoMemoryDirectory": "string",
+  "autoMemoryEnabled": "boolean",
+  "autoScrollEnabled": "boolean",
+  "autoUpdatesChannel": [
+    "latest",
+    "stable"
+  ],
+  "availableModels": "list",
+  "awaySummaryEnabled": "boolean",
+  "awsAuthRefresh": "string",
+  "awsCredentialExport": "string",
+  "axScreenReader": "boolean",
+  "bashEditDiffEnabled": "boolean",
+  "bashOutputMaxChars": "number",
+  "claudeMdExcludes": "list",
+  "cleanupPeriodDays": "number",
+  "companyAnnouncements": "list",
+  "crossSessionInbound": [
+    "accept",
+    "hold",
+    "refuse"
+  ],
+  "defaultShell": [
+    "bash",
+    "powershell"
+  ],
+  "deniedMcpServers": "list",
+  "desktopSessionCleanupPeriodDays": "number",
+  "dialogExpiry": [
+    "60s",
+    "5m",
+    "10m",
+    "never"
+  ],
+  "disableAgentView": "boolean",
+  "disableAllHooks": "boolean",
+  "disableArtifact": "boolean",
+  "disableAutoMode": [
+    "disable"
+  ],
+  "disableBundledSkills": "boolean",
+  "disableClaudeAiConnectors": "boolean",
+  "disableDeepLinkRegistration": [
+    "disable"
+  ],
+  "disableRemoteControl": "boolean",
+  "disableSkillShellExecution": "boolean",
+  "disableWorkflows": "boolean",
+  "disabledMcpjsonServers": "list",
+  "editorMode": [
+    "normal",
+    "vim"
+  ],
+  "effortLevel": [
+    "low",
+    "medium",
+    "high",
+    "xhigh"
+  ],
+  "emojiCompletionEnabled": "boolean",
+  "enableAllProjectMcpServers": "boolean",
+  "enableArtifact": "boolean",
+  "enableWorkflows": "boolean",
+  "enabledMcpjsonServers": "list",
+  "enforceAvailableModels": "boolean",
+  "extraKnownMarketplaces": "object",
+  "fallbackModel": "list",
+  "fastMode": "boolean",
+  "fastModePerSessionOptIn": "boolean",
+  "feedbackDrafts": [
+    "notify",
+    "quiet",
+    "off"
+  ],
+  "feedbackSurveyRate": "number",
+  "fileCheckpointingEnabled": "boolean",
+  "fileSuggestion": "object",
+  "footerLinksRegexes": "list",
+  "forceLoginGatewayUrl": "string",
+  "forceLoginMethod": [
+    "claudeai",
+    "console",
+    "gateway"
+  ],
+  "forceLoginOrgUUID": "string",
+  "gcpAuthRefresh": "string",
+  "httpHookAllowedEnvVars": "list",
+  "idleCompaction": "boolean",
+  "includeCoAuthoredBy": "boolean",
+  "includeGitInstructions": "boolean",
+  "inputNeededNotifEnabled": "boolean",
+  "isolatePeerMachines": "boolean",
+  "keybindingFlavor": [
+    "classic",
+    "readline"
+  ],
+  "language": "string",
+  "maxEffortLevel": [
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max"
+  ],
+  "maxProseWidth": "number",
+  "minimumVersion": "string",
+  "model": "string",
+  "modelOverrides": "object",
+  "modelPicker": "object",
+  "modelSettings": "object",
+  "otelHeadersHelper": "string",
+  "outputStyle": "string",
+  "plansDirectory": "string",
+  "pluginConfigs": "object",
+  "prUrlTemplate": "string",
+  "preferredNotifChannel": [
+    "auto",
+    "terminal_bell",
+    "iterm2",
+    "iterm2_with_bell",
+    "kitty",
+    "ghostty",
+    "notifications_disabled"
+  ],
+  "prefersReducedMotion": "boolean",
+  "prependPlugins": "list",
+  "processWrapper": "string",
+  "promptCacheTtl": [
+    "5m",
+    "1h"
+  ],
+  "promptSuggestionEnabled": "boolean",
+  "remoteControlAtStartup": "boolean",
+  "respectGitignore": "boolean",
+  "respondToBashCommands": "boolean",
+  "sandbox": "object",
+  "showClearContextOnPlanAccept": "boolean",
+  "showThinkingSummaries": "boolean",
+  "showTurnDuration": "boolean",
+  "skillListingBudgetFraction": "number",
+  "skillListingMaxDescChars": "number",
+  "skipAutoPermissionPrompt": "boolean",
+  "skipDangerousModePermissionPrompt": "boolean",
+  "skipWebFetchPreflight": "boolean",
+  "spellcheck": "object",
+  "spinnerTipsEnabled": "boolean",
+  "spinnerTipsOverride": "object",
+  "spinnerVerbs": "object",
+  "sshHostCommands": "list",
+  "statusLine": "object",
+  "subagentPromptCacheTtl": [
+    "5m",
+    "1h"
+  ],
+  "subagentStatusLine": "object",
+  "switchModelsOnFlag": "boolean",
+  "syncClaudeAiPlugins": "boolean",
+  "syncClaudeAiSkills": "boolean",
+  "syntaxHighlightingDisabled": "boolean",
+  "teammateMode": [
+    "in-process",
+    "auto",
+    "tmux",
+    "iterm2"
+  ],
+  "terminalProgressBarEnabled": "boolean",
+  "terminalTitleFromRename": "boolean",
+  "theme": [
+    "auto",
+    "dark",
+    "light",
+    "dark-daltonized",
+    "light-daltonized",
+    "dark-ansi",
+    "light-ansi"
+  ],
+  "timeFormat": [
+    "auto",
+    "12-hour",
+    "24-hour",
+    "24-hour-utc"
+  ],
+  "timeZone": "string",
+  "tui": [
+    "default",
+    "fullscreen"
+  ],
+  "ultracode": "boolean",
+  "useAutoModeDuringPlan": "boolean",
+  "verbose": "boolean",
+  "viewMode": [
+    "default",
+    "verbose",
+    "focus"
+  ],
+  "vimInsertModeRemaps": "object",
+  "voice": "object",
+  "voiceEnabled": "boolean",
+  "wheelScrollAccelerationEnabled": "boolean",
+  "workflowKeywordTriggerEnabled": "boolean",
+  "workflowSizeGuideline": [
+    "unrestricted",
+    "small",
+    "medium",
+    "large"
+  ],
+  "worktree": "object"
+}

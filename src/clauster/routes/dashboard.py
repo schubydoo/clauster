@@ -20,7 +20,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, Response
 
 from .. import __version__, config_write_hooks, config_write_mcp, deps
-from ..config import BYPASS_DESKTOP_HINT, PERMISSION_LABELS
+from ..config import BYPASS_DESKTOP_HINT, CEILING_GATED_MODES, PERMISSION_LABELS
 from ..dependencies import ConfigDep, EngineDep, RenderDep
 from ._common import list_projects
 from .projects import _pty_supported
@@ -50,6 +50,9 @@ async def _dashboard_context(config: ClausterConfig, engine: ClausterEngine) -> 
         "force_restart_enabled": config.instance_defaults.allow_force_restart,
         "default_spawn_mode": config.instance_defaults.spawn_mode,
         "default_permission_mode": config.instance_defaults.permission_mode,
+        # The modes the allow_bypass_permissions ceiling gates: a row whose default is one
+        # of them, without the ceiling, starts at "default" instead (TASK-480).
+        "ceiling_gated_modes": sorted(CEILING_GATED_MODES),
         "default_resume_mode": config.claude.launch_mode,
         # Canonical permission-mode label map (#685): one server-injected source
         # of truth ({mode: {short, long, effect}}) drives the launch <select>, the

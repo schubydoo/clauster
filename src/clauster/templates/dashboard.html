@@ -269,7 +269,9 @@
        drop 'unsafe-inline'. A nonce covers this <style> element but NOT a style
        attribute, so the attributes had to become classes. */
     .pre-wrap { white-space: pre-wrap; }
-    .navbar-tools { gap: .5rem; }
+    /* TASK-501: the tools wrap onto a second line on a phone. With auth and config-write
+       on, the one row is about 395 px wide and pushed a 320 px page sideways. */
+    .navbar-tools { gap: .5rem; flex-wrap: wrap; }
     .hosted-stream { max-height: 360px; overflow-y: auto; font-size: .875rem; }
     .check-glyph { width: 1.1rem; }
     .check-name { min-width: 9rem; }
@@ -3887,8 +3889,13 @@
           <div class="modal-body">
             <!-- shared loading / error states (mirror the usage + config fetchers) -->
             <div class="text-secondary" x-show="transcripts.loading" x-cloak>Loading…</div>
-            <div class="alert alert-danger py-2" data-test="transcript-error"
-                 x-show="transcripts.error" x-cloak x-text="transcripts.error"></div>
+            {# The alert region is mounted with the modal and the error text fills it later, so
+               a failed load is announced (TASK-477). A role=alert element that appears
+               already holding its text is not announced reliably. #}
+            <div role="alert">
+              <div class="alert alert-danger py-2" data-test="transcript-error"
+                   x-show="transcripts.error" x-cloak x-text="transcripts.error"></div>
+            </div>
 
             <!-- session picker: shown until a session is selected -->
             {# A session row's Live transcript button (TASK-269) asked for a session that has
@@ -4021,13 +4028,16 @@
                       x-show="!transcripts.live" x-text="transcriptPositionLabel()"></span>
               </div>
               <div x-show="!transcripts.loading">
-              {# Distinct empty states: a true-empty session vs. a search that matched nothing. #}
+              {# Distinct empty states: a true-empty session vs. a search that matched nothing.
+                 Both read appliedQ, the term the list on screen was filtered with, not the box
+                 text: while a new term waits on the debounce, the text still names the term
+                 whose (empty) result is shown (TASK-477). #}
               <div class="text-secondary small" data-test="transcript-no-matches"
-                   x-show="transcripts.turns.length === 0 && !transcripts.error && !transcripts.queryTooShort && transcripts.q.trim().length >= 2">
-                No messages match “<span x-text="transcripts.q.trim()"></span>”.
+                   x-show="transcripts.turns.length === 0 && !transcripts.error && !transcripts.queryTooShort && transcripts.appliedQ !== ''">
+                No messages match “<span x-text="transcripts.appliedQ"></span>”.
               </div>
               <div class="text-secondary small" data-test="transcript-no-turns"
-                   x-show="transcripts.turns.length === 0 && !transcripts.error && !transcripts.queryTooShort && transcripts.q.trim().length < 2 && !transcripts.live">
+                   x-show="transcripts.turns.length === 0 && !transcripts.error && !transcripts.queryTooShort && transcripts.appliedQ === '' && !transcripts.live">
                 This session has no turns.
               </div>
               <div class="d-flex flex-column gap-2">

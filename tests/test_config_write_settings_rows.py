@@ -13,6 +13,7 @@ fixture and writes only into the isolated tmp home.
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -47,6 +48,26 @@ def test_catalog_entries_are_well_formed() -> None:
             assert len(set(kind)) == len(kind), key
         else:
             assert kind in {"boolean", "number", "string", "object", "list"}, key
+
+
+_ROW_KEY_SNAPSHOT = Path(__file__).parent / "settings_row_key_types_snapshot.json"
+
+
+def test_catalog_matches_the_snapshot() -> None:
+    # TASK-501: pin every entry, so a typo in a suggested value, a changed type or a
+    # deleted key turns this red. Update the snapshot only for a deliberate change, copied
+    # from https://code.claude.com/docs/en/settings-reference. To regenerate it:
+    #   CLAUSTER_UPDATE_ROW_KEY_SNAPSHOT=1 uv run pytest -o addopts="" \
+    #       tests/test_config_write_settings_rows.py -k snapshot
+    actual = {k: list(v) if isinstance(v, tuple) else v for k, v in cws.ROW_KEY_TYPES.items()}
+    if os.environ.get("CLAUSTER_UPDATE_ROW_KEY_SNAPSHOT") == "1":  # pragma: no cover
+        text = json.dumps(dict(sorted(actual.items())), indent=2) + "\n"
+        _ROW_KEY_SNAPSHOT.write_text(text, encoding="utf-8", newline="\n")
+    expected = json.loads(_ROW_KEY_SNAPSHOT.read_text(encoding="utf-8"))
+    added = sorted(actual.keys() - expected.keys())
+    removed = sorted(expected.keys() - actual.keys())
+    changed = sorted(k for k in actual.keys() & expected.keys() if actual[k] != expected[k])
+    assert actual == expected, f"added: {added}, removed: {removed}, changed: {changed}"
 
 
 def test_catalog_holds_no_key_that_no_clauster_scope_reads() -> None:
