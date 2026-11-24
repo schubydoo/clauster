@@ -403,9 +403,9 @@ def test_api_hosted_rechecks_orphans_on_each_poll(write_config, projects_root, m
     """TASK-556: the dashboard's poll is what turns an exited orphan into a lost row."""
 
     async def _gone(instance):
-        return False
+        return True
 
-    monkeypatch.setattr(HostedManager, "_is_orphan", staticmethod(_gone))
+    monkeypatch.setattr(HostedManager, "_agent_gone", staticmethod(_gone))
     manager = HostedManager()
     manager._instances[_HID] = RemoteControlInstance(
         project="alpha",

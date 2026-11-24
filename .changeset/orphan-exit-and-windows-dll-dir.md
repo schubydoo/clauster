@@ -2,4 +2,4 @@
 default: patch
 ---
 
-An orphan Direct Session card now turns into a lost card when its agent exits, and on Windows the binary no longer hands its unpack folder to child processes as a DLL search folder.
+A Direct Session orphan card now shows the session as lost when its agent exits. On Windows, the standalone binary no longer lets child processes search its unpack folder for DLLs.

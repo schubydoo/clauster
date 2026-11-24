@@ -182,11 +182,11 @@ want the full supply-chain check.
     removes them, and puts back your own `LD_LIBRARY_PATH`, before it starts a
     bridge or any other program. So `node`, `npm` and `clauster` behave the same in
     a session as in your shell. On Windows the unpack step also sets a DLL search
-    directory, which is not an environment variable but which Windows passes to
-    every child process. Clauster resets it at start, so a child does not load a
-    DLL from the `_MEI…` directory. A
-    bridge, a pty keeper, a background agent or a claustrum daemon that an older
-    release started keeps the old environment until you restart it. See
+    directory. That is not an environment variable, but Windows passes it to
+    every child process. Clauster resets it when it starts, so a child process
+    does not search the `_MEI…` directory for DLLs. A bridge, a pty keeper, a
+    background agent or a claustrum daemon that an older release started keeps
+    the old environment and DLL directory until you restart it. See
     [the troubleshooting entry](troubleshooting.md#in-a-session-node-fails-with-glibc_238-not-found-or-clauster-cannot-load-libpython).
 
 !!! note "Unsigned for the OS, on purpose"

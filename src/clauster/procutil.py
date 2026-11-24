@@ -670,6 +670,38 @@ def is_killable_hosted(
     )
 
 
+def hosted_agent_gone(
+    pid: int, proc_start: str | float | None, *, start_ticks: int | None
+) -> bool:
+    """Whether there is positive evidence that the hosted agent at ``pid`` has ended.
+
+    The re-check of an orphan row (TASK-556) turns it into a lost row, which drops Kill
+    and lets Resume start a new agent without ending the old one. So "not provably live"
+    (:func:`is_killable_hosted` False) is not enough: an ``AccessDenied`` or a drifted
+    epoch reads the same, and a live agent would get a second one beside it. This is True
+    only when the process is gone, is a zombie, or the pid now holds a different process:
+    a different tick count (exact, drift-immune), or, where create-times do not drift
+    (macOS, Windows), a different create-time. Anything it cannot tell is False.
+    """
+    try:
+        proc = psutil.Process(pid)
+        if proc.status() == psutil.STATUS_ZOMBIE:
+            return True
+        created = proc.create_time()
+    except psutil.NoSuchProcess:
+        return True
+    except psutil.Error:
+        return False
+    if start_ticks is not None:
+        live_ticks = proc_start_ticks(pid)
+        if live_ticks is not None:
+            return live_ticks != start_ticks
+    expected = _expected_epoch(proc_start)
+    if expected is None or start_time_is_drift_prone():
+        return False
+    return abs(created - expected) > _EXACT_PROC_START_TOLERANCE
+
+
 def kill_if_match(
     pid: int, proc_start: str | float | None, *, start_ticks: int | None, boot_id: str | None
 ) -> bool:
@@ -1292,11 +1324,13 @@ def release_bundle_dll_directory() -> bool:
     import ctypes
 
     _bundle_dll_directory = os.add_dll_directory(meipass)
-    if not ctypes.windll.kernel32.SetDllDirectoryW(None):
+    # use_last_error: the reason is saved at the call, before other code can overwrite it.
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    if not kernel32.SetDllDirectoryW(None):
         _log.warning(
             "could not reset the DLL directory; children may search %s for DLLs (%s)",
             meipass,
-            ctypes.WinError(),
+            ctypes.WinError(ctypes.get_last_error()),
         )
         return False
     return True

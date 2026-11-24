@@ -180,9 +180,10 @@ buffer dropped. The view then shows the `· output lost (N frames) ·` marker, a
 the prompt does not come back. While the agent can still wait on a saved
 prompt (an `Error` card whose agent may still run, or an `orphan` card), the
 prompt stays saved, and the text comes back after each restart until you Resume,
-Kill or Forget the card. If the daemon no longer has the agent, the card names
-the prompt once and Clauster deletes the saved copy. That is also the case for a
-card that reads `claustrum connection dropped and the daemon no longer has this
+Kill or Forget the card, or until the agent exits. If the daemon no longer has
+the agent, the card names the prompt once and Clauster deletes the saved copy.
+That is also the case for an `orphan` card whose agent exits, and for a card
+that reads `claustrum connection dropped and the daemon no longer has this
 session` with no `orphan` badge. If the agent ended while Clauster was down, it waits on
 nothing, and Clauster deletes the saved copy without a note.
 
@@ -212,10 +213,12 @@ card shows `claustrum connection lost; reattach failed`. If Clauster cannot
 reconnect at all, every running Direct Session shows `claustrum daemon
 connection lost and the reconnect failed`. In each case, a `claude` process that
 is still alive is shown as an orphan with **Kill**, the same as after a daemon
-restart, so that **Resume** never starts a second agent beside it. The
-dashboard's refresh checks each orphan again. When its `claude` process exits,
-the card loses the `orphan` badge and shows
-`the agent exited after Clauster could not reattach it; session lost`.
+restart, so that **Resume** never starts a second agent beside it. While a
+dashboard is open, each refresh (every 4 seconds) checks each orphan again. When
+its `claude` process exits, the card loses the `orphan` badge and shows
+`the agent exited after Clauster could not reattach it; session lost`, followed
+by the names of any prompts it was waiting on. With no dashboard open, nothing
+checks, and the card keeps its old text until a dashboard opens.
 
 When the connection itself caused the failure, the next daemon connection
 reattaches the session again. If the daemon still has the process, the card
