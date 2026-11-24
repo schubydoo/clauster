@@ -303,6 +303,20 @@ def _is_known_auth_host(host: str) -> bool:
     )
 
 
+def is_known_auth_url(url: str) -> bool:
+    """Whether ``url`` is on a known Claude/Anthropic auth host (see :func:`_is_known_auth_host`).
+
+    The test a reader of a still-growing output uses before it trusts a selection (TASK-566).
+    :func:`extract_authorize_url` prefers a later, better candidate, so its answer on part of
+    the output can change once the rest arrives. A docs page or an unknown host is what it
+    falls back to when nothing better has arrived yet, so that pick waits for the complete
+    output. A pick on a known auth host is a positive match and is trusted at once. That is
+    not final in every case: a known-host page without an authorize path still loses to an
+    authorize URL printed after it.
+    """
+    return _is_known_auth_host(_url_host(url))
+
+
 def extract_authorize_url(output: str) -> str | None:
     """Return the best authorize URL in ``output``, or None if none is present.
 

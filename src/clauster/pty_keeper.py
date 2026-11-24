@@ -1477,8 +1477,8 @@ def stop_keeper(
         return True  # keeper already gone (or PID recycled to a non-keeper)
     procutil.force_kill_tree(keeper_pid)
     # SIGKILL is asynchronous: the process may still be running/zombie for a beat
-    # after force_kill_tree returns, so poll briefly (reaping our own child if it is
-    # one) before reporting the outcome rather than racing the kill.
+    # after force_kill_tree returns, so poll (reaping our own child if it is one)
+    # before reporting the outcome rather than racing the kill.
     # Same guard as the pre-kill gate above: with neither expectation recorded the pair
     # could not be comparable, so the `/proc` read would be discarded on every iteration.
     expecting = (
@@ -1486,7 +1486,12 @@ def stop_keeper(
         or expect_start_ticks is not None
         or expect_boot_id is not None
     )
-    for _ in range(10):
+    # ~5s, not ~1s (TASK-564, TASK-565). Windows `TerminateProcess` only starts the teardown,
+    # and on a loaded CI runner the pid stayed visible to psutil for more than a second after
+    # it; this poll then gave up and the CLI said "failed to stop" for a keeper it had killed.
+    # The bound costs time only when the kill does not land: a kill that does returns on the
+    # first poll that sees the process gone.
+    for _ in range(50):
         procutil.reap_if_exited(keeper_pid)
         if procutil.proc_is_gone(keeper_pid):
             return True

@@ -91,6 +91,23 @@ def test_start_custom_url_is_parsed(shepherd, monkeypatch) -> None:
         shepherd.cancel()
 
 
+def test_start_takes_an_unknown_host_url_only_when_the_window_closes(shepherd, monkeypatch):
+    # TASK-566: a URL on an unknown host is the selection rule's last resort, so start() no
+    # longer takes it the moment it appears (a real link could still follow). It is still
+    # taken, as before, once the start window has closed on a process that is still running.
+    monkeypatch.setenv("FAKE_CLAUDE_LOGIN_MODE", "ready")
+    monkeypatch.setenv("FAKE_CLAUDE_LOGIN_URL", "https://login.example.net/authorize?x=1")
+    monkeypatch.setattr(ls, "START_TIMEOUT_SECONDS", 0.5)
+    try:
+        began = time.monotonic()
+        result = shepherd.start("login")
+        assert result["authorize_url"] == "https://login.example.net/authorize?x=1"
+        assert time.monotonic() - began >= 0.5  # it waited the window out
+        assert shepherd.is_active()  # a usable login: the process still waits for a code
+    finally:
+        shepherd.cancel()
+
+
 def test_start_no_url_fails_closed(shepherd, monkeypatch) -> None:
     # #839 fail-closed contract: if no authorize URL ever appears, start() must raise
     # rather than hang — and the subprocess must be reaped, not leaked.
@@ -123,6 +140,38 @@ def test_start_url_then_immediate_exit_fails_closed(shepherd, monkeypatch) -> No
     assert not shepherd.is_active()
 
 
+def test_start_url_read_only_after_the_exit_names_the_right_reason(shepherd, monkeypatch) -> None:
+    # TASK-465: the deterministic form of the immediate-exit test above. Under load the
+    # wait saw the exit before the reader thread had appended the URL line, so it reported
+    # "exited before printing an authorize URL" while the captured output showed the URL.
+    # Here the reader appends nothing until start() has seen the exit, every time.
+    real_pump = ls._pump_stdout
+
+    def _pump_after_exit(flow) -> None:
+        exit_seen = threading.Event()
+        real_poll = flow.proc.poll
+
+        def _poll():
+            code = real_poll()
+            if code is not None:
+                exit_seen.set()
+            return code
+
+        flow.proc.poll = _poll
+        exit_seen.wait(timeout=10)  # bounded: a hang fails the test instead of the worker
+        real_pump(flow)
+
+    monkeypatch.setattr(ls, "_pump_stdout", _pump_after_exit)
+    monkeypatch.setenv("FAKE_CLAUDE_LOGIN_MODE", "url_then_exit")
+    monkeypatch.setattr(ls, "START_TIMEOUT_SECONDS", 5.0)
+    with pytest.raises(ls.LoginShepherdError) as excinfo:
+        shepherd.start("login")
+    message = str(excinfo.value)
+    assert "exited before the login could proceed" in message
+    assert "https://claude.ai/oauth/authorize?fake=1" in message  # the URL it did print
+    assert not shepherd.is_active()
+
+
 def test_start_url_found_then_process_dies_fails_closed(shepherd, monkeypatch) -> None:
     # The DETERMINISTIC counterpart to the immediate-exit test above. There, the process
     # dies so fast that `start()`'s wait usually already sees the exit. Here the process
@@ -151,10 +200,18 @@ def test_start_bounded_wait_survives_a_slow_url(shepherd, monkeypatch) -> None:
         shepherd.cancel()
 
 
-def test_start_prefers_the_known_host_url_over_a_decoy(shepherd, monkeypatch) -> None:
+# TASK-566: "0.5" holds the decoy alone in the output for five polls. start() then took the
+# decoy as the authorize URL every time; with no pause it did so only when a poll fell between
+# the two lines (seen once on Windows CI).
+_DECOY_GAPS = pytest.mark.parametrize("gap", ["0", "0.5"])
+
+
+@_DECOY_GAPS
+def test_start_prefers_the_known_host_url_over_a_decoy(shepherd, monkeypatch, gap) -> None:
     # A non-Claude https link printed FIRST must not hijack the operator — the extractor
     # prefers the known-host authorize URL over an arbitrary first match.
     monkeypatch.setenv("FAKE_CLAUDE_LOGIN_MODE", "decoy_url")
+    monkeypatch.setenv("FAKE_CLAUDE_LOGIN_DECOY_GAP_SECONDS", gap)
     try:
         result = shepherd.start("login")
         assert result["authorize_url"] == "https://claude.ai/oauth/authorize?fake=1"
@@ -162,12 +219,27 @@ def test_start_prefers_the_known_host_url_over_a_decoy(shepherd, monkeypatch) ->
         shepherd.cancel()
 
 
-def test_start_ignores_a_docs_subdomain_of_a_known_parent(shepherd, monkeypatch) -> None:
+@_DECOY_GAPS
+def test_start_ignores_a_docs_subdomain_of_a_known_parent(shepherd, monkeypatch, gap) -> None:
     # `docs.anthropic.com` (a docs subdomain of the known parent anthropic.com) printed
     # first must NOT be selected — the real claude.ai authorize URL is returned instead.
     monkeypatch.setenv("FAKE_CLAUDE_LOGIN_MODE", "docs_decoy_url")
+    monkeypatch.setenv("FAKE_CLAUDE_LOGIN_DECOY_GAP_SECONDS", gap)
     try:
         result = shepherd.start("login")
+        assert result["authorize_url"] == "https://claude.ai/oauth/authorize?fake=1"
+    finally:
+        shepherd.cancel()
+
+
+@_POSIX_ONLY
+def test_start_setup_token_ignores_a_docs_decoy_held_on_screen(shepherd, monkeypatch) -> None:
+    # The same guard on the setup-token PTY path: its two-poll stability check alone let a
+    # decoy that stayed on screen for two polls through as the authorize URL.
+    monkeypatch.setenv("FAKE_CLAUDE_LOGIN_MODE", "docs_decoy_url")
+    monkeypatch.setenv("FAKE_CLAUDE_LOGIN_DECOY_GAP_SECONDS", "0.5")
+    try:
+        result = shepherd.start("setup-token")
         assert result["authorize_url"] == "https://claude.ai/oauth/authorize?fake=1"
     finally:
         shepherd.cancel()
