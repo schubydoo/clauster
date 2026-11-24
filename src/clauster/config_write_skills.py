@@ -114,13 +114,11 @@ import base64
 import bisect
 import errno
 import itertools
-import math
 import os
 import re
 import stat
 import unicodedata
 from collections.abc import Callable
-from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -244,26 +242,23 @@ def parse_frontmatter(content: str) -> tuple[dict[str, Any], str]:
 # How the CLI reads each frontmatter field (2.1.318, `oPe` and its helpers)
 # ---------------------------------------------------------------------------
 
-#: The characters JavaScript's ``trim`` and ``\s`` match (WhiteSpace and LineTerminator).
-#: Python's ``str.strip`` differs: it also strips ``\x1c``-``\x1f`` and ``\x85``, and it
-#: keeps the BOM, ``\ufeff``.
-_JS_WHITESPACE = (
-    "\t\n\v\f\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008"
-    "\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
-)
+# The JavaScript-compat helpers are THE SAME OBJECTS config_write_subagents uses: aliases of
+# the one copy in config_write, so the two surfaces cannot drift apart (TASK-483).
+_JS_WHITESPACE = cw.JS_WHITESPACE
 _JS_WHITESPACE_RUN_RE = re.compile(f"[{_JS_WHITESPACE}]+")
-#: JavaScript ``parseInt(s, 10)``: optional leading whitespace, an optional sign, then the
-#: longest run of ASCII digits; anything after the digits is ignored.
-_JS_PARSE_INT_RE = re.compile(f"[{_JS_WHITESPACE}]*([+-]?[0-9]+)")
+_JS_PARSE_INT_RE = cw.JS_PARSE_INT_RE
+_js_string = cw.js_string
+_js_parse_int = cw.js_parse_int
+_cli_tool_entries = cw.cli_tool_entries
+_cli_effort = cw.cli_effort
 
 #: The strings the CLI's boolean reader (``bye``) takes as true or false, after it
 #: lowercases and trims the value. The docs list these too.
 _CLI_TRUE_WORDS = frozenset({"1", "true", "yes", "on"})
 _CLI_FALSE_WORDS = frozenset({"0", "false", "no", "off"})
 
-#: The effort levels and the one alias the CLI's effort reader (``dq``) accepts.
-_EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
-_EFFORT_ALIASES = {"med": "medium"}
+#: The effort levels and the one alias the CLI's effort reader accepts.
+_EFFORT_LEVELS = cw.EFFORT_LEVELS
 
 #: The shells ``shell`` accepts (the CLI's ``Va``), compared trimmed and lowercased. Like the
 #: effort levels, suggestions (TASK-524): another string saves with a warning.
@@ -288,10 +283,6 @@ _NAME_REFUSED_CODEPOINTS = frozenset(
 _NAME_REFUSED_RANGES = ((0x1160, 0x11FF), (0xD7B0, 0xD7FF))
 
 
-#: Below this, every integer is exact as a JavaScript number (``Number.MAX_SAFE_INTEGER``).
-_JS_SAFE_INTEGER = 2**53
-
-
 class _IgnoredFieldError(cw.InvalidCandidateError):
     """A recognized field holds a value Claude Code ignores exactly as if it were absent.
 
@@ -303,62 +294,6 @@ class _IgnoredFieldError(cw.InvalidCandidateError):
         """Keep the field name so a conversion on load knows which key to remove."""
         super().__init__(message)
         self.key = key
-
-
-def _js_number_text(value: float) -> str:
-    """Return JavaScript's ``String()`` of a number that is not a small whole number."""
-    if math.isnan(value):
-        return "NaN"
-    if math.isinf(value):
-        return "Infinity" if value > 0 else "-Infinity"
-    sign = "-" if value < 0 else ""
-    # repr() gives the shortest round-tripping digits, as JavaScript does; only the layout
-    # differs (Number::toString, ECMA-262 6.1.6.1.20).
-    digits_tuple = Decimal(repr(abs(value))).normalize().as_tuple()
-    digits = "".join(str(d) for d in digits_tuple.digits)
-    # The caller passes only a finite value that is not zero, so the exponent is an int.
-    point = len(digits) + int(digits_tuple.exponent)  # the decimal point follows this many
-    if len(digits) <= point <= 21:
-        # A whole number past 2**53: JavaScript keeps only the shortest round-trip digits.
-        return sign + digits + "0" * (point - len(digits))
-    if 0 < point <= 21:
-        return sign + digits[:point] + "." + digits[point:]
-    if -6 < point <= 0:
-        return sign + "0." + "0" * (-point) + digits
-    mantissa = digits[0] + ("." + digits[1:] if len(digits) > 1 else "")
-    power = point - 1
-    return f"{sign}{mantissa}e{'+' if power > 0 else '-'}{abs(power)}"
-
-
-def _js_string(value: Any) -> str:
-    """Return JavaScript's ``String(value)`` for a value YAML can produce.
-
-    Raises ``TypeError`` for a value JavaScript never sees from the CLI's YAML loader (a
-    PyYAML date, ``bytes``, a set or an explicitly tagged value), so the caller can refuse
-    the field instead of guessing what Claude Code reads.
-    """
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if value is None:
-        return "null"
-    if isinstance(value, int):
-        try:
-            as_float = float(value)
-        except OverflowError:
-            return "Infinity" if value > 0 else "-Infinity"
-        return str(value) if abs(value) < _JS_SAFE_INTEGER else _js_number_text(as_float)
-    if isinstance(value, float):
-        if value.is_integer() and abs(value) < _JS_SAFE_INTEGER:
-            return str(int(value))
-        return _js_number_text(value)
-    if isinstance(value, str):
-        return value
-    if isinstance(value, list):
-        # Array.prototype.toString: join with ",", null and undefined become "".
-        return ",".join("" if item is None else _js_string(item) for item in value)
-    if isinstance(value, dict):
-        return "[object Object]"
-    raise TypeError(type(value).__name__)
 
 
 def _js_trim(text: str) -> str:
@@ -412,68 +347,6 @@ def _cli_bool(value: Any) -> bool | None:
     if word in _CLI_FALSE_WORDS:
         return False
     return None
-
-
-def _cli_tool_entries(items: list[str]) -> list[str]:
-    """Split tool-list strings into entries the way the 2.1.318 CLI does (its ``fu``).
-
-    A comma or a space ends an entry unless it is inside parentheses, so
-    ``Agent(worker, researcher), Read`` is two entries. Nothing is resolved against a tool
-    registry. The same port as the subagents surface's (PR 1804); share it once both land.
-    """
-    entries: list[str] = []
-    for item in items:
-        current, in_parens = "", False
-        for char in item:
-            if char == "(":
-                in_parens = True
-                current += char
-            elif char == ")":
-                in_parens = False
-                current += char
-            elif char in ", " and not in_parens:
-                if _js_trim(current):
-                    entries.append(_js_trim(current))
-                current = ""
-            elif current or _js_trim(char):
-                current += char
-        if _js_trim(current):
-            entries.append(_js_trim(current))
-    return entries
-
-
-def _js_parse_int(text: str) -> int | None:
-    """Return what JavaScript ``parseInt(text, 10)`` returns, or None for ``NaN``/``Infinity``."""
-    match = _JS_PARSE_INT_RE.match(text)
-    return cw.js_integer(match.group(1)) if match else None
-
-
-def _cli_effort(value: Any) -> str | int | None:
-    """Return the effort the CLI reads from ``value`` (its ``dq``), or None when it ignores it.
-
-    A number must be a whole number, and any whole number counts. Anything else is
-    stringified and lowercased (not trimmed), mapped through the alias table, and matched
-    against the level names. Failing that, ``parseInt`` decides, so ``"3 tokens"`` is ``3``.
-    """
-    if value is None or value == "" or isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        try:
-            float(value)  # past the double range JavaScript holds Infinity: ignored
-        except OverflowError:
-            return None
-        return value
-    if isinstance(value, float) and value.is_integer():
-        return int(value)
-    try:
-        text = _js_string(value)  # a list joins, so `[high]` reads as high
-    except TypeError:
-        return None
-    lowered = text.lower()
-    level = _EFFORT_ALIASES.get(lowered, lowered)
-    if level in _EFFORT_LEVELS:
-        return level
-    return _js_parse_int(lowered)
 
 
 def _label(key: str) -> str:

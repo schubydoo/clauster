@@ -57,6 +57,7 @@ import math
 import re
 import sys
 from collections.abc import Callable, Iterable, Iterator
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal
 
@@ -1900,6 +1901,150 @@ def js_integer(digits: str) -> int | None:
     except OverflowError:
         return None
     return value
+
+
+# ---------------------------------------------------------------------------
+# How the CLI's JavaScript reads a frontmatter value (TASK-483): one copy, so the Skills
+# and subagent surfaces cannot drift apart. Each module aliases these names.
+# ---------------------------------------------------------------------------
+
+#: The characters JavaScript's ``trim`` and ``\s`` match (WhiteSpace and LineTerminator).
+#: Python's ``str.strip`` differs: it also strips ``\x1c``-``\x1f`` and ``\x85``, and it
+#: keeps the BOM, ``\ufeff``.
+JS_WHITESPACE = (
+    "\t\n\v\f\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008"
+    "\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
+)
+#: JavaScript ``parseInt(s, 10)``: optional leading whitespace, an optional sign, then the
+#: longest run of ASCII digits; anything after the digits is ignored.
+JS_PARSE_INT_RE = re.compile(f"[{JS_WHITESPACE}]*([+-]?[0-9]+)")
+#: The effort levels and the one alias the CLI's effort reader accepts (``dq`` in 2.1.318,
+#: ``hZ`` in 2.1.330: the same reader).
+EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+EFFORT_ALIASES = {"med": "medium"}
+#: Below this, every integer is exact as a JavaScript number (``Number.MAX_SAFE_INTEGER``).
+_JS_SAFE_INTEGER = 2**53
+
+
+def js_parse_int(text: str) -> int | None:
+    """Return what JavaScript ``parseInt(text, 10)`` returns, or None for ``NaN``/``Infinity``."""
+    match = JS_PARSE_INT_RE.match(text)
+    # Bounded: int() on 5000 digits raises ValueError (Greptile on PR 1810).
+    return js_integer(match.group(1)) if match else None
+
+
+def _js_number_text(value: float) -> str:
+    """Return JavaScript's ``String()`` of a number that is not a small whole number."""
+    if math.isnan(value):
+        return "NaN"
+    if math.isinf(value):
+        return "Infinity" if value > 0 else "-Infinity"
+    sign = "-" if value < 0 else ""
+    # repr() gives the shortest round-tripping digits, as JavaScript does; only the layout
+    # differs (Number::toString, ECMA-262 6.1.6.1.20).
+    digits_tuple = Decimal(repr(abs(value))).normalize().as_tuple()
+    digits = "".join(str(d) for d in digits_tuple.digits)
+    # The caller passes only a finite value that is not zero, so the exponent is an int.
+    point = len(digits) + int(digits_tuple.exponent)  # the decimal point follows this many
+    if len(digits) <= point <= 21:
+        # A whole number past 2**53: JavaScript keeps only the shortest round-trip digits.
+        return sign + digits + "0" * (point - len(digits))
+    if 0 < point <= 21:
+        return sign + digits[:point] + "." + digits[point:]
+    if -6 < point <= 0:
+        return sign + "0." + "0" * (-point) + digits
+    mantissa = digits[0] + ("." + digits[1:] if len(digits) > 1 else "")
+    power = point - 1
+    return f"{sign}{mantissa}e{'+' if power > 0 else '-'}{abs(power)}"
+
+
+def js_string(value: Any) -> str:
+    """Return JavaScript's ``String(value)`` for a value YAML can produce.
+
+    Raises ``TypeError`` for a value JavaScript never sees from the CLI's YAML loader (a
+    PyYAML date, ``bytes``, a set or an explicitly tagged value), so the caller can refuse
+    the field instead of guessing what Claude Code reads.
+    """
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if value is None:
+        return "null"
+    if isinstance(value, int):
+        try:
+            as_float = float(value)
+        except OverflowError:
+            return "Infinity" if value > 0 else "-Infinity"
+        return str(value) if abs(value) < _JS_SAFE_INTEGER else _js_number_text(as_float)
+    if isinstance(value, float):
+        if value.is_integer() and abs(value) < _JS_SAFE_INTEGER:
+            return str(int(value))
+        return _js_number_text(value)
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        # Array.prototype.toString: join with ",", null and undefined become "".
+        return ",".join("" if item is None else js_string(item) for item in value)
+    if isinstance(value, dict):
+        return "[object Object]"
+    raise TypeError(type(value).__name__)
+
+
+def cli_tool_entries(items: list[str]) -> list[str]:
+    """Split tool-list strings into entries the way the 2.1.318 CLI does (its ``fu``).
+
+    A comma or a space ends an entry unless it is inside parentheses, so
+    ``Agent(worker, researcher), Read`` is two entries. Nothing is resolved against a tool
+    registry.
+    """
+    entries: list[str] = []
+    for item in items:
+        current, in_parens = "", False
+        for char in item:
+            if char == "(":
+                in_parens = True
+                current += char
+            elif char == ")":
+                in_parens = False
+                current += char
+            elif char in ", " and not in_parens:
+                if current.strip(JS_WHITESPACE):
+                    entries.append(current.strip(JS_WHITESPACE))
+                current = ""
+            elif current or char.strip(JS_WHITESPACE):
+                current += char
+        if current.strip(JS_WHITESPACE):
+            entries.append(current.strip(JS_WHITESPACE))
+    return entries
+
+
+def cli_effort(value: Any) -> str | int | None:
+    """Return the effort the CLI reads from ``value``, or None when it ignores it.
+
+    A port of the CLI's effort reader (``dq`` in 2.1.318, ``hZ`` in 2.1.330). A number must
+    be a whole number, and any whole number counts. Anything else is stringified
+    (:func:`js_string`, so a list joins and ``[high]`` reads as high) and lowercased (not
+    trimmed), mapped through the alias table, and matched against the level names. Failing
+    that, ``parseInt`` decides, so ``"3 tokens"`` is ``3``.
+    """
+    if value is None or value == "" or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        try:
+            float(value)  # past the double range JavaScript holds Infinity: ignored
+        except OverflowError:
+            return None
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    try:
+        text = js_string(value)
+    except TypeError:
+        return None
+    lowered = text.lower()
+    level = EFFORT_ALIASES.get(lowered, lowered)
+    if level in EFFORT_LEVELS:
+        return level
+    return js_parse_int(lowered)
 
 
 def _yaml12_scalar(node: yaml.ScalarNode) -> Any:

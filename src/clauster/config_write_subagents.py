@@ -180,6 +180,15 @@ _REQUIRED_FRONTMATTER_KEYS = frozenset({"name", "description"})
 # its tolerance decisions are documented at the definition — change it in config_write.
 _FRONTMATTER_RE = cw.FRONTMATTER_RE
 
+# The JavaScript-compat helpers are aliases of the one copy in config_write, shared with
+# config_write_skills, so the two surfaces cannot drift apart (TASK-483).
+_JS_WHITESPACE = cw.JS_WHITESPACE
+_JS_PARSE_INT_RE = cw.JS_PARSE_INT_RE
+_js_parse_int = cw.js_parse_int
+_cli_tool_entries = cw.cli_tool_entries
+_cli_effort = cw.cli_effort
+_EFFORT_LEVELS = cw.EFFORT_LEVELS
+
 
 class AgentNotFoundError(cw.ConfigWriteError):
     """No subagent file exists at the resolved name (→ 404; raised by the read path only).
@@ -324,43 +333,6 @@ def parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
     return data, text[match.end() :]
 
 
-def _cli_tool_entries(items: list[str]) -> list[str]:
-    """Split tool-list strings into entries the way the 2.1.318 CLI does (its ``fu``).
-
-    A comma or a space ends an entry unless it is inside parentheses, so
-    ``Agent(worker, researcher), Read`` is two entries. Splitting here only decides
-    whether the list is empty or holds ``*``; no entry is resolved against a tool registry.
-    """
-    entries: list[str] = []
-    for item in items:
-        current, in_parens = "", False
-        for char in item:
-            if char == "(":
-                in_parens = True
-                current += char
-            elif char == ")":
-                in_parens = False
-                current += char
-            elif char == ",":
-                if in_parens:
-                    current += char
-                else:
-                    if current.strip(_JS_WHITESPACE):
-                        entries.append(current.strip(_JS_WHITESPACE))
-                    current = ""
-            elif char == " ":
-                if in_parens:
-                    current += char
-                elif current.strip(_JS_WHITESPACE):
-                    entries.append(current.strip(_JS_WHITESPACE))
-                    current = ""
-            elif current or char.strip(_JS_WHITESPACE):
-                current += char
-        if current.strip(_JS_WHITESPACE):
-            entries.append(current.strip(_JS_WHITESPACE))
-    return entries
-
-
 def _validate_string_or_string_list(value: Any, label: str) -> None:
     """Reject ``value`` unless it is a string or list of strings naming at least one tool.
 
@@ -456,16 +428,6 @@ def _validate_disallowed_tools(value: Any, label: str) -> None:
 _CLI_EXPONENT_RE = re.compile(r"^[+-]?([0-9]+(\.[0-9]*)?|\.[0-9]+)[eE][+-]?[0-9]+$")
 _CLI_GROUPED_INT_RE = re.compile(r"^[+-]?[0-9]{1,3}([_,\u00a0\u202f ])[0-9]{3}(?:\1[0-9]{3})*$")
 _CLI_GROUP_SEPARATORS_RE = re.compile(r"[_,\u00a0\u202f ]")
-#: The characters JavaScript's ``trim`` and ``parseInt`` skip (WhiteSpace and
-#: LineTerminator). Python's ``str.strip``/``\s`` differ: they also skip ``\x1c``-``\x1f``
-#: and ``\x85``, and they keep the BOM, ``\ufeff``.
-_JS_WHITESPACE = (
-    "\t\n\v\f\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008"
-    "\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
-)
-#: JavaScript ``parseInt(s, 10)``: optional leading whitespace, an optional sign, then the
-#: longest run of digits; anything after the digits is ignored.
-_JS_PARSE_INT_RE = re.compile(f"[{_JS_WHITESPACE}]*([+-]?[0-9]+)")
 
 
 def _as_js_number(value: int) -> int | None:
@@ -480,13 +442,6 @@ def _as_js_number(value: int) -> int | None:
     except OverflowError:
         return None
     return value
-
-
-def _js_parse_int(text: str) -> int | None:
-    """Return what JavaScript ``parseInt(text, 10)`` returns, or None for ``NaN``/``Infinity``."""
-    match = _JS_PARSE_INT_RE.match(text)
-    # Bounded: int() on 5000 digits raises ValueError (Greptile on PR 1810).
-    return cw.js_integer(match.group(1)) if match else None
 
 
 def _integral(value: float) -> int | None:
@@ -527,38 +482,6 @@ def _validate_positive_int(value: Any, label: str) -> None:
         raise cw.InvalidCandidateError(f"{label} must be a positive integer")
 
 
-#: The CLI's effort levels and its one effort alias (``med``).
-_EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
-_EFFORT_ALIASES = {"med": "medium"}
-
-
-def _cli_effort(value: Any) -> str | int | None:
-    """Return the effort the CLI reads from ``value`` (its ``dq``), or None when it ignores it.
-
-    A number must be a whole number, and any whole number counts. Anything else is
-    stringified and lowercased (not trimmed), mapped through the alias table, and matched
-    against the level names. Failing that, ``parseInt`` decides, so ``"3 tokens"`` is ``3``.
-    """
-    if value is None or value == "" or isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return _as_js_number(value)
-    if isinstance(value, float):
-        whole = _integral(value)
-        if whole is not None:
-            return whole
-        text = repr(value)  # what JavaScript's String() gives for a finite fraction
-    elif isinstance(value, str):
-        text = value
-    else:
-        return None
-    lowered = text.lower()
-    level = _EFFORT_ALIASES.get(lowered, lowered)
-    if level in _EFFORT_LEVELS:
-        return level
-    return _js_parse_int(lowered)
-
-
 def _validate_effort(value: Any, label: str) -> None:
     """Reject ``value`` unless it is text or a number; warn when the CLI reads no level from it.
 
@@ -566,8 +489,11 @@ def _validate_effort(value: Any, label: str) -> None:
     warning, because Claude Code may add a level before this list does. A value that is not
     a string or a number (a list, a mapping, a Boolean), and a string that starts with an
     integer the CLI cannot hold, are refused.
+
+    The shared reader (:func:`~clauster.config_write.cli_effort`) also reads a list, as the
+    CLI does; this surface reads the scalar YAML types only, so a list is still refused.
     """
-    if _cli_effort(value) is not None:
+    if isinstance(value, (str, int, float)) and _cli_effort(value) is not None:
         return
     # A string that starts with an integer is a number the CLI could not hold (Infinity).
     if not isinstance(value, str) or not value or _JS_PARSE_INT_RE.match(value.lower()):
