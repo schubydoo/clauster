@@ -645,6 +645,74 @@ def test_recompute_project_ranks_populates_name_sort(write_config):
     )
 
 
+def _script_fn(page: str, head: str) -> str:
+    """The body of the dashboard method whose definition starts with ``head``."""
+    m = re.search(re.escape(head) + r"(.*?)\n      \},", page, re.S)
+    assert m is not None, f"{head!r} not found in rendered script"
+    return m.group(1)
+
+
+def test_project_names_is_a_live_copy_that_insert_card_extends(write_config):
+    # TASK-521: `projectNames` was the page-load PROJECT_NAMES array itself and nothing ever
+    # changed it, so a project created from the dashboard never reached the config window's
+    # Project picker (or the project-wide loops) until a reload.
+    page = _client(write_config).get("/").text
+    assert "projectNames: [...PROJECT_NAMES]," in page
+    assert "projectNames: PROJECT_NAMES," not in page
+    insert = _script_fn(page, "async insertCard(name, proj) {")
+    assert "this._addProjectName(name);" in insert
+    # Added in the place a reload would put it: discovery sorts by lowercased name.
+    add = _script_fn(page, "_addProjectName(name) {")
+    assert "if (this.projectNames.includes(name)) return;" in add
+    assert "const key = (n) => n.toLowerCase();" in add
+    assert "this.projectNames = names;" in add  # a new array, so Alpine sees the change
+    assert "this._projectNamesSeq += 1;" in add  # an older /api/projects answer is dropped
+
+
+def test_project_wide_loops_read_the_live_project_names(write_config):
+    # TASK-521: the batched readiness load ran over the page-load list only, so a project
+    # created since (here, after Trust all) never had its readiness refreshed.
+    page = _client(write_config).get("/").text
+    preflight = _script_fn(page, "async loadAllPreflight() {")
+    assert "const names = this.projectNames.slice();" in preflight
+    assert "PROJECT_NAMES" not in preflight
+    failed = _script_fn(page, "_allPreflightFailed(seqs, why) {")
+    assert "for (const n of Object.keys(seqs)) {" in failed
+    init = _script_fn(page, "async init() {")
+    assert "const names = this.projectNames.slice();" in init
+    assert "PROJECT_NAMES" not in init
+    trust_all = _script_fn(page, "async trustAll() {")
+    assert "this._setProjectNames(projects);" in trust_all
+    assert trust_all.index("this._setProjectNames(projects);") < trust_all.index(
+        "this.loadAllPreflight();"
+    )
+
+
+def test_refresh_project_names_is_single_flight_and_fails_soft(write_config):
+    # TASK-521: opening the config window re-reads the discovered projects, one request at a
+    # time, and keeps the list it has when the read fails.
+    page = _client(write_config).get("/").text
+    # A second caller waits on the read in flight instead of going on with the old list.
+    shared = _script_fn(page, "refreshProjectNames() {")
+    assert "if (!projectNamesInflight) {" in shared
+    assert "return projectNamesInflight;" in shared
+    assert ".finally(() => { projectNamesInflight = null; });" in shared
+    assert "let projectNamesInflight = null;" in page  # script scope, not Alpine state
+    read = _script_fn(page, "async _readProjectNames() {")
+    assert 'fetch(ROOT + "/api/projects", { signal: ctrl.signal })' in read
+    assert "setTimeout(() => ctrl.abort(), this.projectNamesTimeoutMs)" in read  # bounded
+    assert "if (seq !== this._projectNamesSeq || !Array.isArray(list)) return;" in read
+    assert "console.error(" in read  # a failed read keeps the list but leaves a trace
+    # A non-OK answer logs its status too; a 401 stays silent (it redirects to log in).
+    assert "if (this._authExpired(res)) return;" in read
+    assert "if (!res.ok) {" in read
+    assert 'console.error("project list refresh: HTTP " + res.status' in read
+    assert "this._authExpired(res) || !res.ok" not in read
+    # The answer REPLACES the list (a merge would keep a removed project offered).
+    replace = _script_fn(page, "_setProjectNames(projects) {")
+    assert "this.projectNames = projects.map((p) => p && p.name)" in replace
+
+
 def test_project_row_order_style_uses_object_not_clobbering_string():
     # The bug #655 MISSED: the non-name-sort CSS `order` must be applied via an Alpine OBJECT
     # :style binding ({ order: ... }) — NOT a STRING ('order:' + n). Alpine writes a string :style
@@ -1588,12 +1656,16 @@ def test_dashboard_transcript_position_indicator(write_config):
 def test_dashboard_live_session_row_has_transcript_button(write_config):
     # #866: the live desktop/bridge session row carries its own read-only Transcript
     # trigger (distinct data-test from the project-row one), wired to openTranscripts
-    # with the row's project, and hidden for ANY worktree-spawn bridge (standard or
-    # interactive) whose transcript lives under a different cwd (not in this viewer).
+    # with the row's project. TASK-488: it is NOT hidden for a worktree-spawn bridge any
+    # more, since the project-keyed list and the live set both include worktree sessions.
     page = _client(write_config).get("/").text
     assert 'data-test="transcript-trigger-session"' in page
     assert "openTranscripts(i.project)" in page  # dynamic, per live session
-    assert "i.spawn_mode !== 'worktree'" in page  # worktree-spawn gated (mode-agnostic)
+    tag = page[page.rindex("<button", 0, page.index('data-test="transcript-trigger-session"')) :]
+    tag = tag[: tag.index(">")]
+    assert "x-show" not in tag, "the row's Transcript button must show for every bridge row"
+    assert "spawn_mode" not in tag
+    assert "i.spawn_mode !== 'worktree'" not in page
 
 
 def test_dashboard_bridge_session_row_has_live_transcript_button(write_config):

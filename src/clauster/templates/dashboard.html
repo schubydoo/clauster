@@ -992,14 +992,13 @@
                   {% endif %}
                   {# Read-only transcript viewer trigger on the live-session row (#866): opens the
                      same project-keyed session-history modal as the project row, with this bridge's
-                     live session sorted to the top (live-first). Hidden for ANY worktree-spawn bridge
-                     (standard OR interactive): a worktree session runs in its own cwd, so its .jsonl
-                     lands under a different sanitized-cwd dir and is neither listed by this
-                     project-keyed viewer nor by live_session_uuids (runner.py) — the button would open
-                     transcripts that don't include this session. Distinct data-test from the project-row one. #}
+                     live session sorted to the top (live-first). Shown for worktree-spawn bridges
+                     too (TASK-488): a worktree session's .jsonl lands under a different
+                     sanitized-cwd dir, but the project-keyed list (usage.transcript_paths_for) and
+                     the live set (runner.live_session_uuids) both include the project's worktrees.
+                     Distinct data-test from the project-row one. #}
                   <button type="button" class="btn btn-sm btn-ghost-secondary" data-test="transcript-trigger-session"
                           @click="openTranscripts(i.project)"
-                          x-show="i.spawn_mode !== 'worktree'" x-cloak
                           :title="'View read-only session transcripts for ' + i.project"
                           :aria-label="'View transcripts for ' + i.project">
                     <svg class="ico me-1" aria-hidden="true"><use href="#ic-page"/></svg>Transcript</button>
@@ -2159,6 +2158,16 @@
               <label class="form-label small mb-1" for="cm-project">Project</label>
               <select class="form-select form-select-sm" id="cm-project" data-test="cm-project"
                       x-model="configMgmt.project" @change="configMgmtReload()">
+                {# TASK-521: a project removed since it was picked stays named in the box as a
+                   disabled choice, instead of the box showing a stale or blank pick. It must
+                   be :selected itself: x-model only re-applies when configMgmt.project changes,
+                   so when the old option is removed the browser would show the first listed
+                   project while the model still names the removed one. #}
+                <template x-if="configMgmtProjectGone()">
+                  <option :value="configMgmt.project" disabled :selected="true"
+                          data-test="cm-project-gone-option"
+                          x-text="configMgmt.project + ' (not found)'"></option>
+                </template>
                 <template x-for="p in projectNames" :key="p">
                   <option :value="p" :selected="p === configMgmt.project" x-text="p"></option>
                 </template>
@@ -2166,6 +2175,12 @@
               <div class="text-secondary small mt-1" x-show="projectNames.length === 0" x-cloak>
                 No projects yet — create one first.
               </div>
+              {# Always mounted and empty while the pick is valid: a status region shown by
+                 x-show is skipped by screen readers, a text change is announced.
+                 text-warning-emphasis: plain text-warning misses AA contrast on white. #}
+              <div class="text-warning-emphasis text-break small" role="status" data-test="cm-project-gone"
+                   :class="configMgmtProjectGone() ? 'mt-1' : ''"
+                   x-text="configMgmtProjectGoneText()"></div>
             </div>
 
             <!-- Surface tabs -->

@@ -166,7 +166,10 @@ Common mechanics across the modal:
   project-level scopes. Subagents have no project-local scope (Claude Code has
   no local directory for them). The Skills tab has a Local scope for
   [skill visibility](#skill-visibility) only, because Claude Code has no local
-  skills folder.
+  skills folder. The picker reads the list of projects each time the modal
+  opens, so it includes a project you created after the page loaded. If the
+  selected project was removed from the host, the picker shows it as "not
+  found", and nothing loads or saves until you pick another project.
 - **Typed confirmation** — every document save asks you to type the scope
   name; destructive list actions (delete, reset, plugin install) have their
   own typed confirms. An install from a marketplace's list is the exception, see
