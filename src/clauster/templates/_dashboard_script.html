@@ -4574,13 +4574,16 @@
           if (res.ok) {
             // An update returns what it changed (TASK-517); every other action has no
             // `message`, and the banner falls back to "Saved.".
-            const d = await res.json().catch(() => ({}));
+            const d = await res.clone().json().catch(() => ({}));
             if (c.gen !== gen) return;
             pl.result = d && typeof d.message === "string" ? d.message : "";
             // Enable, Disable and a plugin Update cannot change what a marketplace offers.
             const refresh = url.includes("/marketplaces/")
               ? body.op === "update" : body.op === "install" || body.op === "uninstall";
-            c.saved = true; c.warnings = []; await this._loadPlugins(gen, body.op, refresh);
+            c.saved = true;
+            // A marketplace Remove warns when Claude Code still lists the name (TASK-514).
+            if (!(await this._configMgmtTakeWarnings(res, () => c.gen === gen))) return;
+            await this._loadPlugins(gen, body.op, refresh);
           }
           else await this._configMgmtWriteErr(res);
         } catch (e) { this._configMgmtWriteFailed(e, gen, "Action failed."); }
@@ -4868,7 +4871,10 @@
           return "Declared at " + there.join(" and ") + scopes + ", not at " + here + " scope. Remove it there.";
         }
         const none = "Not declared at " + here + " scope, so Remove is not offered here.";
-        if (c.scope === "user") return none + " A project can declare it at Project or Local scope.";
+        // TASK-514: the same manual step and cost as the server's Remove warning.
+        const manual = " To drop it from the list, run `claude plugin marketplace remove "
+          + m.name + "` in a terminal. That command also uninstalls its plugins in every scope and project, and can delete their saved options, secrets and data.";
+        if (c.scope === "user") return none + " A project can declare it at Project or Local scope." + manual;
         // Name what this editor did not read, so the note never claims a scope it skipped.
         const read = this._configMgmtDeclaredScopes();
         const failed = read.filter((s) => s !== c.scope && !Array.isArray(c.plugins.declared[s]));
@@ -4879,7 +4885,7 @@
             + words + (failed.length === 1 ? " scope." : " scopes.");
         }
         if (!read.includes("user")) tail += " User scope can declare it, and this editor does not open User scope.";
-        return none + tail;
+        return none + tail + manual;
       },
       configMgmtMarketScopeLink(m) {
         const [s] = this._configMgmtMarketScopesElsewhere(m);

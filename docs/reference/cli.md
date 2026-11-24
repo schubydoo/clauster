@@ -299,7 +299,11 @@ Headless **write** commands spawn and stop bridges through that same engine —
 identical mode policy, singleton cap, and option validation to the dashboard. Both
 take `--json`; `start` exits non-zero on failure (`2` = bad request — unknown
 project, untrusted directory, invalid option; `1` = clauster tried and could not —
-bridge cap or launch failure). They are meant for driving clauster with **no
+bridge cap, launch failure, or a new bridge that ended in `error`). When a new
+bridge ends in `error`, `start` prints the reason on stderr, and `--json` still
+prints the instance on stdout with `"status": "error"`. A bridge that is still
+coming up reports `starting` and exits `0`, so read `clauster status` to see how
+it ends. They are meant for driving clauster with **no
 server running**, but a concurrent live server is safe: the two processes
 serialize their per-project spawn/stop sections on a cross-process file lock in
 the deployment state dir, the spawn re-checks the on-disk bridge record under

@@ -202,10 +202,10 @@ def test_save_warnings_are_shown_and_announced(write_config):
     live = re.findall(r'<div [^>]*data-test="cm-save-warnings-live"[^>]*>', html)
     assert len(live) == 1 and 'role="status"' in live[0] and "visually-hidden" in live[0]
     # Every configMgmt save success either takes the response's warnings or clears them:
-    # the five routes that answer `warnings` take them, the seven other writes clear them
+    # the six paths that answer `warnings` take them, the six other writes clear them
     # (plus the clear inside the helper itself).
-    assert html.count("await this._configMgmtTakeWarnings(res, ") == 5
-    assert html.count("c.warnings = [];") == 8
+    assert html.count("await this._configMgmtTakeWarnings(res, ") == 6
+    assert html.count("c.warnings = [];") == 7
 
 
 def test_hook_events_match_backend_recognized_events(write_config):
@@ -605,6 +605,12 @@ def test_marketplace_remove_renders_only_where_the_scope_declares_it(write_confi
     assert 'if (!read.includes("user")) tail += " User scope can declare it' in html
     assert '" No other scope that Clauster could read declares it.' in html
     assert 'if (op === "remove" && !this.configMgmtMarketAtScope({ name: name })) return;' in html
+    # TASK-514: a row no scope declares says how to finish, and what that command costs; the
+    # result banner keeps the warning a Remove returned.
+    assert "run `claude plugin marketplace remove " in html
+    assert "uninstalls its plugins in every scope and project" in html
+    assert 'Local scope." + manual;' in html and "return none + tail + manual;" in html
+    assert "if (!(await this._configMgmtTakeWarnings(res, () => c.gen === gen))) return;" in html
     assert "data-test=\"'cm-market-readonly-' + m.name\"" in html
     assert "data-test=\"'cm-market-switch-scope-' + m.name\"" in html
 

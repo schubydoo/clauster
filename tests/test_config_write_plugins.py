@@ -1180,6 +1180,14 @@ def test_route_marketplaces_declared_corrupt_settings_is_422(
 
 # --- POST /api/config-write/marketplaces/action -------------------------------------
 
+_REMOVE_MARKET = {
+    "scope": "project",
+    "project": "alpha",
+    "confirm": "alpha",
+    "op": "remove",
+    "name": "market",
+}
+
 
 def test_route_marketplaces_action_add_success(
     write_config, tmp_path, projects_root, monkeypatch
@@ -1260,23 +1268,87 @@ def test_route_marketplaces_action_add_missing_source_is_422(
 def test_route_marketplaces_action_remove_success(
     write_config, tmp_path, projects_root, monkeypatch
 ) -> None:
-    argv_file = tmp_path / "argv.json"
-    monkeypatch.setenv("FAKE_CLAUDE_PLUGIN_ARGV_FILE", str(argv_file))
+    argv_log = tmp_path / "argv.jsonl"
+    monkeypatch.setenv("FAKE_CLAUDE_PLUGIN_ARGV_LOG", str(argv_log))
     monkeypatch.setenv("FAKE_CLAUDE_PLUGIN_STDOUT", "Successfully removed marketplace: market")
+    monkeypatch.setenv("FAKE_CLAUDE_PLUGIN_MARKETPLACE_LIST_STDOUT", "[]")
     with _client(write_config, tmp_path, _ON) as c:
-        resp = c.post(
-            "/api/config-write/marketplaces/action",
-            json={
-                "scope": "project",
-                "project": "alpha",
-                "confirm": "alpha",
-                "op": "remove",
-                "name": "market",
-            },
-        )
+        resp = c.post("/api/config-write/marketplaces/action", json=_REMOVE_MARKET)
         assert resp.status_code == 200
-    argv = json.loads(argv_file.read_text())["argv"]
-    assert argv == ["marketplace", "remove", "market", "--scope", "project"]
+        assert "warnings" not in resp.json()  # the name left the list: nothing to report
+    calls = [json.loads(line)["argv"] for line in argv_log.read_text().splitlines()]
+    assert calls == [
+        ["marketplace", "remove", "market", "--scope", "project"],
+        ["marketplace", "list", "--json"],
+    ]
+
+
+def test_route_marketplace_remove_warns_when_the_cli_still_lists_it(
+    write_config, tmp_path, projects_root, monkeypatch
+) -> None:
+    # TASK-514, CLI 2.1.330 from the home directory: exit 0, and the entry stays listed.
+    monkeypatch.setenv("FAKE_CLAUDE_PLUGIN_STDOUT", "Successfully removed marketplace: market")
+    monkeypatch.setenv(
+        "FAKE_CLAUDE_PLUGIN_MARKETPLACE_LIST_STDOUT",
+        json.dumps([{"name": "market", "source": "directory", "path": "/srv/market"}]),
+    )
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.post("/api/config-write/marketplaces/action", json=_REMOVE_MARKET)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    [warning] = body["warnings"]
+    assert "still lists 'market'" in warning
+    assert "`claude plugin marketplace remove market`" in warning
+    assert "uninstalls its plugins in every scope and project" in warning
+    assert "--scope" not in warning
+
+
+def test_route_marketplace_remove_ignores_another_name_in_the_list(
+    write_config, tmp_path, projects_root, monkeypatch
+) -> None:
+    monkeypatch.setenv(
+        "FAKE_CLAUDE_PLUGIN_MARKETPLACE_LIST_STDOUT",
+        json.dumps(["not-a-row", {"name": "other", "source": "directory"}]),
+    )
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.post("/api/config-write/marketplaces/action", json=_REMOVE_MARKET)
+    assert resp.status_code == 200
+    assert "warnings" not in resp.json()
+
+
+def test_route_marketplace_remove_failed_read_is_reported_not_a_400(
+    write_config, tmp_path, projects_root, monkeypatch
+) -> None:
+    # The removal committed, so a failed read after it must not look like a failed Remove.
+    monkeypatch.setenv("FAKE_CLAUDE_PLUGIN_EXIT_CODE_MARKETPLACE_LIST", "1")
+    monkeypatch.setenv("FAKE_CLAUDE_PLUGIN_STDERR", "list failed")
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.post("/api/config-write/marketplaces/action", json=_REMOVE_MARKET)
+    assert resp.status_code == 200
+    [warning] = resp.json()["warnings"]
+    assert "could not read the marketplace list" in warning
+
+
+def test_route_marketplace_second_remove_never_says_omit_scope(
+    write_config, tmp_path, projects_root, monkeypatch
+) -> None:
+    # TASK-514: the CLI's exact text on a second Remove. The dashboard has no way to drop
+    # --scope, so that advice must not reach the operator.
+    monkeypatch.setenv("FAKE_CLAUDE_PLUGIN_EXIT_CODE", "1")
+    monkeypatch.setenv(
+        "FAKE_CLAUDE_PLUGIN_STDERR",
+        "✘ Failed to remove marketplace: Marketplace 'market' is not declared in project "
+        "settings. Omit --scope to remove it from all scopes.",
+    )
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.post("/api/config-write/marketplaces/action", json=_REMOVE_MARKET)
+    assert resp.status_code == 404
+    detail = resp.json()["detail"]
+    assert "--scope" not in detail
+    assert "not declared at Project scope" in detail
+    assert "`claude plugin marketplace remove market`" in detail
+    assert "uninstalls its plugins in every scope and project" in detail
 
 
 def test_route_marketplaces_action_remove_rejects_leading_dash_name(

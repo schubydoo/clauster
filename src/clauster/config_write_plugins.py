@@ -101,7 +101,14 @@ against the current docs (``code.claude.com/docs/en/plugins/cli-reference``,
   ``--scope`` is always passed explicitly here, matching the confirm token's own
   scope. Removing an unknown name is an error ("not found"), and so is a name that
   the chosen scope does not declare ("is not declared in user settings"); both
-  map to a 404.
+  map to a 404. An exit 0 does not prove that the name left the merged list. Confirmed
+  on 2.1.328 and 2.1.330: run from the home directory, where the user settings file is
+  also the project settings file, ``--scope user`` clears the declaration but keeps the
+  ``known_marketplaces.json`` entry and the plugins. Run from any other directory, the
+  same command drops the entry and uninstalls the marketplace's plugins, **including
+  another project's project-scope install**, and so does an unscoped remove. So this
+  module never finishes a removal by changing the directory or dropping ``--scope``:
+  the route reads the list afterward and tells the operator what is left (TASK-514).
 * ``claude plugin marketplace list --json`` / ``claude plugin marketplace update
   [name]`` — **neither takes ``--scope``**: confirmed live that ``list`` reflects
   ``~/.claude/plugins/known_marketplaces.json``, a single merged pool independent
@@ -437,8 +444,8 @@ def _raise_for_failure(op: str, ident: str, proc: subprocess.CompletedProcess) -
     A "not found"/"not installed" message maps to the appropriate typed 404 — but
     **only for the verbs where "not found" means the named entity is genuinely
     absent** (uninstall/update/enable/disable of an absent id, install of a plugin
-    absent from its marketplace, marketplace remove/update of an unknown name, and
-    marketplace remove at a scope that does not declare the name).
+    absent from its marketplace, marketplace remove/update of an unknown name).
+    :func:`cli_marketplace_remove` handles a name that the scope does not declare.
     An ``add`` (``marketplace-add``) is deliberately **excluded**: its ``source``
     is a URL/path/repo the CLI must fetch, so a failed add commonly reports
     ``fatal: repository '…' not found`` — a git/network *failure*, not an absent
@@ -457,10 +464,7 @@ def _raise_for_failure(op: str, ident: str, proc: subprocess.CompletedProcess) -
     shown = _shown_source(ident)
     raw = (proc.stderr or proc.stdout or "").strip()
     detail = cw.redact_secret_lines(raw.replace(ident, shown) if ident else raw)
-    absent = (op not in _NEVER_NOT_FOUND_OPS and bool(_NOT_FOUND_RE.search(detail))) or (
-        op == "marketplace-remove" and bool(_NOT_DECLARED_RE.search(detail))
-    )
-    if absent:
+    if op not in _NEVER_NOT_FOUND_OPS and _NOT_FOUND_RE.search(detail):
         if op.startswith("marketplace"):
             raise MarketplaceNotFoundError(detail)
         raise PluginNotFoundError(detail)
@@ -659,11 +663,59 @@ def cli_marketplace_remove(
     (confirmed via ``--help``), which would let a single project-scope-confirmed
     request reach into another scope's settings file — this module never does
     that; every mutation stays confined to the one scope its confirm token named.
-    Removing an unknown name raises :class:`MarketplaceNotFoundError` (→ 404).
+    Removing an unknown name raises :class:`MarketplaceNotFoundError` (→ 404). So does a
+    name this scope does not declare, with Clauster's own text: the CLI's says "Omit
+    --scope", which the dashboard cannot do (TASK-514).
     """
     validate_marketplace_name(name)
     proc = _run(binary, ["marketplace", "remove", name, "--scope", scope], cwd=cwd, run=run)
+    if proc.returncode != 0 and _NOT_DECLARED_RE.search(f"{proc.stderr}\n{proc.stdout}"):
+        raise MarketplaceNotFoundError(
+            f"Marketplace {name!r} is not declared at {scope.capitalize()} scope, so there is "
+            "nothing to remove there. If Claude Code still lists it, to drop it from the list, "
+            f"{_marketplace_cli_step(name)}"
+        )
     _raise_for_failure("marketplace-remove", name, proc)
+
+
+def _marketplace_cli_step(name: str) -> str:
+    """Return the manual way to drop ``name`` from the CLI's list, and what it also removes.
+
+    Clauster never runs this command: it reaches past the one scope the operator confirmed.
+    """
+    return (
+        f"run `claude plugin marketplace remove {name}` in a terminal. That command also "
+        "uninstalls its plugins in every scope and project, and can delete their saved "
+        "options, secrets and data."
+    )
+
+
+def marketplace_is_listed(
+    binary: str, cwd: Path, name: str, *, run: RunFn = subprocess.run
+) -> bool:
+    """Return whether ``claude plugin marketplace list`` still holds ``name``."""
+    entries = _list_marketplaces_raw(binary, cwd, run=run)
+    return any(isinstance(entry, dict) and entry.get("name") == name for entry in entries)
+
+
+def describe_marketplace_remove(name: str, *, listed: bool | None) -> str | None:
+    """Return the warning for a Remove that exited 0, or ``None`` when the name is gone.
+
+    ``listed`` is the read of the merged list after the removal, ``None`` when that read
+    failed. The declaration is gone either way, so neither case is an error (TASK-514).
+    """
+    if listed is None:
+        return (
+            "Clauster could not read the marketplace list, so it cannot say whether "
+            f"Claude Code still lists {name!r}."
+        )
+    if not listed:
+        return None
+    return (
+        f"Claude Code still lists {name!r}. Another scope or project can still declare it, "
+        "and any plugins installed from it stay installed. If another scope declares it, "
+        f"remove it there. Otherwise, to drop it from the list, {_marketplace_cli_step(name)}"
+    )
 
 
 def cli_marketplace_update(

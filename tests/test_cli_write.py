@@ -198,6 +198,62 @@ def test_start_surfaces_warnings_on_stderr(cfg, capsys):
     assert "no worktree — risky" in capsys.readouterr().err
 
 
+def test_start_ending_in_error_exits_1_with_the_reason_on_stderr(cfg, capsys):
+    # TASK-515: the row exists, so spawn raised nothing, but the bridge did not start.
+    inst = _inst(status=InstanceStatus.ERROR, error_detail="not logged in\n  run claude login")
+    _FakeEngine.outcome = SpawnOutcome(instance=inst, created=True, warnings=["w1"])
+    assert main(["start", "-c", cfg, "alpha"]) == 1
+    captured = capsys.readouterr()
+    assert "failed to start abc12345 (alpha)" in captured.out and "started" not in captured.out
+    assert "w1" in captured.err
+    assert "bridge abc12345 (alpha) failed to start: not logged in run claude login" in (
+        captured.err
+    )
+    assert "clauster logs abc12345" in captured.err
+
+
+def test_start_json_ending_in_error_keeps_its_shape_and_exits_1(cfg, capsys):
+    ok = _inst(status=InstanceStatus.RUNNING)
+    _FakeEngine.outcome = SpawnOutcome(instance=ok, created=True)
+    assert main(["start", "-c", cfg, "alpha", "--json"]) == 0
+    ok_captured = capsys.readouterr()
+    assert ok_captured.err == ""
+    ok_keys = set(json.loads(ok_captured.out))
+
+    inst = _inst(status=InstanceStatus.ERROR, error_detail="not logged in")
+    _FakeEngine.outcome = SpawnOutcome(instance=inst, created=True)
+    assert main(["start", "-c", cfg, "alpha", "--json"]) == 1
+    captured = capsys.readouterr()
+    data = json.loads(captured.out)  # stdout stays one parseable JSON document
+    assert set(data) == ok_keys
+    assert data["status"] == "error" and data["error_detail"] == "not logged in"
+    assert "failed to start: not logged in" in captured.err
+
+
+def test_start_ending_in_error_without_a_detail_still_says_so(cfg, capsys):
+    # A launch OSError leaves ERROR with no captured detail.
+    _FakeEngine.outcome = SpawnOutcome(instance=_inst(status=InstanceStatus.ERROR), created=True)
+    assert main(["start", "-c", cfg, "alpha"]) == 1
+    assert "failed to start: no reason was captured" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("status", [InstanceStatus.STARTING, InstanceStatus.RUNNING])
+def test_start_that_has_not_failed_still_exits_0(cfg, capsys, status):
+    # A slow bridge stays STARTING and the poll loop promotes it: that is not a failure.
+    _FakeEngine.outcome = SpawnOutcome(instance=_inst(status=status), created=True)
+    assert main(["start", "-c", cfg, "alpha"]) == 0
+    captured = capsys.readouterr()
+    assert captured.out.startswith("started ") and "failed" not in captured.err
+
+
+def test_start_handing_back_an_existing_row_is_not_a_failed_start(cfg, capsys):
+    # Nothing launched in this call, so the row's state is not this call's failure.
+    inst = _inst(status=InstanceStatus.ERROR)
+    _FakeEngine.outcome = SpawnOutcome(instance=inst, created=False, reason="already live")
+    assert main(["start", "-c", cfg, "alpha"]) == 0
+    assert "already running" in capsys.readouterr().out
+
+
 @pytest.mark.parametrize(
     ("exc", "code", "needle"),
     [

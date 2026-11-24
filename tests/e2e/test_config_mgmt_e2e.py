@@ -2991,6 +2991,11 @@ def test_config_mgmt_marketplaces_remove_only_where_the_scope_declares(
     browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
     removes = [a for a in _plugin_calls(server, "marketplace") if a[1:2] == ["remove"]]
     assert removes == [["marketplace", "remove", "empty", "--scope", "user"]]
+    # TASK-514: this fake's list still holds `empty`, as the real CLI's can after an exit 0.
+    browser.expect_text('[data-test="cm-save-warnings"]', "Claude Code still lists 'empty'.")
+    browser.expect_text(
+        '[data-test="cm-save-warnings"]', "`claude plugin marketplace remove empty`"
+    )
 
     # Local scope of alpha declares neither: both rows link to the scope that does.
     browser.click('[data-test="cm-scope-local"]')

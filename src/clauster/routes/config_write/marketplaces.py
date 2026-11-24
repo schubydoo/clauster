@@ -253,6 +253,19 @@ async def api_config_write_marketplaces_action(
         result["message"] = config_write_plugins.describe_marketplace_update(
             name, before, after, live=live
         )
+    if op == "remove" and name is not None:
+        # TASK-514: the CLI can exit 0 and keep the name in its merged list. The removal
+        # committed, so a failed read is reported in the warning and is never a 400.
+        listed: bool | None
+        try:
+            listed = await asyncio.to_thread(
+                config_write_plugins.marketplace_is_listed, binary, cwd, name
+            )
+        except config_write.ConfigWriteError:
+            listed = None
+        warning = config_write_plugins.describe_marketplace_remove(name, listed=listed)
+        if warning is not None:
+            result["warnings"] = [warning]
     if name is not None:
         result["name"] = name
     if source is not None:

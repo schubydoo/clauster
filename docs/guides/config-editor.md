@@ -1051,6 +1051,18 @@ The scope rules and the update results below were checked against Claude Code
   declares has no link. The User file is read from Project and Local scope only
   when `config_write.allow_user_scope` is on. Update stays on every row, because
   `marketplace update` takes no scope.
+- **Remove can leave a marketplace in the list, and Clauster says so.** Remove
+  clears the declaration at the scope you chose. Clauster then reads the list
+  again. If Claude Code still lists the marketplace, a warning appears under the
+  result. Two causes are known: another scope or project still declares it, or
+  Claude Code kept the entry after a User scope Remove (seen on 2.1.328 and
+  2.1.330). Plugins from that marketplace stay installed. If another scope
+  declares it, remove it there. Otherwise, run
+  `claude plugin marketplace remove <name>` in a terminal. Do this only if you
+  want the plugins gone too. That command uninstalls the marketplace's plugins
+  in every scope and project, and can delete their saved options, secrets and
+  data. Clauster does not run it for you, because it reaches past the scope that
+  you confirmed.
 - **Show plugins lists the plugins that a marketplace offers.** Clauster runs
   `claude plugin list --available --json` from the directory of the scope that
   you chose. At User scope, that is the home directory of the user that runs
