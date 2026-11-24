@@ -1365,9 +1365,10 @@ def test_route_marketplace_remove_names_the_plugins_the_cli_uninstalled(
     write_config, tmp_path, projects_root, monkeypatch
 ) -> None:
     # TASK-514, CLI 2.1.330: a project-scope Remove can uninstall another project's plugin.
+    # ASCII only: the fake prints in Windows' default stdout encoding, which has no check mark.
     monkeypatch.setenv(
         "FAKE_CLAUDE_PLUGIN_STDOUT",
-        "✔ Successfully removed marketplace: market (from project settings)\n"
+        "Successfully removed marketplace: market (from project settings)\n"
         "Also uninstalled 2 plugins from this marketplace:\n"
         "  fmt@market\n"
         "  lint@market\n"
