@@ -10,6 +10,8 @@ Behaviour is selected via env vars so tests can drive each branch:
                   -> exercises clauster's stderr capture into error_detail
   - pty_not_logged_in: the flag form draws claude's first-run login screen and waits
                   (TASK-533) -> exercises the keeper's not-logged-in ERROR
+  - pty_settings_error: the flag form draws claude's Settings Error screen for a refused
+                  settings value and waits (TASK-554) -> exercises the keeper's settings ERROR
   FAKE_CLAUDE_SLOW = seconds to delay before writing markers (mode=slow)
   FAKE_CLAUDE_AGENTS = JSON string returned by `agents --json`        (default [])
   FAKE_CLAUDE_AGENTS_FILE = path re-read on EVERY `agents --json` call (wins over
@@ -81,6 +83,32 @@ def run_flag_bridge(args):
             b"\x1b[2GLet's\x1b[8Gget\x1b[12Gstarted.\r\r\n\r\r\n"
             b"\x1b[2G\x1b[1mChoose\x1b[9Gthe\x1b[13Gtext\x1b[18Gstyle\x1b[24Gthat"
             b"\x1b[29Glooks\x1b[35Gbest\x1b[40Gwith\x1b[45Gyour\x1b[50Gterminal\r\r\n"
+        )
+        sys.stdout.flush()
+        return _idle_until_signal()
+    if mode == "pty_settings_error":
+        # A settings file holds a value claude refuses: the real flag form (2.1.330, default
+        # 80x24 winsize) draws its Settings Error screen first and waits for a keypress
+        # (TASK-554). These are its bytes, with a neutral path, a shorter rule, and the end
+        # of the first error line, the help lines and the key hint left out.
+        time.sleep(float(os.environ.get("FAKE_CLAUDE_SLOW", "0")))
+        sys.stdout.buffer.write(
+            b"\x1b7\x1b[r\x1b8\x1b[?25h\x1b[?25l\x1b[?2004h\x1b[?2031h\x1b[?1004h\r\r\n"
+            b"\x1b[38;5;220m\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\x1b[39m\r\r\n"
+            b"\x1b[3G\x1b[38;5;220m\x1b[1mSettings\x1b[12GError\x1b[22m\x1b[39m\r\r\n\r\r\n"
+            b"\x1b[3G/srv/projects/alpha/.claude/settings.json\r\r\n"
+            b"\x1b[3G\x1b[38;5;246m\xe2\x94\x94\x1b[5G\x1b[39mpermissions.defaultMode:\x1b[30G"
+            b"\x1b[38;5;246mInvalid\x1b[38Gvalue.\x1b[45GExpected\x1b[54Gone\x1b[58Gof:\x1b[62G"
+            b'"acceptEdits",\x1b[39m\r\r\n\r\r\n'
+            b"\x1b[3G\x1b[38;5;246mFiles\x1b[9Gwith\x1b[14Gerrors\x1b[21Gare\x1b[25Gskipped"
+            b"\x1b[33Gentirely,\x1b[43Gnot\x1b[47Gjust\x1b[52Gthe\x1b[56Ginvalid\x1b[64G"
+            b"settings.\x1b[39m\r\r\n\r\r\n"
+            b"\x1b[3G\x1b[38;5;153m\xe2\x9d\xaf\x1b[5G\x1b[38;5;246m1.\x1b[8G\x1b[38;5;153mFix"
+            b"\x1b[12Gwith\x1b[17GClaude\x1b[39m\r\r\n"
+            b"\x1b[5G\x1b[38;5;246m2.\x1b[8G\x1b[39mExit\x1b[13Gand\x1b[17Gfix\x1b[21G"
+            b"manually\r\r\n"
+            b"\x1b[5G\x1b[38;5;246m3.\x1b[8G\x1b[39mContinue\x1b[17Gwithout\x1b[25Gthese"
+            b"\x1b[31Gsettings\r\r\n"
         )
         sys.stdout.flush()
         return _idle_until_signal()
