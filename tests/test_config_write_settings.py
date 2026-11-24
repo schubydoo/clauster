@@ -1178,6 +1178,40 @@ def test_new_entry_with_a_url_in_a_masked_marketplace_is_refused(tmp_path: Path)
     assert _on_disk(tmp_path)["extraKnownMarketplaces"] == stored
 
 
+def test_unmasked_neighbor_with_a_url_keeps_its_place_in_a_reorder(tmp_path: Path) -> None:
+    # Backend review: an element with no mask binds to the stored element it equals, so
+    # the url check sees its url unchanged. Bound to nothing, it would read as a new url
+    # and refuse a plain reorder.
+    stored = {
+        "inline": {
+            "source": {
+                "source": "settings",
+                "name": "inline",
+                "plugins": [
+                    {
+                        "name": "a",
+                        "source": {"source": "url", "url": "https://a.example/x"},
+                        "headers": {"Cookie": "AC"},
+                    },
+                    {"name": "b", "source": {"source": "url", "url": "https://b.example/y"}},
+                ],
+            }
+        }
+    }
+    h = _store(tmp_path, {"extraKnownMarketplaces": stored})
+    view = cws.read_project_settings(tmp_path)[0]["extraKnownMarketplaces"]
+    plugins = view["inline"]["source"]["plugins"]
+    view["inline"]["source"]["plugins"] = [plugins[1], plugins[0]]
+    cws.write_project_settings(tmp_path, {"extraKnownMarketplaces": view}, h)
+    a, b = stored["inline"]["source"]["plugins"]
+    assert _plugins_on_disk(tmp_path) == [b, a]
+    # Removing the url of the element with no mask sends no credential to a new host.
+    view, h = cws.read_project_settings(tmp_path)
+    del view["extraKnownMarketplaces"]["inline"]["source"]["plugins"][0]["source"]["url"]
+    cws.write_project_settings(tmp_path, view, h)
+    assert _plugins_on_disk(tmp_path) == [{"name": "b", "source": {"source": "url"}}, a]
+
+
 def test_identical_masked_entries_with_a_length_change_are_refused(tmp_path: Path) -> None:
     # Two entries that read the same cannot be told apart: which credential to keep is
     # unknown, so the position rule refuses the shorter list.

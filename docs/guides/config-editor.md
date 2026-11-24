@@ -1187,9 +1187,11 @@ The scope rules and the update results below were checked against Claude Code
   it, or a rename of its entry, refuses the save (`422`). Inside a list, such as
   a `settings` source's `plugins`, the element that holds the URL must also be
   unchanged. It can move, and other elements can be deleted, as for the other
-  masked values above. A new element that adds a `url` to an entry with masked
-  values refuses the save (`422`), because that is a new host. Type the full URL
-  again.
+  masked values above. If such a list holds a masked value, you can also delete
+  an element that has no mask together with its `url`, or remove the `url` of
+  such an element, because no credential goes to a new host. A new element that
+  adds a `url` to an entry with masked values refuses the save (`422`), because
+  that is a new host. Type the full URL again.
 - **The `additionalMarketplaces` spelling is read too.** Claude Code 2.1.232 and
   later accept it as another name for `extraKnownMarketplaces`. When a file sets
   both, the canonical key wins, as it does in Claude Code.
@@ -1502,7 +1504,7 @@ space at the start or the end is part of the name.
 | A subagent has no description and won't edit | It is built-in, or a plugin owns it — the **Source** badge says which | Built-in: nothing to do, there is no file. Plugin: change the plugin, not Clauster |
 | A plugin install or update fails and the message names a command | The marketplace entry runs a command, and Clauster never accepts one for you | Read the command, then run `claude plugin install` from a terminal on the host |
 | Enable or Disable fails with "is already enabled" or "is installed at project scope, not user" | The badge is the merged state, and the chosen scope already has that value or cannot override it | Pick the scope that the message names, or use the Local scope to override a project setting for yourself |
-| A marketplace Update, or a plugin Install or Update, returns `400` with "could not fetch its git source" | git reports that the repository does not exist, or that this host has no access to it. The message names the source URL, masked as in the marketplace list. It is not a missing plugin or marketplace, so it is not a `404` | Make sure that the URL is correct, and that the host can fetch it with the credentials that git on the host has |
+| A marketplace Add or Update, or a plugin Install or Update, returns `400` with "could not fetch its git source" | git reports that the repository does not exist, or that this host has no access to it. When git prints the URL, the message names it. A user name, a password, query values and the fragment show as `********`, and the host stays visible. It is not a missing plugin or marketplace, so it is not a `404` | Make sure that the URL is correct, and that the host can fetch it with the credentials that git on the host has |
 | Removing a marketplace returns `404` with "is not declared at … scope" | A different scope declares it, or Claude Code cannot read that scope's settings file | Make sure that the file is readable. Switch to the scope that declares it and remove it there. If no scope declares it, follow the command in the message |
 | A Settings save returns `422` with "Claude Code reads … only from" | The file holds a key (or a `true` value) that Claude Code ignores at this scope | Remove the key (in Rows mode or Raw JSON), or save it at the scope that the message names. For a `true` value, set it to `false` |
 | A tab shows "existing settings file is not valid JSON" and a line and column | The settings file for that scope is not valid JSON, so Clauster does not show or overwrite it | Fix the file on the host near that line and column, then reopen the tab. Clauster counts the position from the first character that is not blank. So the line number skips blank lines at the start of the file, and on that first line the column also skips its leading spaces and tabs |

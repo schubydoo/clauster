@@ -172,8 +172,12 @@ _NOT_FOUND_RE = re.compile(r"not found|not installed", re.IGNORECASE)
 #: ``update``: the CLI passes git's lines through. The match is an unreachable source,
 #: never an absent plugin or marketplace, so it is never a 404 (TASK-472).
 _GIT_REPO_NOT_FOUND_RE = re.compile(
-    r"repository '([^'\n]*)' not found|remote: Repository not found", re.IGNORECASE
+    r"repository '[^\n]*?' not found|remote: Repository not found", re.IGNORECASE
 )
+
+#: The url in each ``fatal: repository '<url>' not found`` line. Lazy up to ``' not
+#: found``, so a url that holds a ``'`` is still captured whole and masked.
+_GIT_MISSING_URL_RE = re.compile(r"repository '([^\n]*?)' not found", re.IGNORECASE)
 
 #: ``marketplace remove --scope``'s message for a name the chosen scope's settings file
 #: does not declare (``Marketplace 'x' is not declared in user settings``, confirmed on
@@ -485,19 +489,19 @@ def _raise_for_failure(op: str, ident: str, proc: subprocess.CompletedProcess) -
     raw = (proc.stderr or proc.stdout or "").strip()
     if ident:
         raw = raw.replace(ident, shown)
-    git_missing = _GIT_REPO_NOT_FOUND_RE.search(raw)
+    git_missing = _GIT_REPO_NOT_FOUND_RE.search(raw) is not None
     # For the other verbs the repository url comes from a marketplace file, not from
-    # `ident`, so it gets the same masked view before it is shown. For an add, git names
-    # `ident` itself, which is already masked above and is not named a second time.
-    repo = git_missing.group(1) if git_missing else None
-    repo_shown = shown
-    if repo and repo != shown:
-        repo_shown = _shown_source(repo)
-        raw = raw.replace(repo, repo_shown)
+    # `ident`, so EVERY url git names gets the same masked view before it is shown, also
+    # below GitHub's `remote:` line. Longest first, so a url that starts with a shorter one
+    # is masked whole. For an add, git names `ident` itself, which is already masked above
+    # and is not named a second time.
+    urls = [u for u in _GIT_MISSING_URL_RE.findall(raw) if u and u != shown]
+    for url in sorted(set(urls), key=len, reverse=True):
+        raw = raw.replace(url, _shown_source(url))
     detail = cw.redact_secret_lines(raw)
-    if git_missing is not None:
+    if git_missing:
         subject = f" {shown!r}" if ident else ""
-        where = f" {repo_shown!r}" if repo and repo_shown != shown else ""
+        where = f" {_shown_source(urls[0])!r}" if urls else ""
         raise PluginCliError(
             f"claude plugin {op}{subject} could not fetch its git source{where}: git reports "
             "that the repository does not exist, or that this host has no access to it. "
@@ -874,9 +878,10 @@ def _list_marketplaces_raw(binary: str, cwd: Path, *, run: RunFn) -> list[Any]:
     """Return the UNREDACTED ``marketplace list --json`` entries, for this module's own use.
 
     Only :func:`cli_list_marketplaces` (which redacts), :func:`marketplace_plugin_names`
-    (which reads each listed location and returns marketplace and plugin names only), and
-    :func:`marketplace_is_listed` (which returns only whether the name is present) call this;
-    the raw entries never leave the module.
+    (which reads each listed location and returns marketplace and plugin names only),
+    :func:`marketplace_is_listed` (which returns only whether the name is present), and
+    :func:`marketplace_descriptions` (which returns only plugin descriptions, masked by its
+    caller) call this; the raw entries never leave the module.
     """
     proc = _run(binary, ["marketplace", "list", "--json"], cwd=cwd, run=run)
     _raise_for_failure("marketplace-list", "", proc)

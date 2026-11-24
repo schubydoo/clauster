@@ -440,6 +440,53 @@ def test_git_repository_not_found_masks_the_named_source(url: str) -> None:
     assert cw.REDACTION_SENTINEL in message
 
 
+_TOKEN_URL = "https://git.example.com/team/gone.git?token=tok4492secretvalue"
+
+
+@pytest.mark.parametrize(("call", "_subject"), _GIT_MISSING_CALLS)
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        # GitHub's own line comes first, above git's `fatal:` line (backend review).
+        pytest.param(
+            f"remote: Repository not found.\nfatal: repository '{_TOKEN_URL}/' not found\n",
+            id="github-remote-line-first",
+        ),
+        # Every url git names is masked, not only the first.
+        pytest.param(
+            "fatal: repository 'https://git.example.com/a.git/' not found\n"
+            f"fatal: repository '{_TOKEN_URL}' not found\n",
+            id="two-urls",
+        ),
+        # A `'` inside the url is captured whole, never cut where the token is.
+        pytest.param(
+            "fatal: repository 'https://git.example.com/r.git?token=tok4492sec'retvalue' "
+            "not found\n",
+            id="quote-in-url",
+        ),
+        # A url that starts with a shorter, masked one is masked whole: masking the shorter
+        # one first would change the longer one's text and leave its token in place.
+        pytest.param(
+            "fatal: repository 'https://bot:pw@git.example.com/r.git' not found\n"
+            "fatal: repository 'https://bot:pw@git.example.com/r.git?token=tok4492secret' "
+            "not found\n",
+            id="prefix-url",
+        ),
+    ],
+)
+def test_git_repository_not_found_masks_every_named_url(call, _subject: str, stderr: str) -> None:
+    run, _calls = _fake_run(rc=1, stderr=stderr)
+    with pytest.raises(plugins.PluginCliError) as exc_info:
+        call(run)
+    assert not isinstance(
+        exc_info.value, (plugins.PluginNotFoundError, plugins.MarketplaceNotFoundError)
+    )
+    message = str(exc_info.value)
+    assert "4492" not in message
+    assert "could not fetch its git source" in message
+    assert "git.example.com" in message
+
+
 @pytest.mark.parametrize(
     ("call", "stderr", "error"),
     [
