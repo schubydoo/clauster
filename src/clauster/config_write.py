@@ -1786,6 +1786,20 @@ class FrontmatterLoader(yaml.SafeLoader):
         return node
 
 
+def load_frontmatter(header: str) -> object:
+    """Load ``header`` with :class:`FrontmatterLoader`, the same way ``yaml.load`` does.
+
+    The loader is a ``SafeLoader``, so it builds only plain YAML types and refuses a
+    ``!!python/...`` tag. ``yaml.load`` with it is safe, but CodeQL trusts only the stock
+    safe loaders there (py/unsafe-deserialization), so this builds the loader directly.
+    """
+    loader = FrontmatterLoader(header)
+    try:
+        return loader.get_single_data()
+    finally:
+        loader.dispose()
+
+
 class _FlowDepthCap:
     """A scanner mixin that stops at a flow collection past :data:`MAX_NESTING_DEPTH`.
 
@@ -2195,6 +2209,7 @@ def _yaml12_node(root: yaml.Node) -> Any:
         stack.extend((child, False) for child in reversed(children))
 
     def value_of(node: yaml.Node) -> Any:
+        """Return a scalar's YAML 1.2 value, or the already-built value of a collection."""
         if isinstance(node, yaml.ScalarNode):
             return _yaml12_scalar(node)
         return memo[id(node)]  # a collection: composing yields no other node kind
@@ -3020,7 +3035,7 @@ def load_frontmatter_yaml(header: str, *, what: str, line_offset: int = 0) -> An
                     f"{what} has an alias to a node that encloses it, which the YAML 1.2 "
                     "that Claude Code reads refuses. Remove the self-reference"
                 )
-        value = yaml.load(header, Loader=FrontmatterLoader)  # noqa: S506 - a SafeLoader
+        value = load_frontmatter(header)
     except yaml.YAMLError as exc:
         raise InvalidCandidateError(
             f"{what} is not valid YAML"

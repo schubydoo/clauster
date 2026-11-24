@@ -2788,3 +2788,13 @@ def test_a_comment_inside_a_secret_block_gets_every_line_mask(text: str) -> None
         shown, text, what="SKILL.md", view=cw.redact_secret_lines
     )
     assert restored == text
+
+
+def test_load_frontmatter_is_a_safe_load() -> None:
+    # The frontmatter loader builds the loader by hand so CodeQL can see it (TASK-485). It
+    # must stay a SafeLoader: a python tag is refused, and plain YAML loads as safe_load does.
+    assert issubclass(cw.FrontmatterLoader, yaml.SafeLoader)
+    with pytest.raises(yaml.constructor.ConstructorError):
+        cw.load_frontmatter("x: !!python/object/apply:os.system ['true']\n")
+    header = "name: a\nlist: [1, two]\nmap: {k: v}\n"
+    assert cw.load_frontmatter(header) == yaml.safe_load(header)
