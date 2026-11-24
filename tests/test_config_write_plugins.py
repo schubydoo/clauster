@@ -421,6 +421,27 @@ def test_github_repository_not_found_line_alone_is_a_400() -> None:
     assert "could not fetch its git source: git reports" in str(exc_info.value)
 
 
+def test_github_ssh_repository_not_found_is_a_400() -> None:
+    # GitHub's message over SSH; "not found" alone made this a 404 (backend review).
+    stderr = "ERROR: Repository not found.\nfatal: Could not read from remote repository.\n"
+    run, _calls = _fake_run(rc=1, stderr=stderr)
+    with pytest.raises(plugins.PluginCliError) as exc_info:
+        plugins.cli_install_plugin(str(FAKE_CLAUDE), Path("."), "gitty@market", "user", run=run)
+    assert not isinstance(exc_info.value, plugins.PluginNotFoundError)
+    assert "could not fetch its git source: git reports" in str(exc_info.value)
+
+
+def test_marketplace_add_names_its_own_source_once() -> None:
+    # git names the add's own source, which the message already names as the subject.
+    source = "https://git.example.com/team/gone.git"
+    run, _calls = _fake_run(rc=1, stderr=f"fatal: repository '{source}' not found\n")
+    with pytest.raises(plugins.PluginCliError) as exc_info:
+        plugins.cli_marketplace_add(str(FAKE_CLAUDE), Path("."), source, "user", run=run)
+    message = str(exc_info.value)
+    assert f"claude plugin marketplace-add {source!r} could not fetch its git source:" in message
+    assert message.count(source) == 2  # the subject and the CLI's own line
+
+
 @pytest.mark.parametrize(
     "url",
     [

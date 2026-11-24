@@ -168,15 +168,17 @@ _NOT_FOUND_RE = re.compile(r"not found|not installed", re.IGNORECASE)
 
 #: git's message for a repository that its server does not have or does not show to this
 #: host (``fatal: repository '<url>' not found``), and GitHub's ``remote: Repository not
-#: found.`` line above it. Confirmed on 2.1.330 for ``marketplace update``, ``install`` and
-#: ``update``: the CLI passes git's lines through. The match is an unreachable source,
-#: never an absent plugin or marketplace, so it is never a 404 (TASK-472).
+#: found.`` line above it (``ERROR: Repository not found.`` over SSH). Confirmed on 2.1.330
+#: for ``marketplace update``, ``install`` and ``update``: the CLI passes git's lines
+#: through. The match is an unreachable source, never an absent plugin or marketplace, so
+#: it is never a 404 (TASK-472).
 _GIT_REPO_NOT_FOUND_RE = re.compile(
-    r"repository '[^\n]*?' not found|remote: Repository not found", re.IGNORECASE
+    r"repository '[^\n]*?' not found|(?:remote|ERROR): Repository not found", re.IGNORECASE
 )
 
-#: The url in each ``fatal: repository '<url>' not found`` line. Lazy up to ``' not
-#: found``, so a url that holds a ``'`` is still captured whole and masked.
+#: The url in each ``fatal: repository '<url>' not found`` line. Lazy up to the first
+#: ``' not found``, so a url that holds a ``'`` is captured whole, unless the url itself
+#: holds the text ``' not found``.
 _GIT_MISSING_URL_RE = re.compile(r"repository '([^\n]*?)' not found", re.IGNORECASE)
 
 #: ``marketplace remove --scope``'s message for a name the chosen scope's settings file
