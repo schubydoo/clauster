@@ -2120,7 +2120,10 @@ offers the known events as suggestions, and a warning under the box names an
 event that is not in the list.</p>
 <p>Read each warning before you start a session. Claude Code can ignore a value
 that it does not know. It can also reject the whole settings file because of one
-such value. The warning at save time is the only check for this.</p>
+such value. The warning at save time is the only check for this. If Claude Code
+rejects the file, an Interactive Session fails to start and its card names the
+refused values. See
+<a href="../../troubleshooting/#the-session-stopped-at-claudes-settings-error-screen">the Settings Error screen</a>.</p>
 <p>These checks still stop the save with a <code>422</code>, and nothing is written:</p>
 <ul>
 <li>A value of the wrong type, for example a number where Claude Code reads

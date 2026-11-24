@@ -1403,6 +1403,17 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#the-session-stopped-at-claudes-settings-error-screen" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        "the session stopped at claude's Settings Error screen"
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#a-login-flow-is-already-in-progress-cancel-it-first" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2226,6 +2237,17 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#the-session-stopped-at-claudes-settings-error-screen" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        "the session stopped at claude's Settings Error screen"
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#a-login-flow-is-already-in-progress-cancel-it-first" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2871,6 +2893,35 @@ login, or use the dashboard login flow
 (<a href="../reference/config/#login_shepherd-dashboard-driven-claude-account-login-loginshepherdconfig"><code>login_shepherd</code></a>).
 An <code>ANTHROPIC_API_KEY</code> in the service environment also satisfies the <code>doctor</code>
 check.</p>
+<h3 id="the-session-stopped-at-claudes-settings-error-screen">"the session stopped at claude's Settings Error screen"<a class="headerlink" href="#the-session-stopped-at-claudes-settings-error-screen" title="Permanent link">&para;</a></h3>
+<p><strong>What you see:</strong> an Interactive Session card shows "Session failed to start"
+(the status badge reads "Failed to start") with <code>claude refused a value in a
+settings file: the session stopped at claude's Settings Error screen...</code>. After a
+short note on what to do, the card shows <code>claude reported:</code> and the text that
+<code>claude</code> printed: the path of each settings file it refused, and each refused key
+with the reason, for example <code>permissions.defaultMode: Invalid value</code>.</p>
+<p><strong>Most likely cause:</strong> a settings file holds a value that this <code>claude</code> version
+does not accept. The config editor can save such a value with a warning (see
+<a href="../guides/config-editor/#known-values-are-suggestions">Known values are suggestions</a>).
+For an Interactive Session, <code>claude</code> does not exit. It opens its Settings Error
+screen and waits for a keypress. The keeper reads that screen at the start of the
+session output, records the error, and stops the bridge about 5 seconds later.
+Clauster does not choose an option on that screen for you. "Continue without these
+settings" makes <code>claude</code> ignore every setting in that file, not only the refused
+value.</p>
+<p><strong>The fix:</strong></p>
+<ol>
+<li>Open the settings file that the card names.</li>
+<li>Correct or remove each key that the card names. You can use the config editor
+   or a text editor.</li>
+<li>Start the session again.</li>
+</ol>
+<p>If the list of refused values is long, the card shows only its start. If a file
+path is longer than the terminal is wide, <code>claude</code> wraps it, and the card shows a
+space at the wrap. The keeper reads the first 32 KiB of the session output. If a
+very long list pushes the end of the screen past that point, the card reads
+Running and keeps showing "Preparing connect link…". In that case, run <code>claude</code>
+in the project directory as the service user to see the screen.</p>
 <h3 id="a-login-flow-is-already-in-progress-cancel-it-first">"a login flow is already in progress; cancel it first"<a class="headerlink" href="#a-login-flow-is-already-in-progress-cancel-it-first" title="Permanent link">&para;</a></h3>
 <p><strong>What you see:</strong> the dashboard sign-in panel refuses to start, reporting that a
 login flow is already in progress.</p>
