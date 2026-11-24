@@ -671,3 +671,30 @@ def _fast_migrations(request, monkeypatch):
     # so patching only the `bootstrap` module would leave the real one in use there.
     monkeypatch.setattr(db_bootstrap, "upgrade_to_head", _templated_upgrade)
     monkeypatch.setattr(db_persistence, "upgrade_to_head", _templated_upgrade)
+
+
+def pytest_configure(config):
+    """TEMPORARY DIAGNOSTIC for PR 1957, remove before merge.
+
+    The macOS CI cell hits its 15-minute cap on that branch, and a cancelled job keeps no log.
+    On macOS only, dump every thread's stack and exit when a process is still running 9 minutes
+    in (the controller 30 s later), so the job fails with the stacks in its log. It is armed
+    here, not at import, because capture is not active yet, so fd 2 is the real stderr. It is
+    a watchdog thread, not faulthandler.dump_traceback_later, because pytest cancels that timer
+    on every failed test (pytest_exception_interact).
+    """
+    if sys.platform == "darwin":
+        import faulthandler
+        import threading
+
+        delay = 540 if os.environ.get("PYTEST_XDIST_WORKER") else 570
+        fd = os.dup(2)
+
+        def _dump_and_exit():
+            os.write(fd, f"\n=== hang diagnostic: still running after {delay} s ===\n".encode())
+            faulthandler.dump_traceback(file=fd, all_threads=True)
+            os._exit(3)
+
+        watchdog = threading.Timer(delay, _dump_and_exit)
+        watchdog.daemon = True
+        watchdog.start()
