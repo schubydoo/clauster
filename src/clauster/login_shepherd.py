@@ -792,8 +792,10 @@ class LoginShepherd:
             # line the reader appended after the wait's last look counts too.
             output = flow.snapshot()
             url = find_any(output)
-            if url is not None:
+            if url is not None and not is_known_auth_url(url):
                 # Not silent: every sign-in now waits out the whole window, and this is why.
+                # (A known-host URL can still arrive here: one appended after the wait's last
+                # look, or a screen URL seen first on that look, which needed a second read.)
                 _log.warning(
                     "login_shepherd: %s printed no URL on a known auth host within %.0fs; "
                     "using one on %r (did the CLI move its sign-in host?)",

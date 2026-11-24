@@ -126,6 +126,32 @@ def test_start_takes_an_unknown_host_url_only_when_the_window_closes(
         shepherd.cancel()
 
 
+def test_start_deadline_pick_reads_lines_after_the_last_look(shepherd, monkeypatch, caplog):
+    # The fallback reads the output afresh: a known-host line appended after the wait's last
+    # look wins over the unknown-host URL, and as it is on a known host nothing is logged.
+    late = "https://claude.ai/oauth/authorize?late=1"
+    monkeypatch.setenv("FAKE_CLAUDE_LOGIN_MODE", "ready")
+    monkeypatch.setenv("FAKE_CLAUDE_LOGIN_URL", "https://login.example.net/authorize?x=1")
+    monkeypatch.setattr(ls, "START_TIMEOUT_SECONDS", 0.5)
+    real_wait_for = ls._wait_for
+
+    def _wait_then_late_line(flow, condition, *, timeout):
+        give_up = time.monotonic() + 30  # as above: the window opens once the URL is printed
+        while "login.example.net" not in flow.snapshot() and time.monotonic() < give_up:
+            time.sleep(0.01)
+        found = real_wait_for(flow, condition, timeout=timeout)
+        flow.append(f"Or open {late}\n")  # arrives just after the last look
+        return found
+
+    monkeypatch.setattr(ls, "_wait_for", _wait_then_late_line)
+    try:
+        with caplog.at_level(logging.WARNING, logger="clauster.login_shepherd"):
+            assert shepherd.start("login")["authorize_url"] == late
+        assert "known auth host" not in caplog.text
+    finally:
+        shepherd.cancel()
+
+
 @_POSIX_ONLY
 @pytest.mark.parametrize("steady", [True, False])
 def test_start_setup_token_deadline_pick_must_be_stable(shepherd, monkeypatch, steady) -> None:
