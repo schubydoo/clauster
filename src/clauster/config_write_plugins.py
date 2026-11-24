@@ -837,9 +837,10 @@ def cli_list_marketplaces(
 def _list_marketplaces_raw(binary: str, cwd: Path, *, run: RunFn) -> list[Any]:
     """Return the UNREDACTED ``marketplace list --json`` entries, for this module's own use.
 
-    Only :func:`cli_list_marketplaces` (which redacts) and :func:`marketplace_plugin_names`
-    (which reads each ``installLocation`` and returns plugin names only) call this; the raw
-    entries never leave the module.
+    Only :func:`cli_list_marketplaces` (which redacts), :func:`marketplace_plugin_names`
+    (which reads each listed location and returns marketplace and plugin names only), and
+    :func:`marketplace_is_listed` (which returns only whether the name is present) call this;
+    the raw entries never leave the module.
     """
     proc = _run(binary, ["marketplace", "list", "--json"], cwd=cwd, run=run)
     _raise_for_failure("marketplace-list", "", proc)
