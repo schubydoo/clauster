@@ -20,6 +20,7 @@ from __future__ import annotations
 import errno
 import logging
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -120,7 +121,8 @@ def test_start_takes_an_unknown_host_url_only_when_the_window_closes(
         assert result["authorize_url"] == url
         assert time.monotonic() - window["opened"] >= 0.5  # it waited the window out
         assert shepherd.is_active()  # a usable login: the process still waits for a code
-        assert "'login.example.net'" in caplog.text  # and it says why the wait was long
+        # And it says why the wait was long. A regex, not `<host> in text` (CodeQL).
+        assert re.search(r"'login\.example\.net'", caplog.text)
         assert "x=1" not in caplog.text  # the host only, never the rest of the URL
     finally:
         shepherd.cancel()
@@ -130,17 +132,20 @@ def test_start_deadline_pick_reads_lines_after_the_last_look(shepherd, monkeypat
     # The fallback reads the output afresh: a known-host line appended after the wait's last
     # look wins over the unknown-host URL, and as it is on a known host nothing is logged.
     late = "https://claude.ai/oauth/authorize?late=1"
+    unknown = "https://login.example.net/authorize?x=1"
+    # A regex, not `<host> in text`, which CodeQL reads as url sanitization.
+    printed = re.compile(re.escape(unknown))
     monkeypatch.setenv("FAKE_CLAUDE_LOGIN_MODE", "ready")
-    monkeypatch.setenv("FAKE_CLAUDE_LOGIN_URL", "https://login.example.net/authorize?x=1")
+    monkeypatch.setenv("FAKE_CLAUDE_LOGIN_URL", unknown)
     monkeypatch.setattr(ls, "START_TIMEOUT_SECONDS", 0.5)
     real_wait_for = ls._wait_for
 
     def _wait_then_late_line(flow, condition, *, timeout):
         give_up = time.monotonic() + 30  # as above: the window opens once the URL is printed
-        while "login.example.net" not in flow.snapshot() and time.monotonic() < give_up:
+        while not printed.search(flow.snapshot()) and time.monotonic() < give_up:
             time.sleep(0.01)
         found = real_wait_for(flow, condition, timeout=timeout)
-        assert "login.example.net" in flow.snapshot()  # the unknown-host URL it must beat
+        assert printed.search(flow.snapshot())  # the unknown-host URL it must beat
         flow.append(f"Or open {late}\n")  # arrives just after the last look
         return found
 
