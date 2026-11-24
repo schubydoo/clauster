@@ -1503,9 +1503,9 @@ async def test_late_settings_error_screen_is_an_error_not_a_crash(runner_config,
 async def test_late_login_screen_is_an_error_not_a_crash(runner_config, monkeypatch):
     """TASK-533: the login screen drawn after the readiness wait still ends ERROR.
 
-    The startup watch owns the row then, and the poll loop runs beside it. The keeper keeps
-    the bridge up while the watch reads the error, so the poll loop never sees a dead
-    STARTING bridge to call CRASHED.
+    The startup watch owns the row then, so the poll loop leaves it alone (TASK-545). The
+    keeper also keeps the bridge up while the watch reads the error, so the poll loop never
+    sees a dead STARTING bridge to call CRASHED.
     """
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "pty_not_logged_in")
     monkeypatch.setenv("FAKE_CLAUDE_SLOW", "1.0")

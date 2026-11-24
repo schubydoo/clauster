@@ -511,7 +511,7 @@ class PollLoop:
         # reconciled to CRASHED/STOPPED in the loop above, so it can't shadow an external
         # bridge. (A row that its spawn or startup watch owns, TASK-545, is not reconciled
         # there: it stays STARTING until its owner ends it, at most one readiness wait or
-        # watch tick later, plus a keeper's login-stop delay.) It only covers a just-spawned
+        # watch tick later, plus a keeper's held-screen stop delay.) It only covers a just-spawned
         # bridge whose pid isn't live yet but whose auto-created session `agents --json`
         # already reports.
         #
