@@ -77,8 +77,11 @@ _CLICK_VISIBLE_TIMEOUT_MS = 5_000
 # box is non-empty and unchanged across two animation frames, like Playwright's "stable"
 # actionability check. On a visible page, a frame that does not arrive counts as not stable:
 # the pending ``x-show`` has not run yet. Only a hidden page, which produces no frames, may
-# pass on the timer.
-_STABLE_TIMEOUT_MS = 5_000
+# pass on the frame timer. ``_STABLE_TIMEOUT_MS`` bounds the whole wait.
+_STABLE_TIMEOUT_MS = 10_000
+# The frame timer is long because a next frame can be seconds away on a CPU-starved runner,
+# and each retry starts it again. Keep it well under ``_STABLE_TIMEOUT_MS``.
+_STABLE_FRAME_TIMEOUT_MS = 4_000
 _STABLE_BOX_JS = """(async () => {
   const el = document.querySelector(%s);
   if (!el) return true;
@@ -88,7 +91,7 @@ _STABLE_BOX_JS = """(async () => {
   };
   const frame = () => new Promise((done) => {
     requestAnimationFrame(() => done(true));
-    setTimeout(() => done(document.visibilityState !== 'visible'), 1000);
+    setTimeout(() => done(document.visibilityState !== 'visible'), %d);
   });
   const first = box();
   if (!first || !(await frame())) return false;
@@ -284,7 +287,7 @@ class AgentBrowser:
         An absent target counts as stable, so the action that follows reports the real
         error. A target that never settles fails here and no click is dispatched.
         """
-        script = _STABLE_BOX_JS % json.dumps(selector)
+        script = _STABLE_BOX_JS % (json.dumps(selector), _STABLE_FRAME_TIMEOUT_MS)
         self._poll(
             lambda: self._run("eval", script).stdout.strip() == "true",
             _STABLE_TIMEOUT_MS,
