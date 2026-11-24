@@ -751,9 +751,9 @@ class SpawnCoordinator:
         # anchor is healthy/indeterminate.
         await self._clear_pointer_if_anchor_poisoned(proj.path)
 
-        # A Resume replaces the row and its log, and the poll may not have read the old log
-        # since the session ended. Read it now, while the old row can still record it (TASK-557).
-        if resume and resume_target is not None and effective_resume_mode == "standard":
+        # The poll may not have read the previous bridge's log since its session ended, and
+        # this start can seed that session's id from the pointer. Read it first (TASK-557).
+        if effective_resume_mode == "standard":
             await self._retire_ended_starters()
 
         # Before the cap: the cap and the row registration must stay close together, because
@@ -839,8 +839,6 @@ class SpawnCoordinator:
             # here would resume into a new, empty worktree and orphan the one holding the
             # session's uncommitted work.
             instance.worktree_name = resume_target.worktree_name
-            if instance.resume_mode == "standard":
-                instance.carry_archived_session(resume_target)
         # Register under instance_id — the stable UUID minted by RemoteControlInstance
         # (via new_instance_id default_factory) or carried over from the instance
         # being resumed, NOT the project name.

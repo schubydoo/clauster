@@ -225,6 +225,7 @@ def test_open_qr_panel_reloads_when_the_link_changes(runner_config):
     with TestClient(app) as client:
         page = client.get("/").text
     assert "this.refreshOpenQrs(this._byId, byId);" in page
+    assert "this.refreshOpenQrs({ [body.rk]: this._byId[body.rk] }, { [body.rk]: body });" in page
     assert "(before.session_url || before.url) !== (row.session_url || row.url)" in page
     assert '"/qr?t=" + (this.qrNonce[name] || 0);' in page
 

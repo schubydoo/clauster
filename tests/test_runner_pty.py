@@ -281,6 +281,27 @@ async def test_spawn_explicit_pty_overrides_standard_config(runner_config) -> No
 
 
 @_POSIX_ONLY
+async def test_only_a_standard_spawn_runs_the_ended_session_pass(
+    runner_config, monkeypatch
+) -> None:
+    # The two modes stay separate: a pty spawn must not read the standard bridges' logs.
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    calls: list[int] = []
+
+    async def _count() -> None:
+        calls.append(1)
+
+    monkeypatch.setattr(runner, "_retire_ended_starters", _count)
+    pty = await runner.spawn("alpha", resume_mode="pty")
+    assert calls == []
+    await runner.stop(pty.instance_id)
+    standard = await runner.spawn("alpha", resume_mode="standard")
+    assert calls  # positive control: the same counter sees a standard spawn
+    await runner.stop(standard.instance_id)
+
+
+@_POSIX_ONLY
 async def test_spawn_pty_ignores_custom_name(runner_config) -> None:
     """#780 disposition: pty (the flag form) has no --name equivalent.
 

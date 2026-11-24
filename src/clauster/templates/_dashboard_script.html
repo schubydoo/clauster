@@ -5627,6 +5627,8 @@
       // so an action's response lands without waiting for the next poll.
       _absorbRow(body) {
         this._stamp(body);
+        // Before the row is replaced: the next poll compares against this response.
+        this.refreshOpenQrs({ [body.rk]: this._byId[body.rk] }, { [body.rk]: body });
         if (body.resume_mode === "pty") {
           const at = this.ptySessions.findIndex((s) => s.instance_id === body.instance_id);
           if (at >= 0) this.ptySessions.splice(at, 1, body); else this.ptySessions.push(body);

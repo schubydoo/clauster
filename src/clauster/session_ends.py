@@ -39,7 +39,6 @@ class _LogState:
     """What one log has said so far, and the byte offset after its last complete line."""
 
     offset: int = 0
-    archived: set[str] = field(default_factory=set)
     environments: set[str] = field(default_factory=set)
 
 
@@ -49,6 +48,10 @@ class SessionEndTracker:
     def __init__(self) -> None:
         """Start with no logs read."""
         self._logs: dict[Path, _LogState] = {}
+        # Proven archives, by session key. Kept for the life of the process, past the log and
+        # the row that showed them: a later Start or Resume can seed the same id from the
+        # pointer into a row whose new log says nothing about it. One short key per session.
+        self._archived: set[str] = set()
         self._lock = threading.Lock()
 
     def evidence(
@@ -59,34 +62,39 @@ class SessionEndTracker:
         :attr:`~LinkEvidence.NO_EVIDENCE` covers a missing path, a missing file, and a log
         that never names the bridge's environment (the newest log of a project can belong
         to another bridge there). The environment link is always safe, so doubt goes that
-        way. An archive request for this exact session is proof whichever log holds it.
+        way. An archive request for this exact session is proof whichever log held it.
         """
-        if log_path is None:
-            return LinkEvidence.NO_EVIDENCE
+        key = bridge_log.session_key(session_id)
         with self._lock:
-            state = self._logs.setdefault(log_path, _LogState())
-            try:
-                self._read_new_lines(log_path, state)
-            except FileNotFoundError:
-                return LinkEvidence.NO_EVIDENCE
-            except OSError as exc:
-                _log.debug("could not read bridge log %s: %s", log_path, exc)
-                return LinkEvidence.READ_ERROR
-            if bridge_log.session_key(session_id) in state.archived:
+            state: _LogState | None = None
+            read_error = False
+            if log_path is not None:
+                try:
+                    state = self._logs.setdefault(log_path, _LogState())
+                    self._read_new_lines(log_path, state)
+                except FileNotFoundError:
+                    state = None
+                except OSError as exc:
+                    _log.debug("could not read bridge log %s: %s", log_path, exc)
+                    read_error = True
+            if key in self._archived:
                 return LinkEvidence.ARCHIVED
-            if environment_id is not None and environment_id not in state.environments:
+            if read_error:
+                return LinkEvidence.READ_ERROR
+            if state is None or (
+                environment_id is not None and environment_id not in state.environments
+            ):
                 return LinkEvidence.NO_EVIDENCE
             return LinkEvidence.LIVE
 
     def keep_only(self, log_paths: Collection[Path]) -> None:
-        """Forget every log not in ``log_paths``, so the map cannot grow without bound."""
+        """Forget the read state of every log not in ``log_paths``; proven archives stay."""
         with self._lock:
             for path in self._logs.keys() - set(log_paths):
                 del self._logs[path]
 
-    @staticmethod
-    def _read_new_lines(log_path: Path, state: _LogState) -> None:
-        """Fold the complete lines after ``state.offset`` into ``state``."""
+    def _read_new_lines(self, log_path: Path, state: _LogState) -> None:
+        """Fold the complete lines after ``state.offset`` into ``state`` and the proofs."""
         with log_path.open("rb") as fh:
             if os.fstat(fh.fileno()).st_size < state.offset:
                 state.offset = 0  # truncated or replaced: what it already said stays true
@@ -105,7 +113,7 @@ class SessionEndTracker:
                 for line in _lines_naming(complete, b"/archive"):
                     key = bridge_log.archived_session_key(line)
                     if key is not None:
-                        state.archived.add(key)
+                        self._archived.add(key)
                 for line in _lines_naming(complete, b"nvironment"):
                     state.environments |= bridge_log.environment_ids_in(line)
 

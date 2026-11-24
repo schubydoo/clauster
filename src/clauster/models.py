@@ -227,8 +227,8 @@ class RemoteControlInstance(BaseModel):
     hosted_log_path: Path | None = None  # redacted on-disk mirror of the hosted stream
     is_orphan: bool = False  # CL-8: live pid that Clauster could not reattach (no session)
     # Why the starter session is not linked (TASK-557). Private: never serialized or persisted.
-    # Proven by an archive request in the bridge log. A Resume carries this one, but a clauster
-    # restart can only read it again from the row's current log.
+    # Proven by an archive request in a bridge log (`session_ends.SessionEndTracker` keeps the
+    # proof for this process). A clauster restart can read it again only from the row's log.
     _archived_session_id: str | None = PrivateAttr(default=None)
     # No log can vouch for this session right now. Re-judged on every poll, never carried.
     _unvouched_session_id: str | None = PrivateAttr(default=None)
@@ -318,15 +318,6 @@ class RemoteControlInstance(BaseModel):
     def set_starter_vouched(self, vouched: bool) -> None:
         """Record whether a bridge log can vouch for the current starter session."""
         self._unvouched_session_id = None if vouched else self.starter_session_id
-
-    def carry_archived_session(self, previous: RemoteControlInstance) -> None:
-        """Keep ``previous``'s proven archive on the row that replaces it at a Resume.
-
-        The archive line is in the old bridge's log, and the pointer can seed the same id
-        into the new row, so the new log alone would report that session as live. Doubt is
-        not carried: the new bridge's log can vouch for the session.
-        """
-        self._archived_session_id = previous._archived_session_id
 
     @computed_field  # type: ignore[prop-decorator]
     @property

@@ -126,9 +126,11 @@ def test_several_matches_in_one_read_are_all_found(tmp_path):
     )
     tracker = SessionEndTracker()
     assert tracker.evidence(path, _SID, _ENV) is LinkEvidence.ARCHIVED
-    state = tracker._logs[path]
-    assert state.environments == {_ENV, other_env}
-    assert state.archived == {bridge_log.session_key(_CSE), bridge_log.session_key(other_cse)}
+    assert tracker._logs[path].environments == {_ENV, other_env}
+    assert tracker._archived == {
+        bridge_log.session_key(_CSE),
+        bridge_log.session_key(other_cse),
+    }
 
 
 def test_no_log_path_cannot_vouch_for_the_session():
@@ -174,6 +176,35 @@ def test_keep_only_forgets_other_logs(tmp_path):
     assert path in tracker._logs
     tracker.keep_only(set())
     assert path not in tracker._logs
+
+
+def test_a_proven_archive_outlives_its_log(tmp_path):
+    # A later bridge's log says nothing about the session, but the pointer can seed its id.
+    old = _log(tmp_path, _REGISTERED + _ARCHIVED)
+    new = tmp_path / "alpha-2-1.log"
+    new.write_bytes(_REGISTERED.encode())
+    tracker = SessionEndTracker()
+    assert tracker.evidence(old, _SID, _ENV) is LinkEvidence.ARCHIVED
+    tracker.keep_only({new})
+    assert old not in tracker._logs
+    assert tracker.evidence(new, _SID, _ENV) is LinkEvidence.ARCHIVED
+    assert tracker.evidence(None, _SID, _ENV) is LinkEvidence.ARCHIVED
+    new.unlink()
+    assert tracker.evidence(new, _SID, _ENV) is LinkEvidence.ARCHIVED
+    assert tracker.evidence(new, "session_01OTHER", _ENV) is LinkEvidence.NO_EVIDENCE
+
+
+def test_a_proven_archive_survives_a_read_error(tmp_path, monkeypatch):
+    path = _log(tmp_path, _REGISTERED + _ARCHIVED)
+    tracker = SessionEndTracker()
+    assert tracker.evidence(path, _SID, _ENV) is LinkEvidence.ARCHIVED
+
+    def _boom(self, *_a, **_k):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(Path, "open", _boom)
+    assert tracker.evidence(path, _SID, _ENV) is LinkEvidence.ARCHIVED
+    assert tracker.evidence(path, "session_01OTHER", _ENV) is LinkEvidence.READ_ERROR
 
 
 def test_session_key_matches_both_forms():
@@ -227,16 +258,6 @@ def test_a_new_starter_links_again():
     row.starter_session_id = "session_01NEWSESSIONAAAAAAAAAA"
     assert row.starter_archived is False
     assert row.session_url == "https://claude.ai/code/session_01NEWSESSIONAAAAAAAAAA?from=cli"
-
-
-def test_only_a_proven_archive_is_carried_to_a_new_row():
-    archived, doubted, fresh, fresh2 = _row(), _row(), _row(), _row()
-    archived.mark_starter_archived()
-    doubted.set_starter_vouched(False)
-    fresh.carry_archived_session(archived)
-    fresh2.carry_archived_session(doubted)
-    assert fresh.session_url is None
-    assert fresh2.session_url is not None
 
 
 def test_the_link_markers_are_not_serialized():

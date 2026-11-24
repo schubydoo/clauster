@@ -2625,6 +2625,10 @@ class SessionRunner:
         """
         if instance.status is InstanceStatus.RUNNING:
             await asyncio.to_thread(self._backfill_starter_session, instance, project_path)
+            # At once, not on the next poll: the pointer can name a session already proven
+            # archived, and the new bridge's log says nothing about it (TASK-557). Both
+            # callers are standard-only, and the pass itself reads standard rows only.
+            await self._retire_ended_starters()
         elif instance.status in (InstanceStatus.ERROR, InstanceStatus.CRASHED):
             await asyncio.to_thread(self._capture_error_detail, instance)
 

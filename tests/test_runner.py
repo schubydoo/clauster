@@ -4891,6 +4891,42 @@ async def test_resume_does_not_relink_a_session_that_ended(
         await runner.stop(first.instance_id)
 
 
+@pytest.mark.parametrize("polled", [False, True])
+async def test_plain_start_after_stop_does_not_relink_an_ended_session(
+    runner_config, monkeypatch, polled
+):
+    # A new row with a new id: nothing is carried from the old row, and the pointer can
+    # still name the archived session when the anchor probe could not reach the API.
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    runner = _make_runner(runner_config)
+    first = await runner.spawn("alpha")
+    sid = "session_01RESUMEDBBBBBBBBBBB"
+    first.starter_session_id = sid
+    assert first.bridge_debug_log_path is not None
+    _append(first.bridge_debug_log_path, _archive_line(sid))
+    if polled:
+        await runner.poll_once()
+    await runner.stop(first.instance_id)
+
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "resume")
+
+    class FakePtr:
+        pid, proc_start = 1, "1000"
+        environment_id = "env_01TESTENVAAAAAAAAAAAAAAAA"
+        session_id = sid
+
+    monkeypatch.setattr("clauster.pointers.pointer_for_project", lambda *a, **k: FakePtr())
+    # No Forget: Forget also empties the pointer's session id, so it cannot seed this.
+    second = await runner.spawn("alpha")
+    try:
+        assert second.instance_id != first.instance_id
+        assert second.status is InstanceStatus.RUNNING
+        assert second.starter_session_id == sid
+        assert second.session_url is None  # before any poll of the new row
+    finally:
+        await runner.stop(second.instance_id)
+
+
 async def test_resume_does_not_carry_mere_doubt(runner_config, monkeypatch):
     # A row with no usable log hides its link on doubt. The resumed bridge has a log that
     # can vouch for the session, so the link must come back.
