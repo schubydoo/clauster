@@ -53,7 +53,14 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, TypeVar
 
 from . import claude_cli, procutil, redact
-from .pty_screen import SCREEN_ROWS, PtyScreen, PyteUnavailableError, extract_authorize_url
+from .pty_screen import (
+    SCREEN_ROWS,
+    PtyScreen,
+    PyteUnavailableError,
+    extract_authorize_url,
+    is_known_auth_url,
+    url_host,
+)
 
 _T = TypeVar("_T")
 
@@ -127,6 +134,16 @@ _TOKEN_RE = re.compile(r"CLAUDE_CODE_OAUTH_TOKEN=(\S+)")
 # spawn, so keeping the shared helpers there avoids an import cycle. Re-exported under
 # the old private name for backward compatibility with existing callers/tests.
 _extract_authorize_url = extract_authorize_url
+
+
+def _known_auth_only(url: str | None) -> str | None:
+    """Return ``url`` if it is on a known auth host, else None (see `is_known_auth_url`)."""
+    return url if url is not None and is_known_auth_url(url) else None
+
+
+def _known_auth_url_in(output: str) -> str | None:
+    """Return the best authorize URL in ``output`` only when it is on a known auth host."""
+    return _known_auth_only(_extract_authorize_url(output))
 
 
 class LoginShepherdError(RuntimeError):
@@ -736,7 +753,13 @@ class LoginShepherd:
             flow = self._spawn(mode, resolved)
             self._flow = flow
 
+        # `find_any` is the full selection rule on everything read so far. The wait below only
+        # trusts a pick on a known auth host (TASK-566): on a partial output the rule's last
+        # resort is whatever URL came first, so a docs line printed before the real authorize
+        # URL was handed back whenever a poll fell between the two lines. Any other pick is
+        # taken only once the output is complete, at the deadline or after an exit.
         condition: Callable[[str], str | None]
+        find_any: Callable[[str], str | None]
         screen = flow.screen
         if screen is not None:
             # setup-token PTY path: require the authorize URL to be STABLE across two polls,
@@ -745,10 +768,41 @@ class LoginShepherd:
             # line only appears in the buffer once whole — so it needs no such guard.
             # Read through `_read_screen`: a pyte render fault must degrade this poll to
             # "no URL yet" and let the next one try again, never kill the request (#1358).
-            condition = _stable_match_finder(lambda: _read_screen(flow, screen.find_authorize_url))
+            def _screen_url() -> str | None:
+                """Return the best URL on the rendered screen (the buffer is not read)."""
+                return _read_screen(flow, screen.find_authorize_url)
+
+            def _stable_screen_url(_output: str) -> str | None:
+                """Return the screen's URL only if two reads one poll apart agree (#852)."""
+                first = _screen_url()
+                time.sleep(_POLL_INTERVAL_SECONDS)
+                return first if first is not None and first == _screen_url() else None
+
+            find_any = _stable_screen_url
+            condition = _stable_match_finder(lambda: _known_auth_only(_screen_url()))
         else:
-            condition = _extract_authorize_url
+            find_any = _extract_authorize_url
+            condition = _known_auth_url_in
+
         url, output, exited = _wait_for(flow, condition, timeout=START_TIMEOUT_SECONDS)
+        if url is None and not exited:
+            # The window closed with no pick on a known auth host, and the process still runs.
+            # The output is now as complete as it will get, so the rule's fallback may answer:
+            # an unknown host stays usable, as the rule has always allowed. Read it afresh: a
+            # line the reader appended after the wait's last look counts too.
+            output = flow.snapshot()
+            url = find_any(output)
+            if url is not None and not is_known_auth_url(url):
+                # Not silent: every sign-in now waits out the whole window, and this is why.
+                # (A known-host URL can still arrive here: one appended after the wait's last
+                # look, or a screen URL seen first on that look, which needed a second read.)
+                _log.warning(
+                    "login_shepherd: %s printed no URL on a known auth host within %.0fs; "
+                    "using one on %r (did the CLI move its sign-in host?)",
+                    mode,
+                    START_TIMEOUT_SECONDS,
+                    url_host(url),
+                )
         if url is not None and not exited:
             # A URL appeared while the process still looked alive — but `_wait_for` breaks
             # the instant a URL matches, and `poll()` can lag a just-returned `exit()` by a
@@ -776,6 +830,13 @@ class LoginShepherd:
                 # captured — refresh the snapshot so the error message shows the real
                 # last output.
                 output = flow.snapshot()
+                if url is None:
+                    # And look for the URL in it again, so the reason matches that output
+                    # (TASK-465). `_wait_for` reads the output before it asks whether the
+                    # process exited, so a URL line the reader appended in between, or after
+                    # the exit, was missing from the look that ended the wait. The login still
+                    # fails closed either way; only the reason changes.
+                    url = find_any(output)
             note = _SCREEN_FAULT_NOTE if flow.screen_scan_failed else ""
             if exited and url is not None:
                 reason = "the process exited before the login could proceed"

@@ -292,6 +292,35 @@ def test_stop_keeper_returns_false_when_force_fails(monkeypatch):
     assert pty_keeper.stop_keeper(123, expect_start_ticks=None, expect_boot_id=None) is False
 
 
+def test_stop_keeper_confirms_a_kill_whose_teardown_outlasts_a_second(monkeypatch):
+    # TASK-564 / TASK-565: a kill returns before the process is gone. Windows `TerminateProcess`
+    # only starts the teardown, and on a loaded runner the pid stayed visible for longer than
+    # the post-kill poll's old ~1 s, so `clauster keepers --kill` reported "failed to stop" for
+    # a keeper it had killed. The clock here is the slept time, so the test is exact.
+    clock = {"now": 0.0, "killed_at": None}
+
+    def _sleep(seconds):
+        clock["now"] += seconds
+
+    def _alive():
+        killed_at = clock["killed_at"]
+        return killed_at is None or clock["now"] - killed_at < 1.5
+
+    monkeypatch.setattr(procutil, "reap_if_exited", lambda pid: None)
+    monkeypatch.setattr(pty_keeper.time, "sleep", _sleep)
+    _pin_start(monkeypatch, epoch=lambda: 1.0 if _alive() else None)
+    monkeypatch.setattr(
+        procutil, "force_kill_tree", lambda pid: clock.update(killed_at=clock["now"])
+    )
+    assert (
+        pty_keeper.stop_keeper(
+            123, expect_create_time=1.0, expect_start_ticks=None, expect_boot_id=None
+        )
+        is True
+    )
+    assert clock["killed_at"] is not None  # the force path ran, and its exit was confirmed
+
+
 def test_stop_keeper_refuses_on_pid_reuse(monkeypatch):
     # After the grace window the PID's create-time no longer matches what we classified
     # → the PID was recycled onto another process; refuse the kill.

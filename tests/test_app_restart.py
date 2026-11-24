@@ -1051,11 +1051,20 @@ def test_restart_hosted_new_process_exiting_at_start_is_an_error(
         fresh = await real_resume(*a, **k)
 
         async def _crash() -> None:
-            await asyncio.sleep(0.01)
+            # No timer of its own (TASK-549). A 10 ms sleep here raced the start watch's 50 ms
+            # window: when the loop thread is descheduled past both, the two timers fall due in
+            # the same loop pass, and the watch's wake-up, which saw the row still running and the
+            # deadline passed, could run before this step did. The test then got a 200. The step
+            # of a new task runs on the loop pass after the route's step, so the exit still lands
+            # after the watch's first look, and before any timer can fire.
             fresh.status = ended
             fresh.error_detail = error_detail
 
-        asyncio.get_running_loop().create_task(_crash())
+        loop = asyncio.get_running_loop()
+        loop.create_task(_crash())
+        # Stall the loop for twice the start window, as a loaded runner does. With the timer
+        # above this made the test fail every time; the ordering must not depend on it.
+        loop.call_soon(time.sleep, 0.1)
         return fresh
 
     monkeypatch.setattr(manager, "resume", _resume_then_crash)

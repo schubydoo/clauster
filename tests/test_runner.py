@@ -3593,13 +3593,39 @@ def _lifecycle_events(runner, monkeypatch) -> list[str]:
     return seen
 
 
+class _HeldWatchAsyncio:
+    """``asyncio`` as ``spawn_coordinator`` sees it, with the startup watch's sleep held.
+
+    Only a sleep in a ``startup-watch:`` task waits for ``release``; any other sleep in the
+    module passes straight through, so a later sleep on the spawn path cannot hang the test.
+    The global ``asyncio.sleep`` is left alone, and every other name is the real module's.
+    """
+
+    def __init__(self, release: asyncio.Event) -> None:
+        self._release = release
+
+    def __getattr__(self, name: str):
+        return getattr(asyncio, name)
+
+    async def sleep(self, delay: float, result=None):
+        task = asyncio.current_task()
+        if task is not None and task.get_name().startswith("startup-watch:"):
+            await self._release.wait()
+        return await asyncio.sleep(delay, result)
+
+
 async def test_startup_crash_with_a_poll_in_the_gap_is_counted_once(runner_config, monkeypatch):
     # TASK-545: a poll between the bridge's death and the watch's next tick used to decide
     # the outcome behind the watch. Now the watch owns a STARTING row, and it counts and
     # announces a real startup crash exactly once, with its task-limit reason.
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "stall")
     monkeypatch.setattr("clauster.spawn_coordinator._READY_TIMEOUT", 0.2)
-    monkeypatch.setattr("clauster.spawn_coordinator._STARTUP_WATCH_INTERVAL", 1.5)
+    # The watch's first tick waits for `release`, set after the poll below. A 1.5 s interval
+    # used to stand in for that, and under a load average of 60 to 87 the kill, the wait and
+    # the poll did not fit in it: the watch ticked first and reconciled the death itself.
+    release = asyncio.Event()
+    monkeypatch.setattr("clauster.spawn_coordinator.asyncio", _HeldWatchAsyncio(release))
+    monkeypatch.setattr("clauster.spawn_coordinator._STARTUP_WATCH_INTERVAL", 0.05)
     monkeypatch.setattr(
         "clauster.poll_loop.task_limits.crash_note", lambda base: f"limit hit by {base.pid}"
     )
@@ -3608,26 +3634,36 @@ async def test_startup_crash_with_a_poll_in_the_gap_is_counted_once(runner_confi
     runner = SessionRunner(config, claude_json=claude_json)
     events = _lifecycle_events(runner, monkeypatch)
     inst = await runner.spawn("alpha")
-    assert inst.status is InstanceStatus.STARTING
     proc = runner._procs[inst.instance_id]
-    runner._poll_loop._task_counts[inst.instance_id] = task_limits.TaskEventCount(
-        pid=proc.pid, cgroup=Path("/nonexistent"), own=0, parent=None
-    )
-    proc.kill()
-    await asyncio.to_thread(proc.wait, 10)
+    try:
+        assert inst.status is InstanceStatus.STARTING
+        runner._poll_loop._task_counts[inst.instance_id] = task_limits.TaskEventCount(
+            pid=proc.pid, cgroup=Path("/nonexistent"), own=0, parent=None
+        )
+        proc.kill()
+        await asyncio.to_thread(proc.wait, 10)
+        # Four watch intervals pass before the poll, as on a loaded host. Without the gate the
+        # watch ticks in this gap every time; with it, the order cannot depend on the delay.
+        await asyncio.sleep(0.2)
 
-    await runner.poll_once()  # between the death and the watch's next tick
-    assert inst.status is InstanceStatus.STARTING, "the poll loop decided a watched start"
-    assert runner._crash_counts.get("alpha", 0) == 0
+        await runner.poll_once()  # between the death and the watch's next tick
+        assert inst.status is InstanceStatus.STARTING, "the poll loop decided a watched start"
+        assert runner._crash_counts.get("alpha", 0) == 0
 
-    await runner._startup_watches[inst.instance_id]
-    assert inst.status is InstanceStatus.CRASHED
-    assert runner._crash_counts["alpha"] == 1
-    assert events.count("crash") == 1
-    assert inst.task_limit_note == f"limit hit by {proc.pid}"
-    await runner.poll_once()  # the poll loop owns the row again, and does not count it twice
-    assert runner._crash_counts["alpha"] == 1
-    assert events.count("crash") == 1
+        release.set()  # now the watch's next tick
+        await runner._startup_watches[inst.instance_id]
+        assert inst.status is InstanceStatus.CRASHED
+        assert runner._crash_counts["alpha"] == 1
+        assert events.count("crash") == 1
+        assert inst.task_limit_note == f"limit hit by {proc.pid}"
+        await runner.poll_once()  # the poll loop owns the row again, and does not count it twice
+        assert runner._crash_counts["alpha"] == 1
+        assert events.count("crash") == 1
+    finally:
+        release.set()  # a failed assert above must not leave the watch waiting forever
+        if proc.poll() is None:
+            proc.kill()
+            await asyncio.to_thread(proc.wait, 10)
 
 
 async def test_poll_loop_owns_a_starting_row_whose_watch_is_done(runner_config, monkeypatch):
