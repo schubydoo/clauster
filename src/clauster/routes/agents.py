@@ -41,7 +41,8 @@ router = APIRouter()
 # milliseconds, so 20 s means a folder that hangs, for example on a network mount that went
 # away. It is shorter than the 30 to 60 s that a reverse proxy usually waits, so the caller
 # gets this error and not the proxy's. The dispatch process itself, once it started, keeps
-# its own limit (``supervisor._DISPATCH_TIMEOUT``).
+# its own limit (``supervisor._DISPATCH_TIMEOUT``, 60 s), so a resume that starts its process
+# just before this limit can still take about 80 s in all.
 _RESUME_TIME_LIMIT = 20.0
 
 
@@ -257,8 +258,11 @@ async def _resume_within_limit(
     A thread blocked on a hung mount cannot be stopped, so past the limit the request
     abandons the :class:`~clauster.supervisor.ResumeGate` and returns a 504. The thread can
     stay blocked, but when it wakes up its claim on the gate fails and it dispatches
-    nothing. When the thread claimed the gate first, the dispatch process already started:
-    the request then waits for it, under the dispatch's own time limit.
+    nothing. A request that is cancelled before the limit abandons the gate the same way.
+    When the thread claimed the gate first, the dispatch process is starting: the request
+    then waits for it. ``subprocess.run`` bounds the run of that process with its own
+    timeout, but not the start itself: a mount that hangs in the moment between the last
+    check and the process start (its working directory) can still hold the request.
 
     The thread is a daemon thread of its own, not one from the shared ``to_thread`` pool,
     so a hung resume cannot take a pool worker from the other routes for good.
@@ -295,17 +299,27 @@ async def _resume_within_limit(
     try:
         async with limit:
             return await asyncio.shield(outcome)
+    except asyncio.CancelledError:
+        # The request ended before the limit: a thread that wakes up later must not resume a
+        # job that no request reports. When the dispatch already started, it runs on, and its
+        # outcome is read so that a failure is not logged as never retrieved.
+        if gate.abandon():
+            outcome.cancel()
+        else:
+            outcome.add_done_callback(lambda done: done.cancelled() or done.exception())
+        raise
     except TimeoutError:
         if not limit.expired():
             raise  # a TimeoutError from the work itself, not the limit
         if not gate.abandon():
-            return await outcome  # the dispatch started first: wait for its own limit
+            return await outcome  # the dispatch started first: wait for it
         outcome.cancel()  # nothing waits for the thread now: drop what it hands back
         raise HTTPException(
             status_code=504,
             detail=(
-                f"job {job_id!r} was not resumed: checking its working directory took longer "
-                f"than {_RESUME_TIME_LIMIT:g} s. A network mount may be hung; try again later."
+                f"job {job_id!r} was not resumed: the checks of the job and its working "
+                f"directory took longer than {_RESUME_TIME_LIMIT:g} s. A network mount may be "
+                "hung. Try again later."
             ),
         ) from None
 

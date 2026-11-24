@@ -531,6 +531,13 @@ class ResumeGate:
                 self._outcome = outcome
             return self._outcome == outcome
 
+    def check(self) -> None:
+        """Raise :class:`ResumeError` when the request gave up, without deciding anything."""
+        with self._lock:
+            abandoned = self._outcome == "abandon"
+        if abandoned:
+            raise ResumeError("the resume passed its time limit and was abandoned")
+
     def commit(self) -> None:
         """Claim the dispatch, or raise :class:`ResumeError` when the request gave up."""
         if not self._decide("dispatch"):
@@ -565,10 +572,10 @@ def resume_background_job(
     the ``inherit`` argv: a ``bypassPermissions`` default in user or managed settings
     would take effect (TASK-335). ``refuse_cwd`` is the caller's ceiling check for the
     job's recorded cwd, resolved once and then also the directory the dispatch runs in
-    (TASK-481): it returns a refusal detail, or ``None`` to allow. ``gate`` is claimed just
-    before the dispatch process starts (TASK-487): when the caller already abandoned the
-    resume because it ran past its time limit, this raises :class:`ResumeError` and
-    dispatches nothing.
+    (TASK-481): it returns a refusal detail, or ``None`` to allow. ``gate`` is checked before the
+    trust write and claimed just before the dispatch process starts (TASK-487): when the
+    caller already abandoned the resume because it ran past its time limit, this raises
+    :class:`ResumeError` and dispatches nothing.
 
     Fail-closed: a job that is still live, no longer exists, has no recorded session
     UUID, or has no resolvable cwd raises :class:`ResumeError` rather than dispatching a duplicate
@@ -611,6 +618,9 @@ def resume_background_job(
         raise ResumeError(f"job {job_id!r} working directory cannot be checked") from exc
     if not is_dir:
         raise ResumeError(f"job {job_id!r} working directory no longer exists as a folder")
+    # A thread that wakes up after the caller abandoned the resume stops here, before the
+    # trust write. The claim itself comes later, just before the process starts.
+    gate.check()
     return dispatch_background_job(
         cwd,
         resume=job.session_id,
