@@ -13,6 +13,7 @@ E2E failure.
 from __future__ import annotations
 
 import json
+import time
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -40,9 +41,34 @@ def read_launch_argv(state_dir: Path, project: str) -> list[str]:
     (``state_dir/logs/<project>-<ms>.log``); the ms timestamps are fixed-width so a
     lexicographic sort yields launch order and ``[-1]`` is the newest spawn.
     """
-    argv_files = sorted((state_dir / "logs").glob(f"{project}-*.log.argv.json"))
+    argv_files = launch_argv_files(state_dir, project)
     assert argv_files, f"no launch argv recorded for {project} under {state_dir / 'logs'}"
     return json.loads(argv_files[-1].read_text())
+
+
+def launch_argv_files(state_dir: Path, project: str) -> list[Path]:
+    """Return the argv sidecars of every spawn of ``project``, oldest first."""
+    return sorted((state_dir / "logs").glob(f"{project}-*.log.argv.json"))
+
+
+def wait_new_launch_argv(state_dir: Path, project: str, *, seen: set[Path]) -> list[str]:
+    """Wait for a sidecar that is not in ``seen`` and return the argv of the newest one.
+
+    A row count cannot gate this read when other sessions of the project stay live: the
+    row can render before the fake ``claude`` writes its sidecar, and the newest file is
+    then the previous spawn. The fake writes the file in place, so a partial file is
+    retried.
+    """
+    deadline = time.monotonic() + STATUS_TIMEOUT / 1000
+    while time.monotonic() < deadline:
+        new_files = [p for p in launch_argv_files(state_dir, project) if p not in seen]
+        if new_files:
+            try:
+                return json.loads(new_files[-1].read_text())
+            except json.JSONDecodeError:
+                pass  # The fake is still writing; the next pass reads the whole file.
+        time.sleep(0.1)
+    raise AssertionError(f"no new launch of {project} under {state_dir}")
 
 
 def open_desktop_launch(browser: AgentBrowser, project: str) -> None:

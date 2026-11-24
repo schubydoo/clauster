@@ -63,7 +63,8 @@ def test_overflow_menu_opens_claude_md_editor_and_saves(
     # The textarea loads the on-disk content (the fixture wrote "# beta\n"), and the
     # running bridge raises the "applies to new sessions" banner.
     browser.expect_visible(editor)
-    assert browser.get_value(editor) == "# beta"  # agent-browser strips the trailing \n
+    # The textarea shows before its fetch lands. agent-browser strips the trailing \n.
+    browser.expect_value(editor, "# beta")
     browser.expect_text(f"{block} .alert-warning", "A session is running")
 
     # Edit and Save; the green "saved" confirmation appears (no reload). DES-03 (#694)

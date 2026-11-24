@@ -30,9 +30,10 @@ from _helpers import (
     RECENT_TOGGLE,
     STATUS_TIMEOUT,
     click_run,
+    launch_argv_files,
     open_desktop_launch,
-    read_launch_argv,
     trust_and_start,
+    wait_new_launch_argv,
 )
 
 if TYPE_CHECKING:
@@ -168,6 +169,7 @@ def test_two_interactive_sessions_plus_standard_bridge_stop_and_resume(
     browser.expect_visible(resume_btn)
 
     # --- 5: Resume it from Recent → back to 3 concurrent rows, same identity ---
+    launches = set(launch_argv_files(multi_session_server.state_dir, "alpha"))
     browser.click(resume_btn)
     browser.expect_count(_ACTIVE_ROWS, 3, timeout_ms=STATUS_TIMEOUT)
     browser.expect_hidden(_PENDING_ROW, timeout_ms=STATUS_TIMEOUT)
@@ -177,6 +179,6 @@ def test_two_interactive_sessions_plus_standard_bridge_stop_and_resume(
     browser.expect_hidden(RECENT_TOGGLE, timeout_ms=STATUS_TIMEOUT)
     # And it was a true pty resume: the newest alpha spawn is the flag form with
     # --continue (restores the prior conversation), not a fresh start.
-    resume_argv = read_launch_argv(multi_session_server.state_dir, "alpha")
+    resume_argv = wait_new_launch_argv(multi_session_server.state_dir, "alpha", seen=launches)
     assert "--remote-control" in resume_argv
     assert "--continue" in resume_argv

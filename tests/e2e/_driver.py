@@ -69,6 +69,36 @@ _FILL_VERIFY_TIMEOUT_MS = 4_000
 # the selector in the message rather than dispatching a click it knows will misfire.
 _CLICK_VISIBLE_TIMEOUT_MS = 5_000
 
+# agent-browser reads the target's centre and then dispatches a mouse event at that point.
+# A non-first ``x-show`` applies on the next animation frame, so a control below a row that
+# is about to hide moves AFTER the read and the click lands on the container (TASK-553).
+# The Node launcher hid this until 0.43.0: it added about 30 ms per command, and the native
+# binary takes about 2 ms. :meth:`click` and :meth:`check` therefore wait until the target's
+# box is non-empty and unchanged across two animation frames, like Playwright's "stable"
+# actionability check. On a visible page, a frame that does not arrive counts as not stable:
+# the pending ``x-show`` has not run yet. Only a hidden page, which produces no frames, may
+# pass on the frame timer. ``_STABLE_TIMEOUT_MS`` bounds the whole wait.
+_STABLE_TIMEOUT_MS = 10_000
+# The frame timer is long because a next frame can be seconds away on a CPU-starved runner,
+# and each retry starts it again. Keep it well under ``_STABLE_TIMEOUT_MS``.
+_STABLE_FRAME_TIMEOUT_MS = 4_000
+_STABLE_BOX_JS = """(async () => {
+  const el = document.querySelector(%s);
+  if (!el) return true;
+  const box = () => {
+    const r = el.getBoundingClientRect();
+    return r.width && r.height ? [r.x, r.y, r.width, r.height].join() : null;
+  };
+  const frame = () => new Promise((done) => {
+    requestAnimationFrame(() => done(true));
+    setTimeout(() => done(document.visibilityState !== 'visible'), %d);
+  });
+  const first = box();
+  if (!first || !(await frame())) return false;
+  if (box() !== first || !(await frame())) return false;
+  return box() === first;
+})()"""
+
 # agent-browser ≥ 0.34 races its own daemon startup: the FIRST command after a
 # ``close --all`` (the previous test's teardown) can exit 1 with
 # ``✗ Could not configure browser: Failed to connect: No such file or directory`` while
@@ -248,7 +278,21 @@ class AgentBrowser:
             _CLICK_VISIBLE_TIMEOUT_MS,
             f"{selector} visible (before click)",
         )
+        self._wait_stable(selector)
         self._run("click", selector, check=True)
+
+    def _wait_stable(self, selector: str) -> None:
+        """Wait until the box of ``selector`` stops moving; see :data:`_STABLE_TIMEOUT_MS`.
+
+        An absent target counts as stable, so the action that follows reports the real
+        error. A target that never settles fails here and no click is dispatched.
+        """
+        script = _STABLE_BOX_JS % (json.dumps(selector), _STABLE_FRAME_TIMEOUT_MS)
+        self._poll(
+            lambda: self._run("eval", script).stdout.strip() == "true",
+            _STABLE_TIMEOUT_MS,
+            f"{selector} stable (before click or check)",
+        )
 
     def click_role(self, role: str, name: str) -> None:
         """Click an element found by ARIA ``role`` + accessible ``name``.
@@ -268,7 +312,16 @@ class AgentBrowser:
         legitimately normalizes still proceeds to the caller's own assertion rather than
         hanging here. ``get_value`` strips its output, so compare against stripped text —
         callers must not depend on significant leading/trailing whitespace in ``text``.
+
+        Waits for the field to be visible first: agent-browser 0.44.0 refuses a field that
+        cannot take focus (``not_editable``), and a non-first ``x-show`` reveals its field
+        on the next animation frame.
         """
+        self._poll(
+            lambda: self.is_visible(selector),
+            _CLICK_VISIBLE_TIMEOUT_MS,
+            f"{selector} visible (before fill)",
+        )
         want = text.strip()
         deadline = time.monotonic() + _FILL_VERIFY_TIMEOUT_MS / 1000
         while True:
@@ -278,7 +331,8 @@ class AgentBrowser:
             time.sleep(_POLL_INTERVAL_S)
 
     def check(self, selector: str) -> None:
-        """Check the checkbox matching ``selector``."""
+        """Check the checkbox matching ``selector`` once its box is stable."""
+        self._wait_stable(selector)
         self._run("check", selector, check=True)
 
     def scroll_into_view(self, selector: str) -> None:
