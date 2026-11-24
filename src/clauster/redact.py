@@ -1553,8 +1553,9 @@ def remember_stream_value(owner: str, value: str, *, run: str, cap: int, limit: 
 
     Text a stream reads (tool output the bridge echoes) is not trusted the way the record is,
     so the stream's values sit under an owner of their own (``<owner>#stream``), and each kind
-    (``env``, ``session``, other) holds at most ``cap`` of them for each bridge ``run`` (the
-    log the stream reads), across every connection to that run, not per connection: a
+    (``env``, ``session``, other) takes at most ``cap`` of them for each bridge ``run`` (the
+    log the stream reads) under the count per run, plus any that the lifetime rule below
+    adds, across every connection to that run, not per connection: a
     reconnecting client cannot add ``cap`` more each time. A new run (a resume keeps the
     owner) has a fresh count, and the values earlier runs stored stay stored, so they stay
     masked. ``limit`` bounds the values of a kind that all runs together store. The values

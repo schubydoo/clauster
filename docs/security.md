@@ -361,12 +361,15 @@ Clauster masks secrets in two ways. Only the first one is a guarantee.
       that line. So the line that first names an id is masked too. The stream
       takes the first id of each kind from any marker line. It takes a further
       one only from a line with a `[bridge:…]` or `[remote-bridge]` tag before
-      the id. The stream keeps at most 4 ids of each kind for each bridge run,
-      counted over all connections to that run, so a client that reconnects
-      cannot add more. Each start or resume of a bridge is a new run with a new log, and it
-      gets a new count. The ids of earlier runs stay stored and masked until the
-      instance is forgotten. The stream also keeps the first 4 ids of each kind
-      over the life of the instance. All runs of one instance keep at most 68
+      the id. The count for each bridge run lets the stream store 4 ids of each
+      kind from that run, counted over all connections to that run, so a client
+      that reconnects cannot add more. Each start or resume of a bridge is a new
+      run with a new log, and it gets a new count. The ids of earlier runs stay
+      stored and masked until the instance is forgotten. The stream also keeps
+      the first 4 ids of each kind over the life of the instance. The count for
+      a run does not stop a store under that rule, so one run can hold more
+      than 4.
+      All runs of one instance keep at most 68
       ids of each kind. The ids the instance record holds do not count against
       these limits.
       Echoed text can carry such a tag too, so the tag does not prove that the
