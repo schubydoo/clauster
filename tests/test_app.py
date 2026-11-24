@@ -412,8 +412,11 @@ def test_transcript_error_is_announced_and_empty_text_names_the_applied_term(wri
     # TASK-477: the error alert sits in a role=alert region that is mounted with the
     # modal, outside every x-show, so filling it later is announced.
     page = _client(write_config).get("/").text
-    region = page.index('<div role="alert">\n              <div class="alert alert-danger py-2"')
-    assert region < page.index('data-test="transcript-error"') < region + 120
+    region = re.search(
+        r'<div role="alert">\s*<div class="alert alert-danger py-2" data-test="transcript-error"',
+        page,
+    )
+    assert region is not None
     # The empty-search text names appliedQ (the term the list on screen used), never the
     # box text, which runs ahead of the list while a new term waits on the debounce.
     no_match = page[page.index('data-test="transcript-no-matches"') :]

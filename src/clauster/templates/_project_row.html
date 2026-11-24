@@ -162,7 +162,10 @@
                            appended here, not baked into the canonical label. inherit (no flag,
                            so a bypassPermissions default in user/managed settings would take
                            effect) is gated by the same ceiling (TASK-335, config.CEILING_GATED_MODES). #}
+                        {# Locked while a trust or typed-confirm gate is open: the gate starts the
+                           mode Run copied into permMode, so a change here would not apply. #}
                         <select id="perm-{{ p.name }}" class="form-select form-select-sm" x-model="lperm"
+                                :disabled="confirmTrust['{{ p.name }}'] || confirmBypass['{{ p.name }}']"
                                 aria-describedby="perm-effect-{{ p.name }}{% if perm_default_gated %} perm-gated-{{ p.name }}{% endif %}"
                                 {# Lead each rendered item with the separator (not trailing it) so a
                                    filtered-out bypassPermissions tail never leaves a dangling " · ".

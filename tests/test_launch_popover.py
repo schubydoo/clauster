@@ -263,6 +263,10 @@ def test_inherit_takes_the_same_typed_confirm_as_bypass(write_config) -> None:
     assert "If that is bypassPermissions, they run tools without asking." in gate
     assert "'Start with no forced mode' : 'Start with bypass'" in gate
     assert ":disabled=\"(bypassTyped['alpha'] || '') !== 'alpha'\"" in gate
+    # The gate starts permMode, so the picker is locked while either gate is open.
+    select = row[row.index('<select id="perm-alpha"') :]
+    select = select[: select.index(">")]
+    assert ":disabled=\"confirmTrust['alpha'] || confirmBypass['alpha']\"" in select
 
 
 def test_leaving_desktop_never_snaps_back_to_bypass(write_config) -> None:

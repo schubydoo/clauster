@@ -157,12 +157,31 @@ def test_inherit_requires_typed_confirmation_before_spawn(
     browser.expect_visible(confirm, timeout_ms=STATUS_TIMEOUT)
     browser.expect_visible(f'{confirm} [data-test="inherit-confirm-text"]')
     browser.expect_text(confirm, "If that is bypassPermissions, they run tools without asking.")
+    # The gate starts the mode Run took, so the picker is locked while the gate is open.
+    browser.expect_disabled("#perm-gamma")
     start_go = f'{confirm} [data-test="bypass-start-go"]'
     browser.expect_text(start_go, "Start with no forced mode")
     browser.fill(f'{confirm} input[type="text"]', "not-gamma")
     browser.expect_disabled(start_go)
     browser.fill(f'{confirm} input[type="text"]', "gamma")
     browser.expect_enabled(start_go)
+
+
+def test_leaving_desktop_moves_a_bypass_default_to_ask(
+    browser: AgentBrowser, bypass_default_server: str
+) -> None:
+    """With a bypassPermissions default, leaving Desktop lands on Ask each time.
+
+    bypassPermissions is Desktop-only, so the mode switch moves the picker off it. The
+    target used to be the configured default, which is the mode it had just left.
+    """
+    browser.goto(bypass_default_server)
+    browser.expect_visible('[data-project="gamma"]')
+    open_desktop_launch(browser, "gamma")
+    browser.expect_value("#perm-gamma", "bypassPermissions")
+    browser.check('[data-project="gamma"] input[name="lm-gamma"][value="detached"]')
+    browser.expect_value("#perm-gamma", "default")
+    browser.expect_text('[data-project="gamma"] [data-test="launch-run-go"]', "Ask each time")
 
 
 def test_reaper_panel_present_when_enabled(browser: AgentBrowser, reaper_server: str) -> None:
