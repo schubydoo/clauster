@@ -416,12 +416,38 @@ def read_screen_sidecar(path: Path) -> dict[str, Any] | None:
     frame is masked again here with every value THIS process knows, the environment id among
     them (:func:`_redact_known_frame`, #1621).
     """
+    data = _load_sidecar(path)
+    return _redact_known_frame(data) if data is not None else None
+
+
+def read_new_screen_frame(path: Path, *, after_seq: int) -> dict[str, Any] | None:
+    """Read the sidecar frame like :func:`read_screen_sidecar`, if it is newer than ``after_seq``.
+
+    A frame whose ``seq`` is not an integer above ``after_seq`` is one the reader sent already
+    (or cannot order), so it is returned as None before the mask runs. The ``/ws/pty-screen``
+    reader polls four times a second, and the keeper's frame often stays the same: each frame
+    is masked once, when it is sent (TASK-470). A frame that is returned is always masked.
+    """
+    data = _load_sidecar(path)
+    if data is None:
+        return None
+    seq = data.get("seq")
+    if not isinstance(seq, int) or seq <= after_seq:
+        return None
+    return _redact_known_frame(data)
+
+
+def _load_sidecar(path: Path) -> dict[str, Any] | None:
+    """Parse the sidecar JSON object at ``path``; None if absent, unreadable, or not an object.
+
+    The frame is not masked yet: only the two readers above call this, and both mask it.
+    """
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError, RecursionError):
         # RecursionError (deeply-nested JSON) is not a ValueError; it must map to None too.
         return None
-    return _redact_known_frame(data) if isinstance(data, dict) else None
+    return data if isinstance(data, dict) else None
 
 
 def _redact_known_frame(data: dict[str, Any]) -> dict[str, Any]:

@@ -1410,6 +1410,12 @@ class _KnownMatcher(NamedTuple):
 
 _known_lock = threading.Lock()
 _known_owners: dict[str, frozenset[str]] = {}
+#: For each stream owner (``<owner>#stream``), the forms each bridge run's stream stored, by
+#: run. It only counts: every form here is also in ``_known_owners``, which masks it.
+_stream_runs: dict[str, dict[str, frozenset[str]]] = {}
+#: For each stream owner, the forms the rule from before the count per run admits: the first
+#: values of each kind over the owner's whole life. Also only a count (TASK-475).
+_stream_lifetime: dict[str, frozenset[str]] = {}
 #: Read without the lock: a reader takes one reference to an immutable matcher.
 _known_matcher: _KnownMatcher | None = None
 
@@ -1515,6 +1521,8 @@ def forget_known_values(owner: str) -> None:
     with _known_lock:
         _known_owners.pop(owner, None)
         _known_owners.pop(stream, None)
+        _stream_runs.pop(stream, None)
+        _stream_lifetime.pop(stream, None)
         _rebuild_known_matcher()
 
 
@@ -1535,17 +1543,30 @@ def _form_kind(form: str) -> str:
     return "env" if prefix.group() == "env_" else "session"
 
 
-def remember_stream_value(owner: str, value: str, *, cap: int) -> None:
+def _count_kind(forms: frozenset[str], kind: str) -> int:
+    """Count the values of ``kind`` in ``forms``; a session id and its ``cse_`` twin count once."""
+    return sum(1 for form in forms if _form_kind(form) == kind and not form.startswith("cse_"))
+
+
+def remember_stream_value(owner: str, value: str, *, run: str, cap: int, limit: int) -> None:
     """Store ``value`` that a log stream read for ``owner``, unless that kind is at its cap.
 
     Text a stream reads (tool output the bridge echoes) is not trusted the way the record is,
     so the stream's values sit under an owner of their own (``<owner>#stream``), and each kind
-    (``env``, ``session``, other) holds at most ``cap`` of them across every connection of the
-    stream, not per connection: a reconnecting client cannot add ``cap`` more each time. The
-    values the record itself stores (:func:`remember_known_values` under ``owner``) do not
-    count: a value the record holds is not stored again, and one the stream stored before the
-    record learned it is not counted. The count and the add happen under the lock, so two
-    sockets cannot both pass it.
+    (``env``, ``session``, other) holds at most ``cap`` of them for each bridge ``run`` (the
+    log the stream reads), across every connection to that run, not per connection: a
+    reconnecting client cannot add ``cap`` more each time. A new run (a resume keeps the
+    owner) has a fresh count, and the values earlier runs stored stay stored, so they stay
+    masked. ``limit`` bounds the values of a kind that all runs together store. The values
+    the record itself stores (:func:`remember_known_values` under ``owner``) do not count: a
+    value the record holds is not stored again, and one the stream stored before the record
+    learned it is not counted. The count and the add happen under the lock, so two sockets
+    cannot both pass it.
+
+    The rule from before the count per run (``cap`` of a kind over the owner's whole life,
+    kept in :data:`_stream_lifetime`) still stores what it stored, so this stores every value
+    that rule stores, for every order of calls, and so masks no less. That rule can add its
+    ``cap`` past ``limit``, so a kind holds at most ``limit + cap`` values the record does not.
     """
     global _known_matcher
     forms = _known_forms(value)
@@ -1555,15 +1576,22 @@ def remember_stream_value(owner: str, value: str, *, cap: int) -> None:
     with _known_lock:
         held = _known_owners.get(stream, frozenset())
         record = _known_owners.get(owner, frozenset())
-        if forms <= held | record:
-            return  # stored already, by the stream or by the record
         kind = _form_kind(next(iter(forms)))
-        # A session id is stored with its `cse_` twin: count the `session_` forms only.
-        count = sum(
-            1 for form in held - record if _form_kind(form) == kind and not form.startswith("cse_")
-        )
-        if count >= cap:
-            return
+        lifetime = _stream_lifetime.get(stream, frozenset())
+        if not forms <= lifetime | record and _count_kind(lifetime - record, kind) < cap:
+            _stream_lifetime[stream] = lifetime | forms
+        elif forms <= held | record:
+            return  # stored already, by the stream (in this run or an earlier one) or the record
+        else:
+            this_run = _stream_runs.get(stream, {}).get(run, frozenset())
+            if _count_kind(this_run - record, kind) >= cap:
+                return  # this run stored its share
+            if _count_kind(held - record, kind) >= limit:
+                return  # all runs together stored the most this owner may hold
+        if forms <= held:
+            return  # an earlier run stored it: it takes no slot of this run
+        runs = _stream_runs.setdefault(stream, {})
+        runs[run] = runs.get(run, frozenset()) | forms
         _known_owners[stream] = held | forms
         _known_matcher = _matcher_with(_known_matcher, forms)
 

@@ -65,6 +65,17 @@ def _streamed(owner: str) -> frozenset[str]:
     return redact._known_owners.get(f"{owner}#stream", frozenset())
 
 
+#: The bridge run (its log) the stream tests read, unless a test names another one.
+RUN = "/srv/projects/alpha/alpha-1-1.log"
+
+
+def _learn(instance_id: str, text: str, learned: dict[str, set[str]], *, run: str = RUN) -> None:
+    """Run the bridge-log socket's id learning for ``run``."""
+    from clauster.routes import websockets as ws_module
+
+    ws_module._learn_stream_ids(instance_id, text, learned, run=run)
+
+
 @pytest.fixture
 def known() -> None:
     """Store the test values as one instance's ids (``cse_`` comes from ``session_``)."""
@@ -494,13 +505,15 @@ def test_reconnects_learn_at_most_the_cap_in_total() -> None:
     redact.remember_known_values("iid-1", ENV, SESSION, BRIDGE)
     for connection in range(3):  # three reconnects over a tail with new tagged markers
         lines = "\n".join(_tagged_env(10 * connection + i) for i in range(cap))
-        ws_module._learn_stream_ids("iid-1", lines, {})
+        _learn("iid-1", lines, {})
     assert len(_streamed("iid-1")) == cap  # 3 * cap without the shared cap
     assert redact._known_owners["iid-1"] == {ENV, SESSION, CSE, BRIDGE}
     before = redact._known_matcher
-    ws_module._learn_stream_ids("iid-1", _tagged_env(0), {})  # a reconnect re-reads an old one
+    _learn("iid-1", _tagged_env(0), {})  # a reconnect re-reads an old one
     assert redact._known_matcher is before  # already held: nothing stored, nothing rebuilt
-    redact.remember_stream_value("iid-1", "env_short", cap=cap)  # not a value: skipped
+    redact.remember_stream_value(
+        "iid-1", "env_short", run=RUN, cap=cap, limit=cap
+    )  # not a value: skipped
     assert redact._known_matcher is before
     # A session id and its `cse_` twin count as one, so the session kind also reaches the cap.
     for connection in range(2):
@@ -508,7 +521,7 @@ def test_reconnects_learn_at_most_the_cap_in_total() -> None:
             f"[remote-bridge] Unarchive session_01{10 * connection + i:04d}Pz8Ox6Ny4Mw2Lv9Ku"
             for i in range(cap)
         )
-        ws_module._learn_stream_ids("iid-1", lines, {})
+        _learn("iid-1", lines, {})
     sessions = [f for f in _streamed("iid-1") if f.startswith("session_")]
     assert len(sessions) == cap
     redact.forget_known_values("iid-1")
@@ -522,15 +535,15 @@ def test_a_record_id_the_stream_reads_again_takes_no_slot() -> None:
     cap = ws_module._STREAM_IDS_PER_KIND
     redact.remember_known_values("iid-1", ENV)  # the record already holds ENV
     learned: dict[str, set[str]] = {}
-    ws_module._learn_stream_ids("iid-1", f"[bridge:api] environment_id={ENV}", learned)
+    _learn("iid-1", f"[bridge:api] environment_id={ENV}", learned)
     assert ENV not in _streamed("iid-1")  # held by the record: not stored twice
     lines = "\n".join(_tagged_env(i) for i in range(cap + 2))
-    ws_module._learn_stream_ids("iid-1", lines, {})
+    _learn("iid-1", lines, {})
     assert len(_streamed("iid-1")) == cap  # all `cap` slots for new ids
     # A value the stream stored before the record learned it stops counting once it does.
     first_new = _tagged_env(0).rsplit("=", 1)[1]
     redact.remember_known_values("iid-1", first_new)
-    ws_module._learn_stream_ids("iid-1", _tagged_env(50), {})
+    _learn("iid-1", _tagged_env(50), {})
     assert _tagged_env(50).rsplit("=", 1)[1] in _streamed("iid-1")
 
 
@@ -567,14 +580,168 @@ def test_ws_bridge_log_reconnects_share_the_cap(runner_config, tmp_path: Path) -
     assert len(streamed) == cap and _env(100) in streamed and _env(101) not in streamed
 
 
+def _env_value(i: int) -> str:
+    return _tagged_env(i).rsplit("=", 1)[1]
+
+
+def test_each_bridge_run_has_its_own_cap_and_keeps_earlier_ids() -> None:
+    """TASK-475: a resume keeps the instance id; its new run must learn up to the cap again."""
+    from clauster.routes import websockets as ws_module
+
+    cap = ws_module._STREAM_IDS_PER_KIND
+    first, second = "/srv/projects/alpha/alpha-1-1.log", "/srv/projects/alpha/alpha-2-2.log"
+
+    def each(ids: range, run: str) -> None:  # one connection per id: only the store counts
+        for i in ids:
+            _learn("iid-1", _tagged_env(i), {}, run=run)
+
+    each(range(cap + 2), first)
+    assert _streamed("iid-1") == {_env_value(i) for i in range(cap)}  # the cap holds in a run
+    each(range(90, 91), first)  # a reconnect to the same run
+    assert _env_value(90) not in _streamed("iid-1")
+    each(range(100, 100 + cap + 2), second)
+    # The new run stored `cap` new ids, and every id of the first run is still stored.
+    assert _streamed("iid-1") == {_env_value(i) for i in (*range(cap), *range(100, 100 + cap))}
+    for i in (*range(cap), *range(100, 100 + cap)):
+        assert not _leaks(redact.sanitize_line(f"xyz{_env_value(i)}"), _env_value(i))
+    assert _leaks(f"xyz{_env_value(90)}", _env_value(90))  # positive control of the oracle
+    # An id the first run stored, read again by the second run, takes none of its slots.
+    _learn("iid-1", _tagged_env(0), {}, run=second)
+    assert len(_streamed("iid-1")) == 2 * cap
+    # Back to the first run (an old socket still open): its count is still full.
+    _learn("iid-1", _tagged_env(91), {}, run=first)
+    assert _env_value(91) not in _streamed("iid-1")
+    redact.forget_known_values("iid-1")  # Forget still clears every run
+    assert _streamed("iid-1") == frozenset() and "iid-1#stream" not in redact._stream_runs
+
+
+def test_ws_bridge_log_a_resumed_instance_learns_up_to_the_cap_again(
+    runner_config, tmp_path: Path
+) -> None:
+    """TASK-475, end to end: a resume keeps the instance id and writes a new log."""
+    from clauster.routes import websockets as ws_module
+
+    cap = ws_module._STREAM_IDS_PER_KIND
+    first_log, second_log = tmp_path / "alpha-1-1.log", tmp_path / "alpha-2-2.log"
+    _append(first_log, "")
+    _append(second_log, "")
+    instance = _bare_instance(first_log)
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    runner._instances[instance.instance_id] = instance
+
+    def _tail(log: Path, ids: range, sentinel: str) -> None:
+        with client.websocket_connect("/ws/bridge-log/alpha") as ws:
+            _append(log, "".join(f"{_tagged_env(i)}\n" for i in ids) + f"{sentinel}\n")
+            while ws.receive_text() != sentinel:
+                pass
+
+    with TestClient(create_app(config, runner=runner)) as client:
+        _tail(first_log, range(cap + 2), "end1")
+        assert _streamed(instance.instance_id) == {_env_value(i) for i in range(cap)}
+        # The resume, as the spawn path builds it: a new record, the same instance id, and a
+        # new log for the new run.
+        resumed = _bare_instance(second_log)
+        resumed.instance_id = instance.instance_id
+        runner._instances[instance.instance_id] = resumed
+        _tail(second_log, range(100, 100 + cap + 2), "end2")
+        # Without a count per run the second run learns nothing: the first filled the cap.
+        new_ids = {_env_value(i) for i in range(100, 100 + cap)}
+        assert _streamed(instance.instance_id) == {_env_value(i) for i in range(cap)} | new_ids
+        # Every id of both runs is masked in the second run's stream.
+        with client.websocket_connect("/ws/bridge-log/alpha") as ws:
+            _append(second_log, "".join(f"xyz{_env_value(i)}\n" for i in range(cap)))
+            for i in range(cap):
+                assert not _leaks(ws.receive_text(), _env_value(i))
+
+
+def _lifetime_rule(store: dict[str, frozenset[str]], owner: str, value: str, cap: int) -> None:
+    """The stream store before TASK-475: ``cap`` of a kind over the owner's whole life."""
+    forms = redact._known_forms(value)
+    stream, record = f"{owner}#stream", redact._known_owners.get(owner, frozenset())
+    held = store.get(stream, frozenset())
+    if not forms or forms <= held | record:
+        return
+    if redact._count_kind(held - record, redact._form_kind(next(iter(forms)))) >= cap:
+        return
+    store[stream] = held | forms
+
+
+def test_a_record_that_frees_a_lifetime_slot_still_stores_the_value() -> None:
+    # A count per run alone stores less here than the rule before it: the first run fills the
+    # lifetime cap, the second run fills its own, then the record learns one of the first
+    # run's ids. The old rule then had a free slot for the next id of the second run.
+    cap, limit = 4, 64
+    first, second = "/srv/projects/alpha/a.log", "/srv/projects/alpha/b.log"
+    for i in range(cap):
+        redact.remember_stream_value("iid-1", _env_value(i), run=first, cap=cap, limit=limit)
+    for i in range(10, 10 + cap):
+        redact.remember_stream_value("iid-1", _env_value(i), run=second, cap=cap, limit=limit)
+    redact.remember_known_values("iid-1", _env_value(0))  # the record takes one
+    late = _env_value(20)
+    redact.remember_stream_value("iid-1", late, run=second, cap=cap, limit=limit)
+    assert late in _streamed("iid-1")
+    assert not _leaks(redact.sanitize_line(f"xyz{late}"), late) and _leaks(f"xyz{late}", late)
+
+
+def test_the_store_holds_every_value_the_lifetime_rule_holds() -> None:
+    """Differential: for random calls, the store holds what the old rule stored, and more."""
+    import random
+
+    cap, limit = 4, 12
+    rng = random.Random(475)  # noqa: S311 — a reproducible test stream, not crypto
+    values = [_env_value(i) for i in range(40)] + [
+        f"session_01{i:04d}Pz8Ox6Ny4Mw2Lv9Ku" for i in range(40)
+    ]
+    more = 0
+    for _ in range(60):  # one random history per round
+        redact.forget_known_values("iid-1")
+        old: dict[str, frozenset[str]] = {}
+        for _ in range(200):
+            roll, value = rng.random(), rng.choice(values)
+            if roll < 0.08:
+                redact.remember_known_values("iid-1", value)
+            elif roll < 0.1:
+                redact.forget_known_values("iid-1")
+                old.clear()
+            else:
+                run = f"/srv/projects/alpha/run-{rng.randint(0, 5)}.log"
+                _lifetime_rule(old, "iid-1", value, cap)
+                redact.remember_stream_value("iid-1", value, run=run, cap=cap, limit=limit)
+            assert old.get("iid-1#stream", frozenset()) <= _streamed("iid-1")
+        more += len(_streamed("iid-1") - old.get("iid-1#stream", frozenset()))
+        assert redact._count_kind(_streamed("iid-1"), "env") <= limit + cap  # bounded
+    assert more > 0  # positive control: the new runs did store what the old rule refused
+
+
+def test_all_runs_together_store_at_most_the_limit() -> None:
+    from clauster.routes import websockets as ws_module
+
+    cap, limit = ws_module._STREAM_IDS_PER_KIND, ws_module._STREAM_IDS_PER_KIND_LIMIT
+    runs = limit // cap + 3  # more runs than the limit has room for
+    for run in range(runs):
+        lines = "\n".join(_tagged_env(100 * run + i) for i in range(cap + 1))
+        _learn("iid-1", lines, {}, run=f"/srv/projects/alpha/alpha-{run}.log")
+    streamed = _streamed("iid-1")
+    assert len(streamed) == limit  # bounded: without the limit, runs * cap
+    # The first runs filled the store; a later run is refused, and nothing earlier is dropped.
+    assert streamed == {
+        _env_value(100 * run + i) for run in range(limit // cap) for i in range(cap)
+    }
+    stored = sum(len(forms) for forms in redact._stream_runs["iid-1#stream"].values())
+    assert stored == limit  # the per-run record holds no more than the store
+    # The session kind has its own limit, as it has its own cap.
+    _learn("iid-1", f"[remote-bridge] Unarchive {SESSION}", {}, run="/srv/projects/alpha/x.log")
+    assert SESSION in _streamed("iid-1") and CSE in _streamed("iid-1")
+
+
 def test_a_fake_marker_first_cannot_shut_out_the_real_id() -> None:
     """Echoed text names an env id before the bridge's own line (a rotated log, say)."""
-    from clauster.routes import websockets as ws_module
 
     learned: dict[str, set[str]] = {}
     fake = "env_01Mn5Bv7Cx9Za2Sd4Fg6Hj8Kl1"
-    ws_module._learn_stream_ids("iid-1", f"tool said environment_id={fake}", learned)
-    ws_module._learn_stream_ids("iid-1", f"t [bridge:api] environment_id={ENV}", learned)
+    _learn("iid-1", f"tool said environment_id={fake}", learned)
+    _learn("iid-1", f"t [bridge:api] environment_id={ENV}", learned)
     assert ENV in _streamed("iid-1")
     assert not _leaks(redact.sanitize_line(f"xyz{ENV}"), ENV)
 
@@ -599,7 +766,7 @@ def test_stream_learns_at_most_a_few_ids_of_a_kind() -> None:
     lines = "".join(
         f"[bridge:api] environment_id=env_01{i:04d}Zq9Wx7Vc5Bn3Mk1Lj\n" for i in range(20)
     )
-    ws_module._learn_stream_ids("iid-1", lines, learned)
+    _learn("iid-1", lines, learned)
     assert len(learned["env"]) == ws_module._STREAM_IDS_PER_KIND
     assert len(_streamed("iid-1")) == ws_module._STREAM_IDS_PER_KIND
 
@@ -613,7 +780,6 @@ def test_a_forget_that_changes_no_value_keeps_the_matcher() -> None:
 
 
 def test_stream_id_pattern_is_linear_on_crafted_lines() -> None:
-    from clauster.routes import websockets as ws_module
 
     learned: dict[str, set[str]] = {}
     for unit, count in (
@@ -621,11 +787,11 @@ def test_stream_id_pattern_is_linear_on_crafted_lines() -> None:
         ("Unarchive ", 25_000),
         ("environment_id=", 15_000),
     ):
-        ws_module._learn_stream_ids("iid-1", unit * count, learned)
+        _learn("iid-1", unit * count, learned)
 
         def scan(units: int, unit: str = unit):
             line = unit * units
-            return lambda: ws_module._learn_stream_ids("iid-1", line, {})
+            return lambda: _learn("iid-1", line, {})
 
         assert_linear_time(scan, unit=count // 16)
     assert learned == {}
@@ -633,37 +799,33 @@ def test_stream_id_pattern_is_linear_on_crafted_lines() -> None:
     dense = f"environment_id={ENV} " + "".join(
         f"[b] environment_id=env_{i} " for i in range(11_000)
     )
-    ws_module._learn_stream_ids("iid-1", dense, learned)
+    _learn("iid-1", dense, learned)
     assert learned["env"] == {ENV}
 
     def scan_dense(hits: int):
         text = f"environment_id={ENV} " + "".join(
             f"[b] environment_id=env_{i} " for i in range(hits)
         )
-        return lambda: ws_module._learn_stream_ids("iid-1", text, {})
+        return lambda: _learn("iid-1", text, {})
 
     assert_linear_time(scan_dense, unit=11_000 // 16)
 
 
 def test_stream_ignores_a_tag_after_the_id() -> None:
-    from clauster.routes import websockets as ws_module
 
     env2 = "env_01Tq4Wr6Ey8Uz2Ix9Oc3Pv5Ab7"
     learned: dict[str, set[str]] = {}
-    ws_module._learn_stream_ids("iid-1", f"[bridge:api] environment_id={ENV}", learned)
-    ws_module._learn_stream_ids("iid-1", f"echo environment_id={env2} [bridge:api]", learned)
+    _learn("iid-1", f"[bridge:api] environment_id={ENV}", learned)
+    _learn("iid-1", f"echo environment_id={env2} [bridge:api]", learned)
     assert learned["env"] == {ENV}
 
 
 def test_stream_learns_a_resumed_session_from_a_remote_bridge_line() -> None:
-    from clauster.routes import websockets as ws_module
 
     resumed = "session_01Pz8Ox6Ny4Mw2Lv9Ku7Jt5Is3"
     learned: dict[str, set[str]] = {}
-    ws_module._learn_stream_ids(
-        "iid-1", f"[bridge:init] Created initial session {SESSION}", learned
-    )
-    ws_module._learn_stream_ids("iid-1", f"t [remote-bridge] Unarchive {resumed}", learned)
+    _learn("iid-1", f"[bridge:init] Created initial session {SESSION}", learned)
+    _learn("iid-1", f"t [remote-bridge] Unarchive {resumed}", learned)
     assert learned["session"] == {SESSION, resumed}
 
 
@@ -681,20 +843,18 @@ def test_log_head_cut_at_the_limit_drops_the_partial_line(tmp_path: Path, monkey
 
 
 def test_stream_bridge_id_must_end_where_the_uuid_ends() -> None:
-    from clauster.routes import websockets as ws_module
 
     learned: dict[str, set[str]] = {}
-    ws_module._learn_stream_ids("iid-1", f"[bridge:init] bridgeId={BRIDGE}a dir=x", learned)
+    _learn("iid-1", f"[bridge:init] bridgeId={BRIDGE}a dir=x", learned)
     assert learned == {}  # a 37-character hex run is not a bridge id: store nothing
 
 
 def test_stream_accepts_a_tag_that_touches_the_id() -> None:
-    from clauster.routes import websockets as ws_module
 
     env2 = "env_01Tq4Wr6Ey8Uz2Ix9Oc3Pv5Ab7"
     learned: dict[str, set[str]] = {}
-    ws_module._learn_stream_ids("iid-1", f"environment_id={ENV}", learned)
-    ws_module._learn_stream_ids("iid-1", f"[bridge:a]environment_id={env2}", learned)
+    _learn("iid-1", f"environment_id={ENV}", learned)
+    _learn("iid-1", f"[bridge:a]environment_id={env2}", learned)
     assert learned["env"] == {ENV, env2}
 
 
