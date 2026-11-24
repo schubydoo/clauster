@@ -2157,20 +2157,25 @@ def test_the_retry_keeps_an_already_quoted_value() -> None:
 def test_the_retry_replaces_tabs_after_a_lone_cr() -> None:
     # JavaScript's multiline `^` also matches after a lone CR. (`m:\r\tk: v` would not do: the
     # CLI's line pattern takes \r\t as the space after `m:` and quotes `k: v`, as this port does.)
-    assert cw._cli_retry_text("# c\r\tk: v\n\t\tj: w") == "# c\r  k: v\n    j: w"
-    assert cw._cli_retry_text("m:\r\tk: v") == 'm: "k: v"'
+    assert (
+        cw._cli_retry_text(list_loader=cw._FlowDepthLoader, header="# c\r\tk: v\n\t\tj: w")
+        == "# c\r  k: v\n    j: w"
+    )
+    assert cw._cli_retry_text(list_loader=cw._FlowDepthLoader, header="m:\r\tk: v") == 'm: "k: v"'
 
 
 def test_the_flow_list_check_refuses_to_answer_for_a_too_deep_value() -> None:
     # TASK-502: neither answer is safe (False would quote a list the CLI reads as a list),
     # so the depth error goes up to `cli_frontmatter_text`, which keeps the header.
     with pytest.raises(cw.FlowNestingTooDeepError):
-        cw._is_yaml_list("[" * 5000 + "]" * 5000)
+        cw._is_yaml_list(loader=cw._FlowDepthLoader, text="[" * 5000 + "]" * 5000)
     depth = cw.MAX_NESTING_DEPTH
-    assert cw._is_yaml_list("[" * depth + "]" * depth) is True
-    assert cw._is_yaml_list("[a, b]") is True
-    assert cw._is_yaml_list("[&x a, &x b]") is True  # a duplicate anchor: a list to YAML 1.2
-    assert cw._is_yaml_list("[a] [b]") is False
+    assert cw._is_yaml_list(loader=cw._FlowDepthLoader, text="[" * depth + "]" * depth) is True
+    assert cw._is_yaml_list(loader=cw._FlowDepthLoader, text="[a, b]") is True
+    assert (
+        cw._is_yaml_list(loader=cw._FlowDepthLoader, text="[&x a, &x b]") is True
+    )  # a duplicate anchor: a list to YAML 1.2
+    assert cw._is_yaml_list(loader=cw._FlowDepthLoader, text="[a] [b]") is False
 
 
 @pytest.mark.parametrize("parse", _both_parsers())
@@ -2181,8 +2186,11 @@ def test_the_flow_list_check_refuses_to_answer_for_a_too_deep_value() -> None:
         pytest.param("x: &é v\nhint: [a] [b]", id="anchor-non-ascii"),
         pytest.param("x: &a v\ny: *a.b\nhint: [a] [b]", id="alias-with-a-dot"),
         pytest.param("x: [:a]\nhint: [a] [b]", id="flow-item-starts-with-colon"),
-        # PyYAML cannot start a token at a tab after a value; YAML 1.2 reads a comment.
-        pytest.param("disallowedTools: Bash\t# , Read", id="tab-then-hash-in-a-value"),
+        # PyYAML cannot start a token at a tab after a quoted value; YAML 1.2 reads a
+        # comment. (A tab after a PLAIN value now loads, TASK-485: see the test below.)
+        pytest.param('disallowedTools: "Bash"\t# , Read', id="tab-after-a-quoted-value"),
+        # A tab after the `:` indicator: YAML 1.2 reads `q`, this loader still refuses it.
+        pytest.param("when:\tq", id="tab-after-the-colon"),
     ],
 )
 def test_syntax_only_yaml_1_2_accepts_is_refused_not_retried(parse, lines: str) -> None:
@@ -2190,6 +2198,79 @@ def test_syntax_only_yaml_1_2_accepts_is_refused_not_retried(parse, lines: str) 
     # retry. PyYAML refuses them; the retry would read other values, so refuse instead.
     with pytest.raises(cw.InvalidCandidateError, match="not valid YAML"):
         parse(f"---\nname: a\ndescription: d\n{lines}\n---\nbody\n")
+
+
+@pytest.mark.parametrize("parse", _both_parsers())
+@pytest.mark.parametrize(
+    ("lines", "key", "expected"),
+    [
+        # TASK-485. Each expected value is what eemeli/yaml (YAML 1.2) reads; PyYAML's own
+        # SafeLoader refuses every one of these headers.
+        ("when: a\tb", "when", "a\tb"),
+        ("when: a \t b", "when", "a \t b"),
+        ("when: a\t\tb  \t", "when", "a\t\tb"),
+        ("disallowedTools: Bash\t# , Read", "disallowedTools", "Bash"),
+        ("when: a\t\n  b", "when", "a b"),
+        ("when: a\t:b", "when", "a\t:b"),
+        ("when: [a\tb, c]", "when", ["a\tb", "c"]),
+        ("when: {m: a\tb}", "when", {"m": "a\tb"}),
+        ("when:\n  - a\tb", "when", ["a\tb"]),
+        ("a\tb: c", "a\tb", "c"),
+    ],
+)
+def test_a_tab_inside_a_plain_value_loads_as_yaml_1_2_reads_it(
+    parse, lines: str, key: str, expected: object
+) -> None:
+    frontmatter, body = parse(f"---\nname: a\ndescription: d\n{lines}\n---\nbody\n")
+    assert (frontmatter[key], body) == (expected, "body\n")
+    # PyYAML's own loader refuses the header, so the new loader is what reads it.
+    with pytest.raises(yaml.YAMLError):
+        yaml.safe_load(f"{lines}\n")
+    assert cw.yaml12_view(f"{lines}\n") == {key: expected}
+
+
+def test_the_depth_check_reads_past_a_tab_in_a_value() -> None:
+    # The depth scan uses the same tab reading as the parse, so a deep flow collection
+    # after a tab in a value is refused before it is parsed (TASK-502, TASK-485).
+    depth = cw.MAX_NESTING_DEPTH + 1
+    header = "when: a\tb\nx: " + "[" * depth + "]" * depth + "\n"
+    with pytest.raises(cw.InvalidCandidateError, match="nested too deeply"):
+        cw.load_frontmatter_yaml(header, what="f")
+
+
+@pytest.mark.parametrize(
+    ("header", "expected"),
+    [
+        # Each checked against eemeli/yaml: an explicit `!!str` keeps the text, a plain
+        # spelling is a number to YAML 1.2 (TASK-485).
+        ("k: !!str 1e3\n", {"k": "1e3"}),
+        ("k: !!str 0o17\n", {"k": "0o17"}),
+        ("k: !<tag:yaml.org,2002:str> 1e3\n", {"k": "1e3"}),
+        ("k: 1e3\n", {"k": 1000.0}),
+        ("k: [!!str 1e3, 1e3]\n", {"k": ["1e3", 1000.0]}),
+        # The non-specific tag is always a string to YAML 1.2; PyYAML resolves the text,
+        # even a quoted one, as if it were plain (review on this branch).
+        ("k: ! 5\n", {"k": "5"}),
+        ("k: ! true\n", {"k": "true"}),
+        ('k: ! "5"\n', {"k": "5"}),
+        ("k: !\n", {"k": ""}),
+    ],
+)
+def test_the_yaml_1_2_view_keeps_an_explicit_str_as_text(header: str, expected: object) -> None:
+    assert cw.yaml12_view(header) == expected
+
+
+@pytest.mark.parametrize("parse", _both_parsers())
+def test_a_nested_explicit_str_number_spelling_is_not_a_mismatch(parse) -> None:
+    # `!!str 1e3` is the text 1e3 to both YAML versions, so the seam's nested check lets it
+    # pass. A plain 1e3 there is still refused: a number to YAML 1.2, text to PyYAML.
+    text = "---\nname: a\ndescription: d\nhooks:\n  X: [!!str 1e3]\n---\nb\n"
+    assert parse(text)[0]["hooks"] == {"X": ["1e3"]}
+    with pytest.raises(cw.InvalidCandidateError, match="nested value"):
+        parse(text.replace("!!str 1e3", "1e3"))
+    # `! 5` is the text 5 to YAML 1.2 and the int 5 to PyYAML: a mismatch, refused.
+    with pytest.raises(cw.InvalidCandidateError, match="nested value"):
+        parse(text.replace("!!str 1e3", "! 5"))
 
 
 @pytest.mark.parametrize("parse", _both_parsers())
@@ -2707,3 +2788,13 @@ def test_a_comment_inside_a_secret_block_gets_every_line_mask(text: str) -> None
         shown, text, what="SKILL.md", view=cw.redact_secret_lines
     )
     assert restored == text
+
+
+def test_load_frontmatter_is_a_safe_load() -> None:
+    # The frontmatter loader builds the loader by hand so CodeQL can see it (TASK-485). It
+    # must stay a SafeLoader: a python tag is refused, and plain YAML loads as safe_load does.
+    assert issubclass(cw.FrontmatterLoader, yaml.SafeLoader)
+    with pytest.raises(yaml.constructor.ConstructorError):
+        cw.load_frontmatter("x: !!python/object/apply:os.system ['true']\n")
+    header = "name: a\nlist: [1, two]\nmap: {k: v}\n"
+    assert cw.load_frontmatter(header) == yaml.safe_load(header)

@@ -234,6 +234,12 @@ def _is_positive_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value > 0
 
 
+#: The end of the two refusals whose fix is the MCP tab's convert-on-load. A subagent's
+#: inline server converts when its FILE loads, so that surface puts its own advice in
+#: place of this text (``config_write_subagents``, TASK-486).
+RELOAD_HINT_TAIL = "when it loads the server, so reload the server and save it"
+
+
 def entry_transport(entry: dict[str, Any]) -> str:
     """Return the transport ``entry`` declares: ``stdio``, ``http``, ``sse`` or ``ws``.
 
@@ -256,8 +262,7 @@ def entry_transport(entry: dict[str, Any]) -> str:
         value = entry["transport"]
         convertible = "type" in entry or (isinstance(value, str) and value in TRANSPORT_ALIASES)
         hint = (
-            "The editor converts a stored 'transport' to 'type' when it loads the server, "
-            "so reload the server and save it"
+            f"The editor converts a stored 'transport' to 'type' {RELOAD_HINT_TAIL}"
             if convertible
             else "Remove 'transport' and set 'type' by hand"
         )
@@ -447,8 +452,7 @@ def _validate_server_fields(name: str, entry: Any) -> None:
     if transport != "stdio" and "env" in entry:
         raise cw.InvalidCandidateError(
             f"remote server {name!r} has 'env', which Claude Code ignores on a remote "
-            "server; remove it. The editor drops a stored remote 'env' when it loads the "
-            "server, so reload the server and save it"
+            f"server; remove it. The editor drops a stored remote 'env' {RELOAD_HINT_TAIL}"
         )
     cw.warn_unknown_keys(entry, _KEYS_BY_TRANSPORT[transport], f"{transport} server {name!r} key")
     _validate_common_fields(name, entry)

@@ -57,6 +57,7 @@ import math
 import re
 import sys
 from collections.abc import Callable, Iterable, Iterator
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal
 
@@ -1729,8 +1730,78 @@ class FlowNestingTooDeepError(yaml.YAMLError):
         self.mark = mark
 
 
-class _FlowDepthLoader(yaml.SafeLoader):
-    """``SafeLoader`` whose scanner stops at a flow collection past :data:`MAX_NESTING_DEPTH`.
+#: The attribute :class:`FrontmatterLoader` sets on a scalar node written with a tag.
+_EXPLICIT_TAG_ATTR = "clauster_explicit_tag"
+#: The characters that end a line to PyYAML's scanner.
+_YAML_LINE_BREAKS = "\r\n\x85\u2028\u2029"
+
+
+class FrontmatterLoader(yaml.SafeLoader):
+    r"""``SafeLoader`` that reads two things in a frontmatter header as YAML 1.2 does (TASK-485).
+
+    Claude Code's YAML 1.2 loader (checked against eemeli/yaml) reads both; PyYAML does not:
+
+    * **A tab inside a plain value.** YAML 1.2 reads a tab between the words of a plain
+      scalar as white space (``description: a<TAB>b`` is ``"a\tb"``), and a tab before a
+      ``#`` as the space that starts a comment. PyYAML refuses every such tab ("found
+      character '\t' that cannot start any token"). Here a run of spaces and tabs inside
+      the line of a plain scalar is read as YAML 1.2 reads it. A run with no tab, and every
+      other place a tab can stand (indentation, after a ``:`` or ``-`` indicator, after a
+      quoted value or a ``]``), is scanned by PyYAML's own code, so it is refused as before.
+    * **An explicit ``!!str``.** ``!!str 1e3`` is the string ``1e3`` to both, but PyYAML's
+      composed node does not say that the tag was written, and ``1e3`` resolves to a string
+      in YAML 1.1 anyway. This records the tag a scalar was written with, so
+      :func:`yaml12_view` reads it as the string, not as the number a plain ``1e3`` is in
+      YAML 1.2. The same record gives the non-specific ``!`` tag its YAML 1.2 reading,
+      always a string (``! 5`` is ``"5"``), where PyYAML resolves the text as if plain.
+
+    Every frontmatter check composes with this loader, so they all read one document. The
+    editor's masking (``_mask_header_values``) and its masked-value restore still compose
+    with plain ``SafeLoader``: a header only this loader reads has every line masked whole
+    there, which is never less masking than before. Never evaluates anything.
+    """
+
+    def scan_plain_spaces(self, indent: int, start_mark: yaml.Mark) -> list[str] | None:
+        """Read a run of spaces and tabs after a plain scalar's text as YAML 1.2 does."""
+        length = 0
+        while self.peek(length) in " \t":
+            length += 1
+        if "\t" not in self.prefix(length):
+            return super().scan_plain_spaces(indent, start_mark)  # PyYAML's own reading
+        whitespaces = self.prefix(length)
+        self.forward(length)
+        if self.peek() in _YAML_LINE_BREAKS:
+            # White space at the end of a line is dropped; PyYAML folds the line break.
+            return super().scan_plain_spaces(indent, start_mark)
+        # In-line white space: kept when more of the value follows, and a `#` after it
+        # starts a comment (scan_plain checks for one).
+        return [whitespaces]
+
+    def compose_scalar_node(self, anchor: Any) -> yaml.ScalarNode:
+        """Compose a scalar as PyYAML does, and record the tag it was written with, if any."""
+        written = self.peek_event().tag
+        node = super().compose_scalar_node(anchor)
+        if written is not None:
+            setattr(node, _EXPLICIT_TAG_ATTR, written)
+        return node
+
+
+def load_frontmatter(header: str) -> object:
+    """Load ``header`` with :class:`FrontmatterLoader`, the same way ``yaml.load`` does.
+
+    The loader is a ``SafeLoader``, so it builds only plain YAML types and refuses a
+    ``!!python/...`` tag. ``yaml.load`` with it is safe, but CodeQL trusts only the stock
+    safe loaders there (py/unsafe-deserialization), so this builds the loader directly.
+    """
+    loader = FrontmatterLoader(header)
+    try:
+        return loader.get_single_data()
+    finally:
+        loader.dispose()
+
+
+class _FlowDepthCap:
+    """A scanner mixin that stops at a flow collection past :data:`MAX_NESTING_DEPTH`.
 
     The stop is in the scanner, so it reads quotes, comments and block scalars exactly as
     the parse does, and the cost of reaching it is linear. Raises
@@ -1738,11 +1809,26 @@ class _FlowDepthLoader(yaml.SafeLoader):
     treats a YAML error as "does not parse" fails closed on it unchanged.
     """
 
+    flow_level: int
+
     def fetch_flow_collection_start(self, TokenClass: type[yaml.Token]) -> None:  # noqa: N803
         """Refuse the collection that would open past the cap, then scan as PyYAML does."""
         if self.flow_level >= MAX_NESTING_DEPTH:
-            raise FlowNestingTooDeepError(self.get_mark())
-        super().fetch_flow_collection_start(TokenClass)
+            raise FlowNestingTooDeepError(self.get_mark())  # type: ignore[attr-defined]
+        super().fetch_flow_collection_start(TokenClass)  # type: ignore[misc]
+
+
+class _FlowDepthLoader(_FlowDepthCap, FrontmatterLoader):
+    """:class:`FrontmatterLoader` with the depth cap: it reads tabs as the parse does."""
+
+
+class SafeFlowDepthLoader(_FlowDepthCap, yaml.SafeLoader):
+    """Plain ``SafeLoader`` with the depth cap, for a check that must read as before TASK-485.
+
+    The editor views decide whether a header loads as they did before
+    :class:`FrontmatterLoader`, so they build the retry text with this loader
+    (``list_loader`` of :func:`_cli_retry_text`).
+    """
 
 
 def refuse_deep_flow(header: str, *, what: str, line_offset: int) -> None:
@@ -1902,12 +1988,164 @@ def js_integer(digits: str) -> int | None:
     return value
 
 
+# ---------------------------------------------------------------------------
+# How the CLI's JavaScript reads a frontmatter value (TASK-483): one copy, so the Skills
+# and subagent surfaces cannot drift apart. Each module aliases these names.
+# ---------------------------------------------------------------------------
+
+#: The characters JavaScript's ``trim`` and ``\s`` match (WhiteSpace and LineTerminator).
+#: Python's ``str.strip`` differs: it also strips ``\x1c``-``\x1f`` and ``\x85``, and it
+#: keeps the BOM, ``\ufeff``.
+JS_WHITESPACE = (
+    "\t\n\v\f\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008"
+    "\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
+)
+#: JavaScript ``parseInt(s, 10)``: optional leading whitespace, an optional sign, then the
+#: longest run of ASCII digits; anything after the digits is ignored.
+JS_PARSE_INT_RE = re.compile(f"[{JS_WHITESPACE}]*([+-]?[0-9]+)")
+#: The effort levels and the one alias the CLI's effort reader accepts (``dq`` in 2.1.318,
+#: ``hZ`` in 2.1.330: the same reader).
+EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+EFFORT_ALIASES = {"med": "medium"}
+#: Below this, every integer is exact as a JavaScript number (``Number.MAX_SAFE_INTEGER``).
+_JS_SAFE_INTEGER = 2**53
+
+
+def js_parse_int(text: str) -> int | None:
+    """Return what JavaScript ``parseInt(text, 10)`` returns, or None for ``NaN``/``Infinity``."""
+    match = JS_PARSE_INT_RE.match(text)
+    # Bounded: int() on 5000 digits raises ValueError (Greptile on PR 1810).
+    return js_integer(match.group(1)) if match else None
+
+
+def _js_number_text(value: float) -> str:
+    """Return JavaScript's ``String()`` of a number that is not a small whole number."""
+    if math.isnan(value):
+        return "NaN"
+    if math.isinf(value):
+        return "Infinity" if value > 0 else "-Infinity"
+    sign = "-" if value < 0 else ""
+    # repr() gives the shortest round-tripping digits, as JavaScript does; only the layout
+    # differs (Number::toString, ECMA-262 6.1.6.1.20).
+    digits_tuple = Decimal(repr(abs(value))).normalize().as_tuple()
+    digits = "".join(str(d) for d in digits_tuple.digits)
+    # The caller passes only a finite value that is not zero, so the exponent is an int.
+    point = len(digits) + int(digits_tuple.exponent)  # the decimal point follows this many
+    if len(digits) <= point <= 21:
+        # A whole number past 2**53: JavaScript keeps only the shortest round-trip digits.
+        return sign + digits + "0" * (point - len(digits))
+    if 0 < point <= 21:
+        return sign + digits[:point] + "." + digits[point:]
+    if -6 < point <= 0:
+        return sign + "0." + "0" * (-point) + digits
+    mantissa = digits[0] + ("." + digits[1:] if len(digits) > 1 else "")
+    power = point - 1
+    return f"{sign}{mantissa}e{'+' if power > 0 else '-'}{abs(power)}"
+
+
+def js_string(value: Any) -> str:
+    """Return JavaScript's ``String(value)`` for a value YAML can produce.
+
+    Raises ``TypeError`` for a value JavaScript never sees from the CLI's YAML loader (a
+    PyYAML date, ``bytes``, a set or an explicitly tagged value), so the caller can refuse
+    the field instead of guessing what Claude Code reads.
+    """
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if value is None:
+        return "null"
+    if isinstance(value, int):
+        try:
+            as_float = float(value)
+        except OverflowError:
+            return "Infinity" if value > 0 else "-Infinity"
+        return str(value) if abs(value) < _JS_SAFE_INTEGER else _js_number_text(as_float)
+    if isinstance(value, float):
+        if value.is_integer() and abs(value) < _JS_SAFE_INTEGER:
+            return str(int(value))
+        return _js_number_text(value)
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        # Array.prototype.toString: join with ",", null and undefined become "".
+        return ",".join("" if item is None else js_string(item) for item in value)
+    if isinstance(value, dict):
+        return "[object Object]"
+    raise TypeError(type(value).__name__)
+
+
+def cli_tool_entries(items: list[str]) -> list[str]:
+    """Split tool-list strings into entries the way the 2.1.318 CLI does (its ``fu``).
+
+    A comma or a space ends an entry unless it is inside parentheses, so
+    ``Agent(worker, researcher), Read`` is two entries. Nothing is resolved against a tool
+    registry.
+    """
+    entries: list[str] = []
+    for item in items:
+        current, in_parens = "", False
+        for char in item:
+            if char == "(":
+                in_parens = True
+                current += char
+            elif char == ")":
+                in_parens = False
+                current += char
+            elif char in ", " and not in_parens:
+                if current.strip(JS_WHITESPACE):
+                    entries.append(current.strip(JS_WHITESPACE))
+                current = ""
+            elif current or char.strip(JS_WHITESPACE):
+                current += char
+        if current.strip(JS_WHITESPACE):
+            entries.append(current.strip(JS_WHITESPACE))
+    return entries
+
+
+def cli_effort(value: Any) -> str | int | None:
+    """Return the effort the CLI reads from ``value``, or None when it ignores it.
+
+    A port of the CLI's effort reader (``dq`` in 2.1.318, ``hZ`` in 2.1.330). A number must
+    be a whole number, and any whole number counts. Anything else is stringified
+    (:func:`js_string`, so a list joins and ``[high]`` reads as high) and lowercased (not
+    trimmed), mapped through the alias table, and matched against the level names. Failing
+    that, ``parseInt`` decides, so ``"3 tokens"`` is ``3``.
+    """
+    if value is None or value == "" or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        try:
+            float(value)  # past the double range JavaScript holds Infinity: ignored
+        except OverflowError:
+            return None
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    try:
+        text = js_string(value)
+    except TypeError:
+        return None
+    lowered = text.lower()
+    level = EFFORT_ALIASES.get(lowered, lowered)
+    if level in EFFORT_LEVELS:
+        return level
+    return js_parse_int(lowered)
+
+
 def _yaml12_scalar(node: yaml.ScalarNode) -> Any:
     """Return the value a YAML 1.2 core-schema loader gives the scalar ``node``."""
     implicit = _RESOLVER.resolve(
         yaml.ScalarNode, node.value, (node.style is None, node.style is not None)
     )
-    if node.tag != implicit:
+    # An explicit `!!str` on text that YAML 1.1 also resolves to a string (`!!str 1e3`) has
+    # the implicit tag, so only FrontmatterLoader's mark tells it apart (TASK-485).
+    written = getattr(node, _EXPLICIT_TAG_ATTR, None)
+    if written == "!":
+        # The non-specific tag: always a string in YAML 1.2 (`! 5` is "5"), where PyYAML
+        # resolves the text as if it were plain, even when it is quoted.
+        return node.value
+    explicit_str = node.tag == _YAML_STR_TAG and written is not None
+    if node.tag != implicit or explicit_str:
         # An explicit tag. `!!str` reads the same in both versions; any other tag is refused
         # by whichever surface checks the field.
         return node.value if node.tag == _YAML_STR_TAG else Yaml12Unknown()
@@ -1971,6 +2209,7 @@ def _yaml12_node(root: yaml.Node) -> Any:
         stack.extend((child, False) for child in reversed(children))
 
     def value_of(node: yaml.Node) -> Any:
+        """Return a scalar's YAML 1.2 value, or the already-built value of a collection."""
         if isinstance(node, yaml.ScalarNode):
             return _yaml12_scalar(node)
         return memo[id(node)]  # a collection: composing yields no other node kind
@@ -2101,9 +2340,10 @@ def _is_yaml11_only_syntax_error(exc: yaml.YAMLError) -> bool:
     eemeli/yaml (YAML 1.2): a second anchor of one name (YAML 1.2 does not require unique
     anchors), an anchor or alias name with a character other than letters, digits, ``_``
     and ``-`` (``&a.b``, ``&é``), a flow item that starts with ``:`` (``[:a]``), and a tab
-    after a value (``Bash\t# note``: PyYAML cannot start a token there, YAML 1.2 reads the
-    tab as white space and the ``#`` as a comment). A tab used as indentation is refused by
-    both, and that one does take the retry (which turns it into spaces).
+    after a quoted value or a ``:`` (``"Bash"\t# note``: PyYAML cannot start a token there,
+    YAML 1.2 reads the tab as white space and the ``#`` as a comment). A tab after an
+    unquoted value loads (:class:`FrontmatterLoader`). A tab used as indentation is refused
+    by both, and that one does take the retry (which turns it into spaces).
     """
     if isinstance(exc, ComposerError):
         return exc.problem == "second occurrence"
@@ -2130,7 +2370,7 @@ def _is_tab_after_content(exc: ScannerError) -> bool:
     return mark.buffer[line_start : mark.pointer].strip(" \t") != ""
 
 
-def _is_yaml_list(text: str) -> bool:
+def _is_yaml_list(text: str, *, loader: type[yaml.SafeLoader]) -> bool:
     """Whether ``text`` alone parses as a YAML list (the CLI's ``Array.isArray(G0(w))``).
 
     Composes only, never constructs, so a merge-key pyramid in the value costs nothing here
@@ -2140,14 +2380,14 @@ def _is_yaml_list(text: str) -> bool:
     :data:`MAX_NESTING_DEPTH` raises :class:`FlowNestingTooDeepError`: no answer is safe.
     """
     try:
-        return isinstance(yaml.compose(text, Loader=_FlowDepthLoader), yaml.SequenceNode)
+        return isinstance(yaml.compose(text, Loader=loader), yaml.SequenceNode)
     except FlowNestingTooDeepError:
         raise
     except yaml.YAMLError as exc:
         return _is_yaml11_only_syntax_error(exc)
 
 
-def _cli_retry_text(header: str) -> str:
+def _cli_retry_text(header: str, *, list_loader: type[yaml.SafeLoader]) -> str:
     """Return the text the CLI parses when its first YAML parse fails (its ``SMn`` retry).
 
     A port of ``Bm`` plus the tab fix: each top-level ``key: value`` line whose value holds
@@ -2155,6 +2395,10 @@ def _cli_retry_text(header: str) -> str:
     quotes, unless the value is already quoted or is a flow list; then every run of leading
     tabs becomes two spaces per tab. So ``argument-hint: [filename] [format]``, which is not
     valid YAML, reads as the string ``[filename] [format]``.
+
+    ``list_loader`` decides whether a ``[...]`` value is a list. It is keyword-required with
+    no default: the seam passes ``_FlowDepthLoader``, and the editor views pass
+    :class:`SafeFlowDepthLoader`, so each builds the retry text its own reading needs.
     """
     lines = []
     for line in header.split("\n"):
@@ -2164,7 +2408,11 @@ def _cli_retry_text(header: str) -> str:
             quoted = (value.startswith('"') and value.endswith('"')) or (
                 value.startswith("'") and value.endswith("'")
             )
-            flow_list = value.startswith("[") and value.endswith("]") and _is_yaml_list(value)
+            flow_list = (
+                value.startswith("[")
+                and value.endswith("]")
+                and _is_yaml_list(value, loader=list_loader)
+            )
             if not quoted and not flow_list and _CLI_REQUOTE_SPECIAL_RE.search(value):
                 escaped = value.replace("\\", "\\\\").replace('"', '\\"')
                 line = f'{key}: "{escaped}"'
@@ -2270,7 +2518,7 @@ def _yaml12_refuses(text: str, root: yaml.Node | None) -> tuple[int, int] | None
         # The first lone CR: every `\r` before it is part of a `\r\n`, so `\n` counts lines.
         at = lone_cr.start()
         return body.count("\n", 0, at), at - (body.rfind("\n", 0, at) + 1)
-    for token in yaml.scan(text, Loader=yaml.SafeLoader):
+    for token in yaml.scan(text, Loader=FrontmatterLoader):
         end = token.end_mark
         # Zero-width tokens (stream, block start and end) sit before a comment line, not on
         # it, and a token that ends at a line start (a block scalar) is followed by a comment
@@ -2312,7 +2560,7 @@ def _flow_question_mark(text: str) -> tuple[int, int] | None:
     depth = 0
     previous: yaml.Token | None = None
     try:
-        for token in yaml.scan(text, Loader=yaml.SafeLoader):
+        for token in yaml.scan(text, Loader=FrontmatterLoader):
             if isinstance(token, (yaml.FlowMappingStartToken, yaml.FlowSequenceStartToken)):
                 depth += 1
             elif isinstance(token, (yaml.FlowMappingEndToken, yaml.FlowSequenceEndToken)):
@@ -2368,7 +2616,7 @@ def cli_frontmatter_text(header: str) -> str:
         if _is_yaml11_only_syntax_error(exc):
             return header
     try:
-        retry = _cli_retry_text(header)
+        retry = _cli_retry_text(header, list_loader=_FlowDepthLoader)
         yaml.compose(retry, Loader=_FlowDepthLoader)
     except (yaml.YAMLError, RecursionError):
         return header
@@ -2397,7 +2645,7 @@ def yaml12_view(header: str) -> Any:
     The header goes through :func:`cli_frontmatter_text` first, as in the seam.
     """
     try:
-        root = yaml.compose(cli_frontmatter_text(header), Loader=yaml.SafeLoader)
+        root = yaml.compose(cli_frontmatter_text(header), Loader=FrontmatterLoader)
         return None if root is None else _yaml12_node(root)
     except RecursionError as exc:
         raise InvalidCandidateError("frontmatter is nested too deeply to parse") from exc
@@ -2772,7 +3020,7 @@ def load_frontmatter_yaml(header: str, *, what: str, line_offset: int = 0) -> An
         # `!<tag:yaml.org,2002:merge>` and a `%`-escaped tag are merge keys too. Every walk
         # below reads this one composed graph. ``compose`` raises the same
         # ``YAMLError``/``RecursionError`` ``safe_load`` would, mapped below.
-        root = yaml.compose(header, Loader=yaml.SafeLoader)
+        root = yaml.compose(header, Loader=FrontmatterLoader)
         with refuse_check_failures(what):
             if root is not None and _merge_expands_beyond(root, MAX_MERGE_EXPANDED_PAIRS):
                 raise InvalidCandidateError(
@@ -2787,7 +3035,7 @@ def load_frontmatter_yaml(header: str, *, what: str, line_offset: int = 0) -> An
                     f"{what} has an alias to a node that encloses it, which the YAML 1.2 "
                     "that Claude Code reads refuses. Remove the self-reference"
                 )
-        value = yaml.safe_load(header)
+        value = load_frontmatter(header)
     except yaml.YAMLError as exc:
         raise InvalidCandidateError(
             f"{what} is not valid YAML"

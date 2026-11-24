@@ -859,8 +859,12 @@ this editor.
 - `memory`, `color` and `experimental.cacheTtl` offer their listed values,
   written exactly as listed. Another text value saves with a warning.
 - `effort` accepts a level name in any case, the alias `med`, or an integer.
-  Another word saves with a warning. `isolation` offers `worktree` and also
-  `remote`, which Claude Code reads but does not document.
+  Another word saves with a warning. Clauster refuses an `effort` number that
+  Claude Code cannot hold, such as `1e400`. `isolation` offers `worktree` and
+  also `remote`, which Claude Code reads but does not document.
+- `model` must be text to YAML 1.2. An unquoted `1e3` or `0o17` is a number to
+  Claude Code, which then ignores `model`, so Clauster refuses it. Quote the
+  value, or write `!!str 1e3`.
 - `maxTurns` and `autoCompactWindow` accept a number or a string that Claude
   Code reads as a whole number, for example `200000`, `"200,000"` or `2e5`.
   `autoCompactWindow` must be from `100000` to `1000000`. Do not write
@@ -929,9 +933,13 @@ save.
   under it. Claude Code never read these values. The note gives their number.
 
 Only those lines change, so every other value and comment stays as you wrote
-it. If the editor cannot convert a server safely, it shows the file as it is,
-and the save tells you what to change. An example is a definition written on
-one line, such as `- srv: {transport: sse, url: ...}`.
+it. The list items can be indented under `mcpServers:` or start at column 0.
+If the editor cannot convert a server safely, it shows the file as it is, and
+the save tells you what to change. An example is a definition written on one
+line, such as `- srv: {transport: sse, url: ...}`. The save message names the
+server once. It tells you to open the file again and save it, because the
+editor converts the server when it opens the file. It also names the fix to
+make by hand if the editor cannot convert the server.
 
 A file with the name of a built-in subagent, such as `claude.md`, overrides
 that built-in in Claude Code. The list shows the file as a read-only row next
@@ -1249,13 +1257,23 @@ whole save:
 - A key that appears twice in the same mapping. This includes two spellings
   that one YAML version reads as the same key, such as `1` and `01`, or `null`
   and `~`, and two `<<` merge keys in one mapping.
-- A tab inside a plain value or after it, such as `a` then a tab then `b`.
-  YAML 1.2 accepts it, but Clauster's parser does not. Use a space.
+- A tab after a quoted value, after a `]` or `}`, after a `,` inside `[...]`,
+  after the `-` of a list item, or right after the `:` of a key, such as
+  `model:`, a tab, then `opus`. YAML 1.2 accepts it, but Clauster's parser does
+  not. Use a space.
 - A `?` inside a `{...}` or `[...]` value that YAML 1.1 reads as the start of a
   key and YAML 1.2 reads as text. One example is an unquoted url with a query,
   such as `mcpServers: {srv: {url: https://example.com/p?k=v}}`. Another
   example is `[a, ?b]`. Put the value in quotes. A `?` followed by a space at
   the start of an entry, such as `[? a]`, is a key to both and is accepted.
+
+A tab between the words of an unquoted value, or between an unquoted value and
+its `#` comment, saves. Clauster reads it as YAML 1.2 does. The editor views
+still show such a frontmatter as one that does not load. If it can hold a URL,
+a server or a hook, every line of it shows as `********`. A Skills save of that
+view keeps the stored lines. A Subagents save of that view is refused, so type
+the real values. For a subagent file with such a tab, the parsed frontmatter
+and the list description stay empty.
 
 Some frontmatter is not valid YAML, but Claude Code still reads it, and so does
 Clauster. When the first parse fails, Claude Code parses a changed copy of the
@@ -1276,8 +1294,8 @@ those lines. Clauster also refuses some files that YAML 1.2 reads but its own
 parser does not, because it cannot read the values the same way. The examples
 are a file that uses one anchor name twice, such as `&t` on two values, an
 anchor name with a dot or a non-ASCII letter, such as `&d.1`, a list item
-that starts with `:`, such as `[:a]`, and a tab between a value and a comment,
-such as `Bash`, a tab, then `# note`.
+that starts with `:`, such as `[:a]`, and a tab between a quoted value and a
+comment, such as `"Bash"`, a tab, then `# note`.
 
 ### What a skill save writes
 
@@ -1386,8 +1404,16 @@ Clauster never runs a hook command or a skill script from this editor.
   hold single spaces. Clauster refuses a name that Claude Code cannot show.
   Examples are a hidden or direction-changing character, two spaces in a row,
   a space at the start or end, and `<` or `>`. The limit is 256 UTF-16 units,
-  so an emoji counts as two. Clauster also refuses a name with a combining
-  mark, even where Claude Code shows it.
+  so an emoji counts as two. A combining mark, such as an accent typed as a
+  separate character, must follow a letter or a digit, as in Claude Code. A
+  Hangul vowel or final jamo (the part of a Korean syllable that follows its
+  first letter) is refused at the start, after a Latin letter or after a digit.
+  As Claude Code does, Clauster also refuses a run of nine marks, a second dot
+  on `i` or `j`, a mark on a dotless `ı`, and a mark of another script, such as
+  a Devanagari vowel sign, after a Latin letter. Clauster refuses a few such
+  names that Claude Code shows. One example is a mark that belongs to one
+  script after a Greek or a Chinese letter. Clauster cannot tell the script of
+  every letter.
 - Clauster checks `hooks` with the same rules as the
   [Hooks tab](#the-hooks-tab) and as subagent frontmatter hooks. So it accepts
   every documented hook event, hook type and field, and an event, type or field
@@ -1414,6 +1440,8 @@ something different in the two, Clauster refuses it and names the field. For
 example, `description: yes` is the text `yes` to Claude Code. `effort: 010` is
 10 to Claude Code but 8 to Clauster. Quote the value, or write it as a plain
 number. Clauster accepts `user-invocable: yes`, because both read it as true.
+A value with the `!!str` tag, such as `model: !!str 1e3`, is text to both and
+saves.
 
 If you open a `SKILL.md` that holds a field whose value Claude Code ignores,
 the editor can remove that field from the text. Examples are `shell: 5` and

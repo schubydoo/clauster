@@ -109,6 +109,7 @@ from .config_write_hooks import (
     validate_hooks,
 )
 from .config_write_mcp import (
+    RELOAD_HINT_TAIL,
     _convert_legacy_entry,
     _merge_kept,
     _redact_entry,
@@ -179,6 +180,15 @@ _REQUIRED_FRONTMATTER_KEYS = frozenset({"name", "description"})
 # on this write tier cannot drift apart again (#1352). The pattern, its mechanics and
 # its tolerance decisions are documented at the definition — change it in config_write.
 _FRONTMATTER_RE = cw.FRONTMATTER_RE
+
+# The JavaScript-compat helpers are aliases of the one copy in config_write, shared with
+# config_write_skills, so the two surfaces cannot drift apart (TASK-483).
+_JS_WHITESPACE = cw.JS_WHITESPACE
+_JS_PARSE_INT_RE = cw.JS_PARSE_INT_RE
+_js_parse_int = cw.js_parse_int
+_cli_tool_entries = cw.cli_tool_entries
+_cli_effort = cw.cli_effort
+_EFFORT_LEVELS = cw.EFFORT_LEVELS
 
 
 class AgentNotFoundError(cw.ConfigWriteError):
@@ -324,43 +334,6 @@ def parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
     return data, text[match.end() :]
 
 
-def _cli_tool_entries(items: list[str]) -> list[str]:
-    """Split tool-list strings into entries the way the 2.1.318 CLI does (its ``fu``).
-
-    A comma or a space ends an entry unless it is inside parentheses, so
-    ``Agent(worker, researcher), Read`` is two entries. Splitting here only decides
-    whether the list is empty or holds ``*``; no entry is resolved against a tool registry.
-    """
-    entries: list[str] = []
-    for item in items:
-        current, in_parens = "", False
-        for char in item:
-            if char == "(":
-                in_parens = True
-                current += char
-            elif char == ")":
-                in_parens = False
-                current += char
-            elif char == ",":
-                if in_parens:
-                    current += char
-                else:
-                    if current.strip(_JS_WHITESPACE):
-                        entries.append(current.strip(_JS_WHITESPACE))
-                    current = ""
-            elif char == " ":
-                if in_parens:
-                    current += char
-                elif current.strip(_JS_WHITESPACE):
-                    entries.append(current.strip(_JS_WHITESPACE))
-                    current = ""
-            elif current or char.strip(_JS_WHITESPACE):
-                current += char
-        if current.strip(_JS_WHITESPACE):
-            entries.append(current.strip(_JS_WHITESPACE))
-    return entries
-
-
 def _validate_string_or_string_list(value: Any, label: str) -> None:
     """Reject ``value`` unless it is a string or list of strings naming at least one tool.
 
@@ -456,16 +429,6 @@ def _validate_disallowed_tools(value: Any, label: str) -> None:
 _CLI_EXPONENT_RE = re.compile(r"^[+-]?([0-9]+(\.[0-9]*)?|\.[0-9]+)[eE][+-]?[0-9]+$")
 _CLI_GROUPED_INT_RE = re.compile(r"^[+-]?[0-9]{1,3}([_,\u00a0\u202f ])[0-9]{3}(?:\1[0-9]{3})*$")
 _CLI_GROUP_SEPARATORS_RE = re.compile(r"[_,\u00a0\u202f ]")
-#: The characters JavaScript's ``trim`` and ``parseInt`` skip (WhiteSpace and
-#: LineTerminator). Python's ``str.strip``/``\s`` differ: they also skip ``\x1c``-``\x1f``
-#: and ``\x85``, and they keep the BOM, ``\ufeff``.
-_JS_WHITESPACE = (
-    "\t\n\v\f\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008"
-    "\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
-)
-#: JavaScript ``parseInt(s, 10)``: optional leading whitespace, an optional sign, then the
-#: longest run of digits; anything after the digits is ignored.
-_JS_PARSE_INT_RE = re.compile(f"[{_JS_WHITESPACE}]*([+-]?[0-9]+)")
 
 
 def _as_js_number(value: int) -> int | None:
@@ -480,13 +443,6 @@ def _as_js_number(value: int) -> int | None:
     except OverflowError:
         return None
     return value
-
-
-def _js_parse_int(text: str) -> int | None:
-    """Return what JavaScript ``parseInt(text, 10)`` returns, or None for ``NaN``/``Infinity``."""
-    match = _JS_PARSE_INT_RE.match(text)
-    # Bounded: int() on 5000 digits raises ValueError (Greptile on PR 1810).
-    return cw.js_integer(match.group(1)) if match else None
 
 
 def _integral(value: float) -> int | None:
@@ -527,38 +483,6 @@ def _validate_positive_int(value: Any, label: str) -> None:
         raise cw.InvalidCandidateError(f"{label} must be a positive integer")
 
 
-#: The CLI's effort levels and its one effort alias (``med``).
-_EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
-_EFFORT_ALIASES = {"med": "medium"}
-
-
-def _cli_effort(value: Any) -> str | int | None:
-    """Return the effort the CLI reads from ``value`` (its ``dq``), or None when it ignores it.
-
-    A number must be a whole number, and any whole number counts. Anything else is
-    stringified and lowercased (not trimmed), mapped through the alias table, and matched
-    against the level names. Failing that, ``parseInt`` decides, so ``"3 tokens"`` is ``3``.
-    """
-    if value is None or value == "" or isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return _as_js_number(value)
-    if isinstance(value, float):
-        whole = _integral(value)
-        if whole is not None:
-            return whole
-        text = repr(value)  # what JavaScript's String() gives for a finite fraction
-    elif isinstance(value, str):
-        text = value
-    else:
-        return None
-    lowered = text.lower()
-    level = _EFFORT_ALIASES.get(lowered, lowered)
-    if level in _EFFORT_LEVELS:
-        return level
-    return _js_parse_int(lowered)
-
-
 def _validate_effort(value: Any, label: str) -> None:
     """Reject ``value`` unless it is text or a number; warn when the CLI reads no level from it.
 
@@ -566,8 +490,11 @@ def _validate_effort(value: Any, label: str) -> None:
     warning, because Claude Code may add a level before this list does. A value that is not
     a string or a number (a list, a mapping, a Boolean), and a string that starts with an
     integer the CLI cannot hold, are refused.
+
+    The shared reader (:func:`~clauster.config_write.cli_effort`) also reads a list, as the
+    CLI does; this surface reads the scalar YAML types only, so a list is still refused.
     """
-    if _cli_effort(value) is not None:
+    if isinstance(value, (str, int, float)) and _cli_effort(value) is not None:
         return
     # A string that starts with an integer is a number the CLI could not hold (Infinity).
     if not isinstance(value, str) or not value or _JS_PARSE_INT_RE.match(value.lower()):
@@ -759,9 +686,27 @@ def _validate_mcp_servers(value: Any, label: str) -> None:
         try:
             _validate_server_fields(server_name, definition)
         except cw.InvalidCandidateError as exc:
+            detail = _inline_server_detail(str(exc), server_name)
             raise cw.InvalidCandidateError(
-                f"{label} inline server {server_name!r}: {exc}.{_by_hand_hint(definition)}"
+                f"{label} inline server {server_name!r}: {detail}.{_by_hand_hint(definition)}"
             ) from exc
+
+
+#: What this surface says in place of the MCP tab's
+#: :data:`~clauster.config_write_mcp.RELOAD_HINT_TAIL`.
+_SUBAGENT_RELOAD_HINT_TAIL = "when it opens the subagent file, so open the file again and save it"
+
+
+def _inline_server_detail(message: str, server_name: str) -> str:
+    """Return the MCP tab's refusal ``message`` worded for an inline server (TASK-486).
+
+    The prefix above already names the server, so the message's own ``server 'name'``
+    (also ``remote server`` or ``stdio server``) is dropped, and the MCP tab's advice to
+    reload the server becomes advice to open the subagent file again, which converts it.
+    """
+    prefix = re.match(rf"(?:remote |stdio )?server {re.escape(repr(server_name))} ", message)
+    detail = message[prefix.end() :] if prefix else message
+    return detail.replace(RELOAD_HINT_TAIL, _SUBAGENT_RELOAD_HINT_TAIL)
 
 
 def _by_hand_hint(definition: Any) -> str:
@@ -826,9 +771,10 @@ def _validate_env(value: Any, label: str) -> None:
 #: here and a string there, ``010`` is 8 here and 10 there.
 #: :func:`_refuse_yaml11_only_spellings` refuses those for the boolean and number fields.
 #: Other differences are stricter here, for example a plain ``2024-01-01`` is a date to
-#: PyYAML, so it is refused as a ``maxTurns`` that the CLI would read as 2024. A top-level
-#: field this module checks only as "a string" (``model``) is not compared spelling by
-#: spelling; the string values of an inline MCP definition are.
+#: PyYAML, so it is refused as a ``maxTurns`` that the CLI would read as 2024. ``model`` and
+#: ``effort`` are also read from the YAML 1.2 view (:func:`_refuse_yaml12_only_numbers`), so
+#: a plain ``model: 1e3``, a number to the CLI, is refused; the string values of an inline
+#: MCP definition are compared by the shared seam.
 _OPTIONAL_FRONTMATTER_RULES: tuple[tuple[str, _FrontmatterRule], ...] = (
     # Claude Code accepts either a comma-separated string or an array for these —
     # this repo's own shipped subagents use the string form. `tools` must name at least
@@ -945,6 +891,33 @@ def validate_agent_content(candidate: Any, *, expected_name: str | None = None) 
     if header is not None:  # pragma: no branch — always, once parse_frontmatter accepted it
         with cw.refuse_check_failures("frontmatter"):  # it walks the composed tree itself
             _refuse_yaml11_only_spellings(cw.frontmatter_header(candidate, header))
+            _refuse_yaml12_only_numbers(cw.frontmatter_header(candidate, header), frontmatter)
+
+
+def _refuse_yaml12_only_numbers(header: str, frontmatter: dict[str, Any]) -> None:
+    """Refuse a ``model`` or ``effort`` that only the CLI's YAML 1.2 reads as a number.
+
+    A plain ``1e3`` or ``0o17`` is text to PyYAML and a number to YAML 1.2 (TASK-485). The
+    2.1.330 agent-file loader reads ``model`` only when it is text, so ``model: 1e3`` would
+    leave the subagent on the session model; and ``effort: 1e400`` is ``Infinity`` there,
+    which it ignores. Each check reads the value from :func:`~clauster.config_write.
+    yaml12_view`, so ``!!str 1e3`` and a quoted ``'1e3'`` stay text and save.
+    """
+    view = cw.yaml12_view(header)
+    if not isinstance(view, dict):  # pragma: no cover - the header loaded as a mapping
+        return
+    if isinstance(frontmatter.get("model"), str) and not isinstance(view.get("model"), str):
+        raise cw.InvalidCandidateError(
+            "frontmatter 'model' is a number to the YAML 1.2 that Claude Code reads, and "
+            "Claude Code ignores a model that is not text. Quote the value"
+        )
+    effort = view.get("effort")
+    if isinstance(effort, (int, float)) and not isinstance(effort, bool):
+        if _cli_effort(effort) is None:
+            raise cw.InvalidCandidateError(
+                "frontmatter 'effort' is a number that the YAML 1.2 Claude Code reads cannot "
+                "hold, so Claude Code ignores it. Write a level or a smaller integer"
+            )
 
 
 #: The fields whose loaded value this module checks as a boolean or a number, and the
@@ -957,6 +930,8 @@ _YAML12_BOOLEANS = frozenset({"true", "True", "TRUE", "false", "False", "FALSE"}
 #: YAML 1.2 reads ``010`` as 10 and the others as strings.
 _YAML12_INT_RE = re.compile(r"[-+]?(?:0|[1-9][0-9]*)|0x[0-9a-fA-F]+")
 _YAML12_FLOAT_RE = re.compile(r"[-+]?(?:\.[0-9]+|[0-9]+(?:\.[0-9]*)?)(?:[eE][-+]?[0-9]+)?")
+#: A decimal integer whose text the CLI reads as the same number (``bbr`` and ``hZ``).
+_PLAIN_DECIMAL_RE = re.compile(r"[-+]?(?:0|[1-9][0-9]*)")
 _BOOL_TAG = "tag:yaml.org,2002:bool"
 _INT_TAG = "tag:yaml.org,2002:int"
 _FLOAT_TAG = "tag:yaml.org,2002:float"
@@ -967,6 +942,21 @@ def _check_spelling(label: str, node: yaml.Node, *, boolean: bool, number: bool)
     """Refuse a checked field whose value PyYAML and the CLI's YAML 1.2 read differently."""
     if not isinstance(node, yaml.ScalarNode):
         return
+    if getattr(node, cw._EXPLICIT_TAG_ATTR, None) == "!" and (
+        (boolean and node.tag == _BOOL_TAG)
+        or (
+            number
+            and node.tag in (_INT_TAG, _FLOAT_TAG)
+            and not _PLAIN_DECIMAL_RE.fullmatch(node.value)
+        )
+    ):
+        # The non-specific tag: text to YAML 1.2, so `background: ! true` is the string
+        # "true", which Claude Code ignores, and `maxTurns: ! 0x10` is the text 0x10, which
+        # it reads as 0. PyYAML resolves either as if plain (review on this branch).
+        raise cw.InvalidCandidateError(
+            f"{label} has the '!' tag, so Claude Code reads it as text, not as PyYAML "
+            "reads it. Remove the tag"
+        )
     if boolean and node.tag == _BOOL_TAG and node.value not in _YAML12_BOOLEANS:
         raise cw.InvalidCandidateError(
             f"{label}: Claude Code reads {node.value!r} as a string, not a "
@@ -1051,7 +1041,7 @@ def _refuse_yaml11_only_spellings(header: str) -> None:
     or its retry text: :func:`~clauster.config_write.cli_frontmatter_text`) yields a mapping
     node and does not fail.
     """
-    root = yaml.compose(cw.cli_frontmatter_text(header), Loader=yaml.SafeLoader)
+    root = yaml.compose(cw.cli_frontmatter_text(header), Loader=cw.FrontmatterLoader)
     _check_mapping(
         root,
         set(),
@@ -1127,7 +1117,7 @@ def _list_agents(root: Path, source: str) -> list[dict[str, Any]]:
         read_only = _is_read_only_file(entry, raw)
         description: str | None = None
         try:
-            frontmatter, _body = parse_frontmatter(raw.decode("utf-8"))
+            frontmatter = _parse_shown_frontmatter(raw.decode("utf-8"))
             value = frontmatter.get("description")
             if isinstance(value, str):
                 # Masked as the editor masks it (a `${VAR}` or a credential URL in it).
@@ -1226,7 +1216,9 @@ def _mcp_servers_block_bounds(lines: list[str]) -> tuple[int, int] | None:
 
     None when there is no such key line, more than one, or a value on the key line (a flow
     collection). The block runs until the next line that starts at column 0 (the next
-    top-level key), so ``lines[start + 1 : end]`` are its entries.
+    top-level key), so ``lines[start + 1 : end]`` are its entries. A ``- `` item line at
+    column 0 is part of the block: YAML lets a mapping's list value sit at the key's own
+    indent (TASK-486). The callers' re-parse check refuses any other shape.
     """
     starts = [i for i, line in enumerate(lines) if _MCP_SERVERS_KEY_LINE_RE.match(line)]
     if len(starts) != 1 or not _MCP_SERVERS_BLOCK_KEY_RE.match(lines[starts[0]].rstrip("\r\n")):
@@ -1236,7 +1228,7 @@ def _mcp_servers_block_bounds(lines: list[str]) -> tuple[int, int] | None:
         (
             i
             for i in range(start + 1, len(lines))
-            if lines[i][:1] not in ("", " ", "\t", "\r", "\n")
+            if lines[i][:1] not in ("", " ", "\t", "\r", "\n") and not _is_item_line(lines[i])
         ),
         len(lines),
     )
@@ -1707,6 +1699,8 @@ def _scalar_spellings(text: str | None) -> dict[tuple[type, Any], str]:
     # The caller passes only a stored file whose frontmatter loaded, so this composes; the
     # caller's `refuse_check_failures` would turn a failure into "cannot rewrite".
     source = cw.cli_frontmatter_text(cw.frontmatter_header(text, match))
+    # Plain SafeLoader on purpose, like the masking view: a header only FrontmatterLoader
+    # reads keeps no masked value, so its save is refused (TASK-485).
     root = yaml.compose(source, Loader=yaml.SafeLoader)
     constructor = yaml.constructor.SafeConstructor()
     stack = [root] if root is not None else []
@@ -1799,6 +1793,7 @@ def _rewrite_values(text: str, target: dict[str, Any], *, stored: str | None) ->
             value, _body = parse_frontmatter(text)
             if cw.same_yaml_value(value, target):
                 return text
+            # Plain SafeLoader on purpose (see _scalar_spellings, TASK-485).
             root = yaml.compose(source, Loader=yaml.SafeLoader)
             slots = None if root is None else _changed_scalars(root, value, target)
             if not slots:
@@ -1848,7 +1843,7 @@ def _mask_agent_text(text: str) -> str | None:
     if match is None:
         return text
     try:
-        frontmatter, _body = parse_frontmatter(core)
+        frontmatter = _parse_shown_frontmatter(core)
         with cw.refuse_check_failures("frontmatter"):
             view = frontmatter_view(frontmatter)
     except cw.InvalidCandidateError:
@@ -1856,6 +1851,50 @@ def _mask_agent_text(text: str) -> str | None:
         return bom + core[: match.start(1)] + masked + core[match.end(1) :]
     shown = _rewrite_values(core, view, stored=None)
     return None if shown is None else bom + shown
+
+
+def _parse_shown_frontmatter(text: str) -> dict[str, Any]:
+    """Parse ``text``'s frontmatter for a VIEW (content, display field, list), or raise.
+
+    A header that only :class:`~clauster.config_write.FrontmatterLoader` reads (a tab in an
+    unquoted value, TASK-485) raises :class:`~clauster.config_write.InvalidCandidateError`
+    here, as it did before that loader: every view then takes the line-by-line masking of a
+    header that does not load. The structural masks (:func:`frontmatter_view`) are not
+    the whole of that masking, for example a credential URL in the middle of a value, so a
+    view must never show less than it did. Saves still read such a header.
+    """
+    frontmatter, _body = parse_frontmatter(text)
+    match = _FRONTMATTER_RE.match(text)
+    if match is not None and not _safe_loader_composes(cw.frontmatter_header(text, match)):
+        raise cw.InvalidCandidateError("frontmatter is shown as a header that does not load")
+    return frontmatter
+
+
+def _safe_loader_composes(header: str) -> bool:
+    """Whether ``header`` loads as it did before ``FrontmatterLoader`` (TASK-485).
+
+    :func:`~clauster.config_write.cli_frontmatter_text` with plain ``SafeLoader`` in place
+    of that loader: the header composes as written, or it fails on syntax that YAML 1.2
+    also refuses and its re-quoting retry composes. A tab in an unquoted value is syntax
+    that only YAML 1.2 accepts, so a header with one does not load here, even where a later
+    error now sends it to the retry.
+    """
+    try:
+        yaml.compose(header, Loader=yaml.SafeLoader)
+        return True
+    except RecursionError:
+        return False
+    except yaml.YAMLError as exc:
+        if cw._is_yaml11_only_syntax_error(exc):
+            return False
+    try:
+        # The list check of the retry reads as before TASK-485 too: with the tab-aware
+        # loader, `[a<TAB>b]]` stops being a "list" and gets quoted (review on this branch).
+        retry = cw._cli_retry_text(header, list_loader=cw.SafeFlowDepthLoader)
+        yaml.compose(retry, Loader=yaml.SafeLoader)
+    except (yaml.YAMLError, RecursionError):
+        return False
+    return True
 
 
 def _keep_masked_values(
@@ -1992,7 +2031,7 @@ def _read_agent(root: Path, name: str, source: str) -> dict[str, Any]:
     except UnicodeDecodeError as exc:
         raise cw.InvalidCandidateError(f"{name}.md is not valid UTF-8") from exc
     try:
-        parsed, _body = parse_frontmatter(text)
+        parsed = _parse_shown_frontmatter(text)
         # The same masked view the editor's `content` shows (an `mcpServers` server NAME is
         # never a secret hint there, in the list, mapping and `!!omap` spellings alike).
         with cw.refuse_check_failures("frontmatter"):

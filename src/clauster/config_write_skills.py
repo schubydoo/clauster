@@ -114,13 +114,11 @@ import base64
 import bisect
 import errno
 import itertools
-import math
 import os
 import re
 import stat
 import unicodedata
 from collections.abc import Callable
-from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -244,26 +242,23 @@ def parse_frontmatter(content: str) -> tuple[dict[str, Any], str]:
 # How the CLI reads each frontmatter field (2.1.318, `oPe` and its helpers)
 # ---------------------------------------------------------------------------
 
-#: The characters JavaScript's ``trim`` and ``\s`` match (WhiteSpace and LineTerminator).
-#: Python's ``str.strip`` differs: it also strips ``\x1c``-``\x1f`` and ``\x85``, and it
-#: keeps the BOM, ``\ufeff``.
-_JS_WHITESPACE = (
-    "\t\n\v\f\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008"
-    "\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
-)
+# The JavaScript-compat helpers are THE SAME OBJECTS config_write_subagents uses: aliases of
+# the one copy in config_write, so the two surfaces cannot drift apart (TASK-483).
+_JS_WHITESPACE = cw.JS_WHITESPACE
 _JS_WHITESPACE_RUN_RE = re.compile(f"[{_JS_WHITESPACE}]+")
-#: JavaScript ``parseInt(s, 10)``: optional leading whitespace, an optional sign, then the
-#: longest run of ASCII digits; anything after the digits is ignored.
-_JS_PARSE_INT_RE = re.compile(f"[{_JS_WHITESPACE}]*([+-]?[0-9]+)")
+_JS_PARSE_INT_RE = cw.JS_PARSE_INT_RE
+_js_string = cw.js_string
+_js_parse_int = cw.js_parse_int
+_cli_tool_entries = cw.cli_tool_entries
+_cli_effort = cw.cli_effort
 
 #: The strings the CLI's boolean reader (``bye``) takes as true or false, after it
 #: lowercases and trims the value. The docs list these too.
 _CLI_TRUE_WORDS = frozenset({"1", "true", "yes", "on"})
 _CLI_FALSE_WORDS = frozenset({"0", "false", "no", "off"})
 
-#: The effort levels and the one alias the CLI's effort reader (``dq``) accepts.
-_EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
-_EFFORT_ALIASES = {"med": "medium"}
+#: The effort levels and the one alias the CLI's effort reader accepts.
+_EFFORT_LEVELS = cw.EFFORT_LEVELS
 
 #: The shells ``shell`` accepts (the CLI's ``Va``), compared trimmed and lowercased. Like the
 #: effort levels, suggestions (TASK-524): another string saves with a warning.
@@ -284,12 +279,87 @@ _UNSCANNED_KEYS = frozenset({"metadata", "mcpServers", "lspServers"})
 _NAME_REFUSED_CODEPOINTS = frozenset(
     {0x115F, 0x1160, 0x3164, 0xFFA0, 0x2800, 0xFFFC, 0x1D159, 0x13441, 0x13442, 0x16FE4}
 )
-#: Hangul jamo the CLI accepts only in a context it checks script by script. Refused here.
-_NAME_REFUSED_RANGES = ((0x1160, 0x11FF), (0xD7B0, 0xD7FF))
-
-
-#: Below this, every integer is exact as a JavaScript number (``Number.MAX_SAFE_INTEGER``).
-_JS_SAFE_INTEGER = 2**53
+#: The CLI's ``d`` class in its name rule (2.1.330): a combining mark, or a Hangul vowel or
+#: final jamo (U+1160-U+11FF, U+D7B0-U+D7FF), which also only joins the letter before it.
+_NAME_JAMO_RANGES = ((0x1160, 0x11FF), (0xD7B0, 0xD7FF))
+#: Combining marks whose Unicode script is Inherited: the CLI takes them after any letter
+#: or digit. Whole blocks only, each Inherited throughout (U+FE2E and U+FE2F are Cyrillic,
+#: so they stay out). A mark outside these blocks counts as script-specific here, which
+#: only refuses more.
+_NAME_INHERITED_MARKS = (
+    (0x0300, 0x036F),
+    (0x0485, 0x0486),
+    (0x064B, 0x0655),
+    (0x0670, 0x0670),
+    (0x0951, 0x0954),
+    (0x1AB0, 0x1AFF),
+    (0x1DC0, 0x1DFF),
+    (0x20D0, 0x20FF),
+    (0x302A, 0x302D),
+    (0x3099, 0x309A),
+    (0xFE20, 0xFE2D),
+)
+#: The marks that are default-ignorable (hidden): the combining grapheme joiner, the Khmer
+#: inherent vowels, the Mongolian and the other variation selectors. The CLI refuses each
+#: one, also after a letter (checked against its ``[names]`` log).
+_NAME_HIDDEN_MARKS = (
+    (0x034F, 0x034F),
+    (0x17B4, 0x17B5),
+    (0x180B, 0x180F),
+    (0xFE00, 0xFE0F),
+    (0xE0100, 0xE01EF),
+)
+#: Blocks whose letters all have one script that is neither Latin nor Common, so a
+#: script-specific mark or jamo after such a letter is one the CLI takes. U+0640 ARABIC
+#: TATWEEL is Common and is excluded. Any other base letter takes only Inherited marks
+#: here, which only refuses more: the CLI also takes, for example, a Greek letter's marks.
+_NAME_SCRIPT_BASES = (
+    (0x0400, 0x04FF),  # Cyrillic
+    (0x0590, 0x05FF),  # Hebrew
+    (0x0600, 0x06FF),  # Arabic
+    (0x0900, 0x0DFF),  # Devanagari to Sinhala
+    (0x0E00, 0x0EFF),  # Thai, Lao
+    (0x0F00, 0x109F),  # Tibetan, Myanmar
+    (0x1100, 0x115E),  # Hangul leading jamo
+    (0x1780, 0x17FF),  # Khmer
+    (0xA960, 0xA97C),  # Hangul leading jamo, extended
+    (0xAC00, 0xD7A3),  # Hangul syllables
+)
+_NAME_COMMON_LETTERS = frozenset({0x0640})
+#: Unicode's Soft_Dotted letters (PropList.txt): the CLI refuses one followed, after any
+#: marks, by U+0307 COMBINING DOT ABOVE (a second dot).
+_SOFT_DOTTED = (
+    (0x0069, 0x006A),
+    (0x012F, 0x012F),
+    (0x0249, 0x0249),
+    (0x0268, 0x0268),
+    (0x029D, 0x029D),
+    (0x02B2, 0x02B2),
+    (0x03F3, 0x03F3),
+    (0x0456, 0x0456),
+    (0x0458, 0x0458),
+    (0x1D62, 0x1D62),
+    (0x1D96, 0x1D96),
+    (0x1DA4, 0x1DA4),
+    (0x1DA8, 0x1DA8),
+    (0x1E2D, 0x1E2D),
+    (0x1ECB, 0x1ECB),
+    (0x2071, 0x2071),
+    (0x2148, 0x2149),
+    (0x2C7C, 0x2C7C),
+    (0x1D422, 0x1D693),  # the mathematical i and j, a superset of the exact list
+    (0x1DF1A, 0x1DF1A),
+    (0x1E04C, 0x1E04D),
+    (0x1E068, 0x1E068),
+)
+#: The combining marks whose script is Common. After one, the CLI refuses any later mark
+#: in the run that is not Inherited, whatever letter the run follows (review on this
+#: branch). Refused outright here, which only refuses more.
+_NAME_COMMON_MARKS = frozenset(
+    {0x1CE1, 0x1CF7, 0x1D165, 0x1D166, 0x1D16D, 0x1D16E, 0x1D16F, 0x1D170, 0x1D171, 0x1D172}
+)
+#: The CLI caps a run of marks and jamo below this many.
+_NAME_MAX_MARK_RUN = 9
 
 
 class _IgnoredFieldError(cw.InvalidCandidateError):
@@ -305,62 +375,6 @@ class _IgnoredFieldError(cw.InvalidCandidateError):
         self.key = key
 
 
-def _js_number_text(value: float) -> str:
-    """Return JavaScript's ``String()`` of a number that is not a small whole number."""
-    if math.isnan(value):
-        return "NaN"
-    if math.isinf(value):
-        return "Infinity" if value > 0 else "-Infinity"
-    sign = "-" if value < 0 else ""
-    # repr() gives the shortest round-tripping digits, as JavaScript does; only the layout
-    # differs (Number::toString, ECMA-262 6.1.6.1.20).
-    digits_tuple = Decimal(repr(abs(value))).normalize().as_tuple()
-    digits = "".join(str(d) for d in digits_tuple.digits)
-    # The caller passes only a finite value that is not zero, so the exponent is an int.
-    point = len(digits) + int(digits_tuple.exponent)  # the decimal point follows this many
-    if len(digits) <= point <= 21:
-        # A whole number past 2**53: JavaScript keeps only the shortest round-trip digits.
-        return sign + digits + "0" * (point - len(digits))
-    if 0 < point <= 21:
-        return sign + digits[:point] + "." + digits[point:]
-    if -6 < point <= 0:
-        return sign + "0." + "0" * (-point) + digits
-    mantissa = digits[0] + ("." + digits[1:] if len(digits) > 1 else "")
-    power = point - 1
-    return f"{sign}{mantissa}e{'+' if power > 0 else '-'}{abs(power)}"
-
-
-def _js_string(value: Any) -> str:
-    """Return JavaScript's ``String(value)`` for a value YAML can produce.
-
-    Raises ``TypeError`` for a value JavaScript never sees from the CLI's YAML loader (a
-    PyYAML date, ``bytes``, a set or an explicitly tagged value), so the caller can refuse
-    the field instead of guessing what Claude Code reads.
-    """
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if value is None:
-        return "null"
-    if isinstance(value, int):
-        try:
-            as_float = float(value)
-        except OverflowError:
-            return "Infinity" if value > 0 else "-Infinity"
-        return str(value) if abs(value) < _JS_SAFE_INTEGER else _js_number_text(as_float)
-    if isinstance(value, float):
-        if value.is_integer() and abs(value) < _JS_SAFE_INTEGER:
-            return str(int(value))
-        return _js_number_text(value)
-    if isinstance(value, str):
-        return value
-    if isinstance(value, list):
-        # Array.prototype.toString: join with ",", null and undefined become "".
-        return ",".join("" if item is None else _js_string(item) for item in value)
-    if isinstance(value, dict):
-        return "[object Object]"
-    raise TypeError(type(value).__name__)
-
-
 def _js_trim(text: str) -> str:
     """Return ``text`` with JavaScript's ``trim()`` applied."""
     return text.strip(_JS_WHITESPACE)
@@ -374,11 +388,11 @@ def _utf16_length(text: str) -> int:
 def cli_shows_name(name: str) -> bool:
     """Return whether Claude Code shows and matches ``name`` as a skill name.
 
-    A port, slightly narrower, of the CLI's name rule (``GJ``) and of the docs'
-    "Characters a skill name can't hold": at most 256 UTF-16 code units, no control,
-    format, private-use, surrogate or unassigned character, no blank other than one plain
-    space between words, and no ``<`` or ``>``. The CLI decides some combining marks and
-    jamo script by script; those are refused here outright, which only ever refuses more.
+    A port, slightly narrower, of the CLI's name rule (``GJ`` in 2.1.318, ``nHr`` in 2.1.330)
+    and of the docs' "Characters a skill name can't hold": at most 256 UTF-16 code units,
+    no control, format, private-use, surrogate or unassigned character, no blank other than
+    one plain space between words, and no ``<`` or ``>``. Combining marks and Hangul vowel
+    and final jamo follow :func:`_name_marks_join` (TASK-485).
     """
     if not name or _utf16_length(name) > MAX_CLI_NAME_UNITS:
         return False
@@ -389,13 +403,69 @@ def cli_shows_name(name: str) -> bool:
     for char in name:
         point = ord(char)
         category = unicodedata.category(char)
-        if category[0] in "CM" or category in ("Zl", "Zp"):
+        if category[0] == "C" or category in ("Zl", "Zp"):
             return False
         if category == "Zs" and char != " ":
             return False
         if point in _NAME_REFUSED_CODEPOINTS:
             return False
-        if any(low <= point <= high for low, high in _NAME_REFUSED_RANGES):
+    return _name_marks_join(name)
+
+
+def _in_ranges(point: int, ranges: tuple[tuple[int, int], ...]) -> bool:
+    """Whether code point ``point`` lies in one of the inclusive ``ranges``."""
+    return any(low <= point <= high for low, high in ranges)
+
+
+def _is_name_mark(char: str) -> bool:
+    """Whether ``char`` is in the CLI's ``d`` class: a combining mark or a vowel/final jamo."""
+    return unicodedata.category(char)[0] == "M" or _in_ranges(ord(char), _NAME_JAMO_RANGES)
+
+
+def _name_marks_join(name: str) -> bool:
+    r"""Whether every combining mark and vowel or final jamo in ``name`` joins its letter.
+
+    A port of the CLI's ``Te`` pattern (2.1.330), read from its bundle and checked against
+    its ``[names]`` log. The CLI refuses a name where such a character:
+
+    * does not follow a letter, a digit or another mark (``\u0301x``, ``x-\u0301``, a
+      lone ``\u1161``);
+    * is the ninth of a run;
+    * is a second dot, U+0307, on a soft-dotted letter (``i\u0307``), or any mark on a
+      dotless ``\u0131`` or ``\u0237``;
+    * is not of the Inherited script and follows a Latin or Common letter, through other
+      marks (``a\u11a8``, a Devanagari vowel sign after a Latin letter).
+
+    It also refuses U+20E3, the keycap mark, and a hidden mark (:data:`_NAME_HIDDEN_MARKS`)
+    anywhere, and so does this port for a mark of the Common script
+    (:data:`_NAME_COMMON_MARKS`). Python has no script property, so
+    the last rule is narrower here: a mark outside :data:`_NAME_INHERITED_MARKS` is taken
+    only after a letter of :data:`_NAME_SCRIPT_BASES`. One pass, linear in the length.
+    """
+    base: str | None = None  # the letter or digit the current run of marks follows
+    run = 0
+    for char in name:
+        point = ord(char)
+        if point == 0x20E3 or point in _NAME_COMMON_MARKS or _in_ranges(point, _NAME_HIDDEN_MARKS):
+            return False
+        if not _is_name_mark(char):
+            base, run = char, 0
+            continue
+        run += 1
+        if base is None or unicodedata.category(base)[0] not in "LN":
+            return False
+        if run >= _NAME_MAX_MARK_RUN:
+            return False
+        base_point = ord(base)
+        if point == 0x0307 and _in_ranges(base_point, _SOFT_DOTTED):
+            return False
+        if base_point in (0x0131, 0x0237) and unicodedata.category(char)[0] == "M":
+            return False
+        if not _in_ranges(point, _NAME_INHERITED_MARKS) and (
+            unicodedata.category(base)[0] != "L"
+            or base_point in _NAME_COMMON_LETTERS
+            or not _in_ranges(base_point, _NAME_SCRIPT_BASES)
+        ):
             return False
     return True
 
@@ -412,68 +482,6 @@ def _cli_bool(value: Any) -> bool | None:
     if word in _CLI_FALSE_WORDS:
         return False
     return None
-
-
-def _cli_tool_entries(items: list[str]) -> list[str]:
-    """Split tool-list strings into entries the way the 2.1.318 CLI does (its ``fu``).
-
-    A comma or a space ends an entry unless it is inside parentheses, so
-    ``Agent(worker, researcher), Read`` is two entries. Nothing is resolved against a tool
-    registry. The same port as the subagents surface's (PR 1804); share it once both land.
-    """
-    entries: list[str] = []
-    for item in items:
-        current, in_parens = "", False
-        for char in item:
-            if char == "(":
-                in_parens = True
-                current += char
-            elif char == ")":
-                in_parens = False
-                current += char
-            elif char in ", " and not in_parens:
-                if _js_trim(current):
-                    entries.append(_js_trim(current))
-                current = ""
-            elif current or _js_trim(char):
-                current += char
-        if _js_trim(current):
-            entries.append(_js_trim(current))
-    return entries
-
-
-def _js_parse_int(text: str) -> int | None:
-    """Return what JavaScript ``parseInt(text, 10)`` returns, or None for ``NaN``/``Infinity``."""
-    match = _JS_PARSE_INT_RE.match(text)
-    return cw.js_integer(match.group(1)) if match else None
-
-
-def _cli_effort(value: Any) -> str | int | None:
-    """Return the effort the CLI reads from ``value`` (its ``dq``), or None when it ignores it.
-
-    A number must be a whole number, and any whole number counts. Anything else is
-    stringified and lowercased (not trimmed), mapped through the alias table, and matched
-    against the level names. Failing that, ``parseInt`` decides, so ``"3 tokens"`` is ``3``.
-    """
-    if value is None or value == "" or isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        try:
-            float(value)  # past the double range JavaScript holds Infinity: ignored
-        except OverflowError:
-            return None
-        return value
-    if isinstance(value, float) and value.is_integer():
-        return int(value)
-    try:
-        text = _js_string(value)  # a list joins, so `[high]` reads as high
-    except TypeError:
-        return None
-    lowered = text.lower()
-    level = _EFFORT_ALIASES.get(lowered, lowered)
-    if level in _EFFORT_LEVELS:
-        return level
-    return _js_parse_int(lowered)
 
 
 def _label(key: str) -> str:
@@ -560,7 +568,7 @@ def _read_name(value: Any) -> str | None:
         raise cw.InvalidCandidateError(
             f"{_label('name')} holds a character Claude Code refuses in a name: a hidden, "
             "direction-changing or blank-like character other than single spaces between "
-            "words, or < or >"
+            "words, < or >, or a combining mark or Hangul jamo that does not follow its letter"
         )
     return text
 
@@ -1192,7 +1200,7 @@ def _without_top_level_keys(text: str, keys: list[str]) -> str | None:
     full = cw.frontmatter_header(text, match)
     if cw.cli_frontmatter_text(full) != full:
         return None  # the CLI reads a re-quoted copy: the lines on disk are not its lines
-    root = yaml.compose(header, Loader=yaml.SafeLoader)
+    root = yaml.compose(header, Loader=cw.FrontmatterLoader)
     if not isinstance(root, yaml.MappingNode) or root.flow_style:
         return None
     if any(key_node.tag == "tag:yaml.org,2002:merge" for key_node, _ in root.value):
@@ -2266,6 +2274,8 @@ def _mask_header_values(header: str, *, readable: bool) -> str:
         return header
     try:
         source = cw.cli_frontmatter_text(header)
+        # Plain SafeLoader on purpose: a header only FrontmatterLoader reads (a tab in a
+        # value) fails here and is masked whole, never less than before (TASK-485).
         root = yaml.compose(source, Loader=yaml.SafeLoader)
         composed = True
     except (yaml.YAMLError, RecursionError):

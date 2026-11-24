@@ -3261,3 +3261,224 @@ def test_a_crash_in_the_subagent_spelling_walk_is_a_refusal(monkeypatch) -> None
     monkeypatch.setattr(sub, "_refuse_yaml11_only_spellings", _boom)
     with pytest.raises(cw.InvalidCandidateError, match="TypeError"):
         sub.validate_agent_content(_content("my-agent"), expected_name="my-agent")
+
+
+# --- TASK-483: the JavaScript-compat helpers are one shared copy ----------------------------
+
+
+def test_the_javascript_compat_helpers_are_one_shared_copy() -> None:
+    # Both surfaces alias the one copy in config_write, so they cannot drift apart.
+    from clauster import config_write_skills as sk
+
+    shared = {
+        "_JS_WHITESPACE": cw.JS_WHITESPACE,
+        "_JS_PARSE_INT_RE": cw.JS_PARSE_INT_RE,
+        "_js_parse_int": cw.js_parse_int,
+        "_cli_tool_entries": cw.cli_tool_entries,
+        "_cli_effort": cw.cli_effort,
+        "_EFFORT_LEVELS": cw.EFFORT_LEVELS,
+    }
+    for name, helper in shared.items():
+        assert getattr(sub, name) is helper, name
+        assert getattr(sk, name) is helper, name
+
+
+@pytest.mark.parametrize("value", [["high"], ["high", "low"], {"a": 1}, [None]])
+def test_effort_still_refuses_a_list_or_a_mapping(value: object) -> None:
+    # The shared reader joins a list, as the CLI's does (`[high]` is high); this surface
+    # reads the scalar YAML types only, as it did before the helpers moved.
+    with pytest.raises(cw.InvalidCandidateError, match="must be one of"):
+        sub._validate_effort(value, "frontmatter 'effort'")
+    assert cw.cli_effort(["high"]) == "high"
+
+
+# --- TASK-485: values the CLI's YAML 1.2 reads differently from PyYAML -----------------------
+
+
+@pytest.mark.parametrize("spelling", ["1e3", "1E3", "0o17", "+0o7", "1.5e3"])
+def test_a_model_that_yaml_1_2_reads_as_a_number_is_refused(spelling: str) -> None:
+    # Text to PyYAML, a number to the CLI's YAML 1.2. The 2.1.330 agent-file loader reads
+    # `model` only when it is text, so the subagent would run on the session model.
+    with pytest.raises(cw.InvalidCandidateError, match="'model' is a number"):
+        sub.validate_agent_content(_content(model=spelling))
+
+
+@pytest.mark.parametrize(
+    "spelling", ["'1e3'", '"0o17"', "!!str 1e3", "! 1e3", "opus", "claude-x-1"]
+)
+def test_a_model_that_is_text_to_both_yaml_versions_saves(spelling: str) -> None:
+    sub.validate_agent_content(_content(model=spelling))  # no raise
+
+
+def test_an_effort_that_yaml_1_2_cannot_hold_is_refused() -> None:
+    # `1e400` is Infinity to the CLI, which ignores the field; PyYAML reads text, "1".
+    with pytest.raises(cw.InvalidCandidateError, match="'effort' is a number"):
+        sub.validate_agent_content(_content(effort="1e400"))
+
+
+@pytest.mark.parametrize("spelling", ["1e3", "!!str 1e3", "'1e3'", "high", "0o17"])
+def test_an_effort_both_yaml_versions_read_saves(spelling: str) -> None:
+    sub.validate_agent_content(_content(effort=spelling))  # no raise
+
+
+def test_a_tab_inside_a_value_saves_and_reads_back(tmp_path: Path) -> None:
+    # YAML 1.2 reads the tab as part of the text, and so does the save path now. The views
+    # treat the header as one that does not load, as before (see the test below).
+    content = (
+        "---\nname: my-agent\ndescription: runs\tthe checks\ntools: Read,\tBash\n"
+        "---\nYou are a helper.\n"
+    )
+    sub.write_project_agent(tmp_path, "my-agent", content, None)
+    assert sub.parse_frontmatter(content)[0]["description"] == "runs\tthe checks"
+    doc = sub.read_project_agent(tmp_path, "my-agent")
+    assert (doc["content"], doc["frontmatter"]) == (content, {})
+    sub.write_project_agent(tmp_path, "my-agent", doc["content"], doc["hash"])  # saves again
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        "description: a\tb\nmcpServers:\n  - local:\n      command: npx\n"
+        "      env:\n        TOKEN: qv-tab-env\n",
+        # Review on this branch: a credential url in the middle of a value is masked only by
+        # the line masks, which a header that does not load gets.
+        "description: a\tb\nmodel: see https://u:qv-tab-env@h.example.com/x\n",
+        "description: see\thttps://u:qv-tab-env@h.example.com/x\n",
+        "description: a\tb\n# see https://u:qv-tab-env@h.example.com/x\n",
+        # A later error now sends the header to the retry, as the CLI reads it.
+        "description: see https://u:qv-tab-env@h.example.com/x\t# c\nx: [\n",
+        # An earlier error, then a flow value that only the tab loader reads as no list:
+        # the view must build the retry text as before, too (review on this branch).
+        "description: see https://u:qv-tab-env@h.example.com/x: y\ntools: [a\tb]]\n",
+        "model: see https://u:qv-tab-env@h.example.com/x\ncolor: x: y\ntools: [a\tb] [c]\n",
+    ],
+)
+def test_a_tab_header_is_shown_as_one_that_does_not_load(tmp_path: Path, header: str) -> None:
+    # The editor's masker composes with plain SafeLoader, which cannot read the tab, so the
+    # content, the frontmatter field and the list show what they showed before the tab
+    # loaded (TASK-485): never less masked.
+    text = f"---\nname: my-agent\n{header}---\nYou help.\n"
+    _place(tmp_path, "my-agent", text)
+    doc = sub.read_project_agent(tmp_path, "my-agent")
+    match = sub._FRONTMATTER_RE.match(text)
+    assert match is not None
+    header_view = sub._unloaded_header_view(match.group(1))
+    assert doc["content"] == text[: match.start(1)] + header_view + text[match.end(1) :]
+    assert doc["frontmatter"] == {}
+    listed = sub._list_agents(sub.project_agents_dir(tmp_path), "project")
+    assert [entry["description"] for entry in listed] == [None]
+    assert "qv-tab-env" not in json.dumps(doc) + json.dumps(listed)
+
+
+# --- TASK-486: inline mcpServers, zero-indented lists and message wording --------------------
+
+_ZERO_INDENT_LEGACY = (
+    "---\nname: my-agent\ndescription: d\n"
+    "mcpServers:\n"
+    "- github\n"
+    "- legacy:\n    transport: sse  # old spelling\n    url: https://e.com/sse\n"
+    "- both:\n    type: http\n    url: https://e.com/mcp\n    env:\n      TOKEN: x\n"
+    "model: opus\n"
+    "---\nYou are a helper.\n"
+)
+_ZERO_INDENT_CONVERTED = (
+    "---\nname: my-agent\ndescription: d\n"
+    "mcpServers:\n"
+    "- github\n"
+    "- legacy:\n    type: sse  # old spelling\n    url: https://e.com/sse\n"
+    "- both:\n    type: http\n    url: https://e.com/mcp\n"
+    "model: opus\n"
+    "---\nYou are a helper.\n"
+)
+
+
+def test_a_zero_indented_inline_list_converts_on_load(tmp_path: Path) -> None:
+    # YAML lets the list sit at the key's own indent; it converts like an indented one.
+    path = _place(tmp_path, "my-agent", _ZERO_INDENT_LEGACY)
+    doc = sub.read_project_agent(tmp_path, "my-agent")
+    assert doc["content"] == _ZERO_INDENT_CONVERTED
+    assert doc["converted"].startswith("Inline MCP server 'legacy': 'transport' is converted")
+    assert "Inline MCP server 'both': 'env' on a remote server is removed" in doc["converted"]
+    sub.write_project_agent(tmp_path, "my-agent", doc["content"], doc["hash"])
+    assert path.read_bytes() == _ZERO_INDENT_CONVERTED.encode("utf-8")
+
+
+def test_a_zero_indented_list_ends_at_the_next_top_level_key() -> None:
+    lines = _ZERO_INDENT_LEGACY.split("---\n")[1].splitlines(keepends=True)
+    start, end = sub._mcp_servers_block_bounds(lines)
+    assert (lines[start], lines[end]) == ("mcpServers:\n", "model: opus\n")
+
+
+@pytest.mark.parametrize(
+    ("definition", "detail"),
+    [
+        ({"command": "x", "timeout": 0}, "'timeout' must be a positive integer"),
+        ({"type": "http"}, "requires a non-empty string 'url'"),
+        ({"args": ["a"]}, "requires a non-empty string 'command'"),
+        ({"url": "https://e.com"}, "has a 'url' but no 'type'"),
+        ({"type": "http", "url": "u", "oauth": 5}, "'oauth' must be an object"),
+        ("not-an-object", "must be an object"),
+    ],
+)
+def test_an_inline_refusal_names_the_server_once(definition: object, detail: str) -> None:
+    with pytest.raises(cw.InvalidCandidateError) as exc:
+        sub.validate_frontmatter(_servers({"srv": definition}))
+    message = str(exc.value)
+    assert message.startswith(f"frontmatter 'mcpServers' inline server 'srv': {detail}")
+    assert message.count("'srv'") == 1
+
+
+@pytest.mark.parametrize(
+    "definition",
+    [
+        "{transport: sse, url: https://e.com}",
+        "{type: http, url: https://e.com, env: {A: b}}",
+    ],
+)
+def test_an_inline_refusal_gives_subagent_file_advice(tmp_path: Path, definition: str) -> None:
+    # The MCP tab says to reload the server; an inline server converts when the subagent
+    # FILE loads, so the advice names the file (the flow style here is not converted).
+    text = f"---\nname: my-agent\ndescription: d\nmcpServers:\n  - srv: {definition}\n---\nb\n"
+    with pytest.raises(cw.InvalidCandidateError) as exc:
+        sub.write_project_agent(tmp_path, "my-agent", text, None)
+    message = str(exc.value)
+    assert "when it opens the subagent file, so open the file again and save it" in message
+    assert "reload the server" not in message
+    assert message.count("'srv'") == 1
+
+
+@pytest.mark.parametrize(
+    ("header", "loads"),
+    [
+        ("a: b\n", True),
+        ("hint: [a] [b]\n", True),  # through the re-quoting retry, as before
+        ("when: a\tb\n", False),  # only YAML 1.2 (and FrontmatterLoader) reads it
+        ("token: x\t# c\nx: [\n", False),  # the tab still decides, not the later error
+        ("a: b\n  c: d\n", False),  # the retry does not compose either
+    ],
+)
+def test_the_view_check_loads_a_header_as_before_the_tab_loader(header: str, loads: bool) -> None:
+    assert sub._safe_loader_composes(header) is loads
+
+
+def test_the_view_check_fails_closed_on_a_too_deep_header(monkeypatch: pytest.MonkeyPatch) -> None:
+    def too_deep(*_args: object, **_kwargs: object) -> None:
+        raise RecursionError
+
+    monkeypatch.setattr(sub.yaml, "compose", too_deep)
+    assert sub._safe_loader_composes("a: b\n") is False
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [("background", "! true"), ("omitClaudeMd", "! false"), ("maxTurns", "! 0x10")],
+)
+def test_a_bang_tagged_checked_field_is_refused(key: str, value: str) -> None:
+    # `!` makes the value text to YAML 1.2: "true" is ignored, "0x10" reads as 0.
+    with pytest.raises(cw.InvalidCandidateError, match="has the '!' tag"):
+        sub.validate_agent_content(_content(**{key: value}))
+
+
+@pytest.mark.parametrize(("key", "value"), [("maxTurns", "! 5"), ("effort", "! 5")])
+def test_a_bang_tagged_plain_decimal_still_saves(key: str, value: str) -> None:
+    sub.validate_agent_content(_content(**{key: value}))  # no raise

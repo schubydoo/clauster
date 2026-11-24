@@ -521,7 +521,8 @@ def test_a_subagent_header_pyyaml_refuses_hides_each_form(tmp_path: Path, form: 
     assert path.read_bytes() == stored.encode()
 
 
-#: Text that makes PyYAML refuse to compose a header, as Claude Code's YAML 1.2 does not.
+#: Text that plain SafeLoader, the editor masker's parser, cannot compose. Claude Code's
+#: YAML 1.2 reads it, and so does the seam's FrontmatterLoader since TASK-485.
 _NO_COMPOSE = "x-note: y\t# note\n"
 
 
@@ -672,15 +673,25 @@ def _old_fallback(text: str) -> str:
     return text[: match.start(1)] + cw.redact_secret_lines(match.group(1)) + text[match.end(1) :]
 
 
-#: Every refused header in this file, each a whole stored file.
+#: Every refused header in this file, each a whole stored file. A tab after a QUOTED value
+#: is still refused; after an unquoted one it loads since TASK-485 (see _TAB_LOADS).
 _REFUSED = [
-    *(_agent(form).replace("command: npx\n", "command: npx\t# note\n") for form in _FORMS),
+    *(_agent(form).replace("command: npx\n", 'command: "npx"\t# note\n') for form in _FORMS),
     *(
         f"---\nname: my-agent\ndescription: d\n{header}---\nbody\n"
-        for header in [*_READ_ANOTHER_WAY, f"token: {HELD_A}\t# c\nmcpServers: [\n"]
+        for header in [*_READ_ANOTHER_WAY, f'token: "{HELD_A}"\t# c\nmcpServers: [\n']
     ),
     f"---\nname: my-agent\ndescription: d\napi_key: |\n  {HELD_A}\nx: [\t# n\n---\nbody\n",
     "---\nname: my-agent\nmcpServers:\n  a: {command: x}\nmcpServers:\n  b: {command: y}\n---\n",
+]
+
+#: The refused headers this file used before TASK-485: a tab after an unquoted value. They
+#: load now, and the editor's masker, which composes with plain SafeLoader, still cannot
+#: read them, so they must be masked no less than the line masks alone masked them.
+_TAB_LOADS = [
+    *(_agent(form).replace("command: npx\n", "command: npx\t# note\n") for form in _FORMS),
+    # A later error sends it to the retry now, as the CLI reads it; still shown as before.
+    f"---\nname: my-agent\ndescription: d\ntoken: {HELD_A}\t# c\nmcpServers: [\n---\nbody\n",
 ]
 
 
@@ -690,6 +701,17 @@ def test_no_refused_header_is_masked_less_than_before(tmp_path: Path, stored: st
     # no value it hid shows now.
     with pytest.raises(cw.InvalidCandidateError):
         sub.parse_frontmatter(stored)
+    _assert_masked_no_less(tmp_path, stored)
+
+
+@pytest.mark.parametrize("stored", _TAB_LOADS)
+def test_a_header_only_the_tab_loader_reads_is_masked_no_less(tmp_path: Path, stored: str) -> None:
+    sub.parse_frontmatter(stored)  # loads since TASK-485
+    _assert_masked_no_less(tmp_path, stored)
+
+
+def _assert_masked_no_less(tmp_path: Path, stored: str) -> None:
+    """Assert the subagent view of ``stored`` masks no less than origin/main's fallback."""
     root, _path = _place_agent(tmp_path, stored)
     now = sub._read_agent(root, "my-agent", "project")["content"]
     before = _old_fallback(stored)
@@ -724,7 +746,7 @@ def test_an_oversized_refused_header_is_masked_whole_without_a_parse(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(sk, "MAX_FILE_BYTES", 40)
-    stored = f"---\nname: my-agent\ndescription: d\t# note\nx-pad: {'p' * 40}\n---\nbody\n"
+    stored = f'---\nname: my-agent\ndescription: "d"\t# note\nx-pad: {"p" * 40}\n---\nbody\n'
     root, _path = _place_agent(tmp_path, stored)
     assert "name: my-agent\n" not in sub._read_agent(root, "my-agent", "project")["content"]
 
