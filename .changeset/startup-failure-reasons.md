@@ -2,4 +2,4 @@
 default: patch
 ---
 
-Name the missing commit for a worktree Interactive Session, give a reason at the startup deadline, and stop counting a keeper error as a crash.
+Explain on the card that a worktree Interactive Session has no commit to branch from, give a reason at the startup deadline, and count a startup crash once, never a keeper error.

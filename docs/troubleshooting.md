@@ -300,9 +300,10 @@ database](operations.md#recovering-from-a-corrupted-state-database) and
 
 **Most likely cause:** the bridge spawned but never registered an environment
 within `startup_grace_seconds` — most often a `claude` login problem (the
-bridge starts, then hangs unauthenticated). The card's reason shows the bridge's
-own stderr when it wrote some. Otherwise it says that the bridge did not register
-within `startup_grace_seconds`.
+bridge starts, then hangs unauthenticated). The card's reason shows the stderr
+tail of a standard bridge when it wrote some. An Interactive Session, or a bridge
+with no stderr, gets Clauster's reason: the bridge did not register within
+`startup_grace_seconds`.
 
 ```sh
 clauster doctor                          # read the claude-login row
