@@ -39,6 +39,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from collections.abc import Callable
@@ -372,6 +373,7 @@ def dispatch_background_job(
     claude_json: Path | None = None,
     timeout: float = _DISPATCH_TIMEOUT,
     resume: str | None = None,
+    before_spawn: Callable[[], None] | None,
 ) -> str:
     """Dispatch a ``claude --bg`` background session in ``cwd``; return its job id.
 
@@ -389,6 +391,11 @@ def dispatch_background_job(
     * **Fail closed, never silently** — a non-zero exit, a timeout, or output
       with no job id raises :class:`DispatchError` (stderr redacted) rather than
       returning a bogus or empty id.
+
+    ``before_spawn`` runs after every check and the trust write, just before the process
+    starts, and stops the dispatch when it raises. A resume uses it to claim its
+    :class:`ResumeGate` (TASK-487). It is keyword-required with no default, so a caller
+    that forgets it is a type error; a plain dispatch passes ``None``.
 
     ``rc_name`` opens the cloud door. NOTE: a consent-gated ``permission_mode``
     (auto / acceptEdits / bypassPermissions) is passed through, but the cloud
@@ -428,6 +435,8 @@ def dispatch_background_job(
         prompt=prompt,
         resume=resume,
     )
+    if before_spawn is not None:
+        before_spawn()
     try:
         proc = subprocess.run(
             argv,
@@ -500,11 +509,51 @@ class ResumeNotAllowed(ResumeError):
     """The resume's permission mode is refused for the job's directory (TASK-335)."""
 
 
+class ResumeGate:
+    """Decide once whether a resume dispatches or is abandoned, never both (TASK-487).
+
+    The request bounds the resume with a time limit, but it cannot stop a worker thread
+    that is blocked on a hung mount. That thread can wake up after the request returned
+    its error. The thread calls :meth:`commit` just before the dispatch process starts,
+    and the request calls :meth:`abandon` when the limit passes. The lock makes the two
+    calls exclusive: the first one wins and the other one sees the result.
+    """
+
+    def __init__(self) -> None:
+        """Start undecided."""
+        self._lock = threading.Lock()
+        self._outcome: str | None = None
+
+    def _decide(self, outcome: str) -> bool:
+        """Record ``outcome`` if nothing is decided yet; return whether it is the outcome."""
+        with self._lock:
+            if self._outcome is None:
+                self._outcome = outcome
+            return self._outcome == outcome
+
+    def check(self) -> None:
+        """Raise :class:`ResumeError` when the request gave up, without deciding anything."""
+        with self._lock:
+            abandoned = self._outcome == "abandon"
+        if abandoned:
+            raise ResumeError("the request gave up this resume (time limit or cancel)")
+
+    def commit(self) -> None:
+        """Claim the dispatch, or raise :class:`ResumeError` when the request gave up."""
+        if not self._decide("dispatch"):
+            raise ResumeError("the request gave up this resume (time limit or cancel)")
+
+    def abandon(self) -> bool:
+        """Give up the resume; return False when the dispatch already started."""
+        return self._decide("abandon")
+
+
 def resume_background_job(
     job_id: str,
     *,
     permission_mode: str,
     refuse_cwd: Callable[[Path], str | None],
+    gate: ResumeGate,
     binary: str = "claude",
     claude_json: Path | None = None,
     jobs_dir: Path | None = None,
@@ -523,7 +572,10 @@ def resume_background_job(
     the ``inherit`` argv: a ``bypassPermissions`` default in user or managed settings
     would take effect (TASK-335). ``refuse_cwd`` is the caller's ceiling check for the
     job's recorded cwd, resolved once and then also the directory the dispatch runs in
-    (TASK-481): it returns a refusal detail, or ``None`` to allow.
+    (TASK-481): it returns a refusal detail, or ``None`` to allow. ``gate`` is checked before the
+    trust write and claimed just before the dispatch process starts (TASK-487): when the
+    caller already abandoned the resume because it ran past its time limit, this raises
+    :class:`ResumeError` and dispatches nothing.
 
     Fail-closed: a job that is still live, no longer exists, has no recorded session
     UUID, or has no resolvable cwd raises :class:`ResumeError` rather than dispatching a duplicate
@@ -566,6 +618,9 @@ def resume_background_job(
         raise ResumeError(f"job {job_id!r} working directory cannot be checked") from exc
     if not is_dir:
         raise ResumeError(f"job {job_id!r} working directory no longer exists as a folder")
+    # A thread that wakes up after the caller abandoned the resume stops here, before the
+    # trust write. The claim itself comes later, just before the process starts.
+    gate.check()
     return dispatch_background_job(
         cwd,
         resume=job.session_id,
@@ -573,6 +628,7 @@ def resume_background_job(
         binary=binary,
         claude_json=claude_json,
         timeout=timeout,
+        before_spawn=gate.commit,
     )
 
 

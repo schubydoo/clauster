@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import errno
+import gc
 import inspect
 import json
 import logging
@@ -8,17 +10,20 @@ import os
 import signal
 import stat
 import sys
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from clauster import procutil, supervisor
 from clauster.app import create_app
 from clauster.claude_cli import ClaudeNotFound
 from clauster.config import CEILING_GATED_MODES, ClausterConfig, load_config
+from clauster.routes import agents
 from conftest import FAKE_CLAUDE
 
 
@@ -628,7 +633,9 @@ def test_dispatch_rejects_a_none_permission_mode_before_trust(tmp_path, monkeypa
     # dispatching the inherit argv.
     trusted, seen = _patch_dispatch(monkeypatch)
     with pytest.raises(supervisor.DispatchError, match="invalid permission mode: None"):
-        supervisor.dispatch_background_job(tmp_path, prompt="hi", permission_mode=None)
+        supervisor.dispatch_background_job(
+            tmp_path, prompt="hi", permission_mode=None, before_spawn=None
+        )
     assert trusted == []
     assert seen == {}
 
@@ -680,6 +687,7 @@ def test_dispatch_happy_pretrusts_and_returns_id(tmp_path, monkeypatch):
         permission_mode="inherit",
         binary="claude",
         claude_json=cj,
+        before_spawn=None,
     )
     assert job_id == "29e8026f"
     assert trusted == [(tmp_path, cj)]  # cwd pre-trusted with the given claude.json
@@ -689,14 +697,16 @@ def test_dispatch_happy_pretrusts_and_returns_id(tmp_path, monkeypatch):
 
 def test_dispatch_default_claude_json_path(tmp_path, monkeypatch):
     trusted, _ = _patch_dispatch(monkeypatch)
-    supervisor.dispatch_background_job(tmp_path, permission_mode="default")
+    supervisor.dispatch_background_job(tmp_path, permission_mode="default", before_spawn=None)
     assert trusted == [(tmp_path,)]  # no claude_json -> trust_directory called with cwd only
 
 
 def test_dispatch_rejects_nondir_cwd(tmp_path, monkeypatch):
     _patch_dispatch(monkeypatch)
     with pytest.raises(supervisor.DispatchError, match="not a directory"):
-        supervisor.dispatch_background_job(tmp_path / "nope", permission_mode="default")
+        supervisor.dispatch_background_job(
+            tmp_path / "nope", permission_mode="default", before_spawn=None
+        )
 
 
 @pytest.mark.parametrize("field", ["rc_name", "model", "permission_mode"])
@@ -704,7 +714,9 @@ def test_dispatch_rejects_nondir_cwd(tmp_path, monkeypatch):
 def test_dispatch_rejects_flag_like_or_nonstring_values(tmp_path, monkeypatch, field, bad):
     trusted, _ = _patch_dispatch(monkeypatch)
     with pytest.raises(supervisor.DispatchError, match="invalid"):
-        supervisor.dispatch_background_job(tmp_path, **{"permission_mode": "default", field: bad})
+        supervisor.dispatch_background_job(
+            tmp_path, **{"permission_mode": "default", field: bad}, before_spawn=None
+        )
     assert trusted == []  # rejected before the trust write — no side effect
 
 
@@ -712,7 +724,10 @@ def test_dispatch_rejects_nonstring_prompt_before_trust(tmp_path, monkeypatch):
     trusted, _ = _patch_dispatch(monkeypatch)
     with pytest.raises(supervisor.DispatchError, match="invalid prompt"):
         supervisor.dispatch_background_job(
-            tmp_path, prompt=["not", "a", "string"], permission_mode="default"
+            tmp_path,
+            prompt=["not", "a", "string"],
+            permission_mode="default",
+            before_spawn=None,
         )
     assert trusted == []  # a malformed request must not trust the cwd then 500
 
@@ -720,13 +735,13 @@ def test_dispatch_rejects_nonstring_prompt_before_trust(tmp_path, monkeypatch):
 def test_dispatch_nonzero_exit_raises_with_redacted_detail(tmp_path, monkeypatch):
     _patch_dispatch(monkeypatch, proc=_FakeProc(returncode=1, stderr="boom"))
     with pytest.raises(supervisor.DispatchError, match="exit 1.*boom"):
-        supervisor.dispatch_background_job(tmp_path, permission_mode="default")
+        supervisor.dispatch_background_job(tmp_path, permission_mode="default", before_spawn=None)
 
 
 def test_dispatch_no_id_raises(tmp_path, monkeypatch):
     _patch_dispatch(monkeypatch, proc=_FakeProc(stdout="all done, nothing here"))
     with pytest.raises(supervisor.DispatchError, match="no job id"):
-        supervisor.dispatch_background_job(tmp_path, permission_mode="default")
+        supervisor.dispatch_background_job(tmp_path, permission_mode="default", before_spawn=None)
 
 
 def test_dispatch_timeout_raises(tmp_path, monkeypatch):
@@ -735,13 +750,15 @@ def test_dispatch_timeout_raises(tmp_path, monkeypatch):
 
     _patch_dispatch(monkeypatch, run=boom)
     with pytest.raises(supervisor.DispatchError, match="timed out"):
-        supervisor.dispatch_background_job(tmp_path, permission_mode="default", timeout=5)
+        supervisor.dispatch_background_job(
+            tmp_path, permission_mode="default", timeout=5, before_spawn=None
+        )
 
 
 def test_dispatch_claude_not_found_propagates(tmp_path, monkeypatch):
     monkeypatch.setattr(supervisor, "resolve_binary", _raise_not_found)
     with pytest.raises(ClaudeNotFound):
-        supervisor.dispatch_background_job(tmp_path, permission_mode="default")
+        supervisor.dispatch_background_job(tmp_path, permission_mode="default", before_spawn=None)
 
 
 def _raise_not_found(_binary):
@@ -762,7 +779,11 @@ def test_dispatch_unparseable_claude_json_raises_without_spawning(tmp_path, monk
 
     with pytest.raises(supervisor.DispatchError, match="could not trust .*not a valid JSON"):
         supervisor.dispatch_background_job(
-            cwd, prompt="hi", permission_mode="default", claude_json=cj
+            cwd,
+            prompt="hi",
+            permission_mode="default",
+            claude_json=cj,
+            before_spawn=None,
         )
 
     assert cj.read_bytes() == content
@@ -785,7 +806,7 @@ def test_dispatch_trusts_before_spawning_subprocess(tmp_path, monkeypatch):
 
     monkeypatch.setattr(supervisor.subprocess, "run", _run)
 
-    supervisor.dispatch_background_job(tmp_path, permission_mode="default")
+    supervisor.dispatch_background_job(tmp_path, permission_mode="default", before_spawn=None)
 
     assert calls == ["trust", "spawn"]  # trust strictly precedes the subprocess spawn
 
@@ -1266,7 +1287,9 @@ def test_dispatch_rejects_invalid_resume(tmp_path, monkeypatch):
     monkeypatch.setattr(supervisor, "resolve_binary", lambda b: "/abs/claude")
     monkeypatch.setattr(supervisor, "trust_directory", lambda *a, **k: None)
     with pytest.raises(supervisor.DispatchError, match="resume session id"):
-        supervisor.dispatch_background_job(tmp_path, permission_mode="default", resume="--evil")
+        supervisor.dispatch_background_job(
+            tmp_path, permission_mode="default", resume="--evil", before_spawn=None
+        )
 
 
 def _fake_job(**kw):
@@ -1292,7 +1315,11 @@ def test_resume_background_job_dispatches(tmp_path, monkeypatch):
         return None
 
     new_id = supervisor.resume_background_job(
-        "29e8026f", permission_mode="plan", refuse_cwd=_allow, binary="/abs/claude"
+        "29e8026f",
+        permission_mode="plan",
+        refuse_cwd=_allow,
+        binary="/abs/claude",
+        gate=supervisor.ResumeGate(),
     )
     assert new_id == "newjob01"
     assert captured["cwd"] == tmp_path.resolve()
@@ -1331,7 +1358,10 @@ def test_resume_dispatches_in_the_cwd_it_checked(tmp_path, monkeypatch):
         return None
 
     supervisor.resume_background_job(
-        "29e8026f", permission_mode="default", refuse_cwd=_check_then_swap
+        "29e8026f",
+        permission_mode="default",
+        refuse_cwd=_check_then_swap,
+        gate=supervisor.ResumeGate(),
     )
     assert dispatched == [checked.resolve()]
 
@@ -1343,7 +1373,10 @@ def test_resume_refuses_a_nul_byte_cwd_before_the_check(monkeypatch):
     checked: list = []
     with pytest.raises(supervisor.ResumeError, match="invalid working directory"):
         supervisor.resume_background_job(
-            "29e8026f", permission_mode="default", refuse_cwd=checked.append
+            "29e8026f",
+            permission_mode="default",
+            refuse_cwd=checked.append,
+            gate=supervisor.ResumeGate(),
         )
     assert checked == []
 
@@ -1362,7 +1395,10 @@ def test_resume_refuses_a_cwd_that_is_no_longer_a_folder(tmp_path, monkeypatch, 
     )
     with pytest.raises(supervisor.ResumeError) as info:
         supervisor.resume_background_job(
-            "29e8026f", permission_mode="default", refuse_cwd=lambda cwd: None
+            "29e8026f",
+            permission_mode="default",
+            refuse_cwd=lambda cwd: None,
+            gate=supervisor.ResumeGate(),
         )
     assert str(info.value) == "job '29e8026f' working directory no longer exists as a folder"
     assert not isinstance(info.value, supervisor.ResumeNotAllowed)
@@ -1381,7 +1417,10 @@ def test_resume_refuses_a_cwd_it_cannot_check(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "is_dir", _denied)
     with pytest.raises(supervisor.ResumeError, match="working directory cannot be checked$"):
         supervisor.resume_background_job(
-            "29e8026f", permission_mode="default", refuse_cwd=lambda cwd: None
+            "29e8026f",
+            permission_mode="default",
+            refuse_cwd=lambda cwd: None,
+            gate=supervisor.ResumeGate(),
         )
 
 
@@ -1402,7 +1441,10 @@ def test_resume_background_job_refused_cwd_never_dispatches(monkeypatch):
     )
     with pytest.raises(supervisor.ResumeNotAllowed, match="not enabled"):
         supervisor.resume_background_job(
-            "29e8026f", permission_mode="inherit", refuse_cwd=lambda cwd: "not enabled"
+            "29e8026f",
+            permission_mode="inherit",
+            refuse_cwd=lambda cwd: "not enabled",
+            gate=supervisor.ResumeGate(),
         )
     assert dispatched == []
 
@@ -1422,7 +1464,10 @@ def test_resume_background_job_errors(job, match, monkeypatch):
     monkeypatch.setattr(supervisor, "list_background_jobs", lambda *a, **k: jobs)
     with pytest.raises(supervisor.ResumeError, match=match):
         supervisor.resume_background_job(
-            "29e8026f", permission_mode="default", refuse_cwd=lambda cwd: None
+            "29e8026f",
+            permission_mode="default",
+            refuse_cwd=lambda cwd: None,
+            gate=supervisor.ResumeGate(),
         )
 
 
@@ -1957,3 +2002,419 @@ def test_api_resume_agent_claude_not_found(write_config, tmp_path, monkeypatch):
     monkeypatch.setattr(supervisor, "resume_background_job", _boom)
     r = _client(write_config, tmp_path).post("/api/agents/29e8026f/resume")
     assert r.status_code == 503
+
+
+# TASK-487: the whole resume runs under one time limit. A worker thread blocked on a hung
+# mount cannot be stopped, so the request returns a 504 and the thread, when it wakes up,
+# must not dispatch. Events, not sleeps, decide every order below: a 0.05 s limit only ever
+# passes while the worker is blocked on an event that the test releases later.
+
+
+def test_resume_gate_first_decision_wins():
+    undecided = supervisor.ResumeGate()
+    undecided.check()  # a check decides nothing
+    committed = supervisor.ResumeGate()
+    committed.commit()
+    committed.check()
+    assert committed.abandon() is False  # the dispatch started: the request must wait
+    committed.commit()  # the same decision again is not an error
+    abandoned = supervisor.ResumeGate()
+    assert abandoned.abandon() is True
+    assert abandoned.abandon() is True
+    with pytest.raises(supervisor.ResumeError, match="gave up"):
+        abandoned.check()
+    with pytest.raises(supervisor.ResumeError, match="gave up"):
+        abandoned.commit()
+
+
+def test_dispatch_runs_before_spawn_after_the_trust_write(tmp_path, monkeypatch):
+    calls: list[str] = []
+    monkeypatch.setattr(supervisor, "resolve_binary", lambda b: "/abs/claude")
+    monkeypatch.setattr(supervisor, "trust_directory", lambda *a: calls.append("trust"))
+    monkeypatch.setattr(
+        supervisor.subprocess,
+        "run",
+        lambda argv, **kw: calls.append("spawn") or _FakeProc(stdout=_BANNER),
+    )
+    supervisor.dispatch_background_job(
+        tmp_path, permission_mode="default", before_spawn=lambda: calls.append("gate")
+    )
+    assert calls == ["trust", "gate", "spawn"]
+
+
+def test_resume_into_an_abandoned_gate_never_trusts_or_spawns(tmp_path, monkeypatch):
+    trusted, seen = _patch_dispatch(monkeypatch)
+    monkeypatch.setattr(
+        supervisor, "list_background_jobs", lambda *a, **k: [_fake_job(cwd=tmp_path)]
+    )
+    gate = supervisor.ResumeGate()
+    assert gate.abandon()
+    with pytest.raises(supervisor.ResumeError, match="gave up"):
+        supervisor.resume_background_job(
+            "29e8026f", permission_mode="default", refuse_cwd=lambda cwd: None, gate=gate
+        )
+    assert trusted == []  # stopped before the trust write
+    assert seen == {}  # and started no process
+
+
+def _bound_resume(monkeypatch, cwd: Path, *, run=None):
+    """Route a resume of one job in ``cwd`` through the real dispatch, recording each spawn.
+
+    Returns the trust writes, the spawned argvs, an event set when the worker's resume
+    call returns or raises, and the list that receives the worker's error.
+    """
+    spawned: list[list[str]] = []
+
+    def _run(argv, **kw):
+        spawned.append(argv)
+        return _FakeProc(stdout=_BANNER)
+
+    # Only the dispatch reaches the fake. subprocess is one module, so on Windows the
+    # state writes' `icacls` call (atomicio) went through it too and read as a spawn.
+    real_run = supervisor.subprocess.run
+    dispatch = run or _run
+
+    def _only_dispatch(argv, **kw):
+        if not argv or argv[0] != "/abs/claude":
+            return real_run(argv, **kw)
+        return dispatch(argv, **kw)
+
+    trusted, _ = _patch_dispatch(monkeypatch, run=_only_dispatch)
+    monkeypatch.setattr(supervisor, "list_background_jobs", lambda *a, **k: [_fake_job(cwd=cwd)])
+    finished = threading.Event()
+    errors: list[BaseException] = []
+    real_resume = supervisor.resume_background_job
+
+    def _resume(*args, **kwargs):
+        try:
+            return real_resume(*args, **kwargs)
+        except BaseException as exc:
+            errors.append(exc)
+            raise
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(supervisor, "resume_background_job", _resume)
+    return trusted, spawned, finished, errors
+
+
+@pytest.mark.parametrize("hang_in", ["ceiling check", "trust write"])
+def test_api_resume_agent_past_the_time_limit_is_504_and_never_dispatches(
+    write_config, tmp_path, projects_root, monkeypatch, hang_in
+):
+    # Both places stand in for a resolve() on a hung network mount. A hang before the trust
+    # write stops at the gate check; a hang in it stops at the claim before the spawn.
+    # The limit can pass before the worker reaches the hang on a slow runner, so the
+    # request's abandon waits until the worker is blocked there.
+    hung = threading.Event()
+    release = threading.Event()
+    real_abandon = supervisor.ResumeGate.abandon
+
+    def _abandon(self):
+        assert hung.wait(30)
+        return real_abandon(self)
+
+    monkeypatch.setattr(supervisor.ResumeGate, "abandon", _abandon)
+    monkeypatch.setattr(agents, "_RESUME_TIME_LIMIT", 0.05)
+    trusted, spawned, finished, errors = _bound_resume(monkeypatch, projects_root / "alpha")
+    if hang_in == "ceiling check":
+
+        def _hung_check(config, cwd, permission_mode):
+            hung.set()
+            release.wait(30)
+            return None
+
+        monkeypatch.setattr(agents, "_resume_ceiling_refusal", _hung_check)
+    else:
+
+        def _hung_trust(*args):
+            hung.set()
+            release.wait(30)
+            trusted.append(args)
+
+        monkeypatch.setattr(supervisor, "trust_directory", _hung_trust)
+    try:
+        # No lifespan: its poll loop runs `claude agents --json` through the patched run().
+        r = _client(write_config, tmp_path).post("/api/agents/29e8026f/resume")
+    finally:
+        release.set()  # the blocked step now finishes, after the request gave up
+    assert r.status_code == 504
+    assert r.json() == {
+        "detail": (
+            "job '29e8026f' was not resumed: the checks of the job and its working directory "
+            "took longer than 0.05 s. A network mount may be hung. Try again later."
+        )
+    }
+    assert finished.wait(30)
+    assert spawned == []
+    assert len(trusted) == (0 if hang_in == "ceiling check" else 1)
+    assert len(errors) == 1
+    assert isinstance(errors[0], supervisor.ResumeError)
+    assert str(errors[0]) == "the request gave up this resume (time limit or cancel)"
+
+
+def test_api_resume_agent_waits_for_a_dispatch_that_started_before_the_limit(
+    write_config, tmp_path, projects_root, monkeypatch
+):
+    # The thread claimed the gate first, so the process is starting: the request cannot say
+    # "not resumed". It waits for the dispatch. The limit may pass before the claim on a
+    # slow runner, so the request's abandon waits until the claim happened.
+    committed = threading.Event()
+    abandon_tried = threading.Event()
+    real_commit = supervisor.ResumeGate.commit
+    real_abandon = supervisor.ResumeGate.abandon
+
+    def _commit(self):
+        real_commit(self)
+        committed.set()
+
+    def _abandon(self):
+        assert committed.wait(30)
+        try:
+            return real_abandon(self)
+        finally:
+            abandon_tried.set()
+
+    monkeypatch.setattr(supervisor.ResumeGate, "commit", _commit)
+    monkeypatch.setattr(supervisor.ResumeGate, "abandon", _abandon)
+    spawned: list[list[str]] = []
+
+    def _slow_run(argv, **kw):
+        assert abandon_tried.wait(30)  # the limit passes while the process runs
+        spawned.append(argv)
+        return _FakeProc(stdout=_BANNER)
+
+    monkeypatch.setattr(agents, "_RESUME_TIME_LIMIT", 0.05)
+    _bound_resume(monkeypatch, projects_root / "alpha", run=_slow_run)
+    # No lifespan: its poll loop runs `claude agents --json` through the same patched run().
+    r = _client(write_config, tmp_path).post("/api/agents/29e8026f/resume")
+    assert r.status_code == 201
+    assert r.json() == {"id": "29e8026f"}
+    assert len(spawned) == 1
+
+
+def test_api_resume_agent_timeout_error_from_the_work_is_not_the_limit(
+    write_config, tmp_path, monkeypatch
+):
+    # An OSError with ETIMEDOUT is a TimeoutError too. It is not the limit, so it must not
+    # turn into the 504 that says the resume was abandoned.
+    def _boom(*a, **k):
+        raise TimeoutError(errno.ETIMEDOUT, "Connection timed out")
+
+    monkeypatch.setattr(supervisor, "resume_background_job", _boom)
+    with pytest.raises(TimeoutError, match="Connection timed out"):
+        _client(write_config, tmp_path).post("/api/agents/29e8026f/resume")
+
+
+def _worker(job_id: str) -> threading.Thread:
+    return next(t for t in threading.enumerate() if t.name == f"clauster-resume-{job_id}")
+
+
+def test_resume_within_limit_thread_that_outlives_its_event_loop_is_logged(caplog, monkeypatch):
+    monkeypatch.setattr(agents, "_RESUME_TIME_LIMIT", 0.05)
+    release = threading.Event()
+
+    def _work(gate):
+        release.wait(30)
+        gate.commit()  # raises: the request abandoned the gate
+        return "never"
+
+    try:
+        with pytest.raises(HTTPException) as info:
+            asyncio.run(agents._resume_within_limit(_work, job_id="0000d00d"))
+        assert info.value.status_code == 504
+        worker = _worker("0000d00d")
+        assert worker.daemon  # a hung one must not hold up the process exit
+        with caplog.at_level(logging.DEBUG, logger="clauster.routes.agents"):
+            release.set()
+            worker.join(30)
+    finally:
+        release.set()
+    assert not worker.is_alive()
+    assert "0000d00d finished after its event loop closed" in caplog.text
+
+
+async def test_resume_within_limit_drops_a_late_result_while_the_loop_runs(monkeypatch):
+    # In the server the event loop outlives the request. The late thread's hand-back then
+    # reaches the outcome the request cancelled, and must not raise in the loop.
+    monkeypatch.setattr(agents, "_RESUME_TIME_LIMIT", 0.05)
+    loop_errors: list[dict] = []
+    asyncio.get_running_loop().set_exception_handler(lambda loop, ctx: loop_errors.append(ctx))
+    release = threading.Event()
+
+    def _work(gate):
+        release.wait(30)
+        gate.commit()  # raises: the request abandoned the gate
+        return "never"
+
+    try:
+        with pytest.raises(HTTPException) as info:
+            await agents._resume_within_limit(_work, job_id="0000d00e")
+        assert info.value.status_code == 504
+        del info  # its traceback would keep a never-retrieved error alive past gc
+        worker = _worker("0000d00e")  # found while it is surely still blocked
+    finally:
+        release.set()
+    await asyncio.to_thread(worker.join, 30)
+    for _ in range(3):
+        await asyncio.sleep(0)  # run the hand-back the thread scheduled
+    gc.collect()  # a future whose error nobody read reports it when it is collected
+    assert loop_errors == []
+
+
+async def test_resume_within_limit_cancelled_request_never_dispatches_later():
+    # A request cancelled before the limit (a shutdown, say) must abandon the gate too: the
+    # thread that wakes up later must not resume a job that no request reports.
+    loop_errors: list[dict] = []
+    asyncio.get_running_loop().set_exception_handler(lambda loop, ctx: loop_errors.append(ctx))
+    started = threading.Event()
+    release = threading.Event()
+    dispatched: list[str] = []
+    errors: list[Exception] = []
+
+    def _work(gate):
+        started.set()
+        release.wait(30)
+        try:
+            gate.commit()
+        except supervisor.ResumeError as exc:
+            errors.append(exc)
+            raise
+        dispatched.append("spawn")
+        return "newjob01"
+
+    task = asyncio.create_task(agents._resume_within_limit(_work, job_id="0000d00f"))
+    try:
+        assert await asyncio.to_thread(started.wait, 30)
+        worker = _worker("0000d00f")  # found while it is surely still blocked
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        release.set()
+    await asyncio.to_thread(worker.join, 30)
+    assert dispatched == []
+    assert [str(e) for e in errors] == ["the request gave up this resume (time limit or cancel)"]
+    errors.clear()  # the list would keep the error alive past gc
+    for _ in range(3):
+        await asyncio.sleep(0)  # run the hand-back the thread scheduled
+    gc.collect()  # the cancelled outcome drops the late error instead of leaving it unread
+    assert loop_errors == []
+
+
+async def test_resume_within_limit_cancel_after_the_claim_logs_the_dispatch_error(caplog):
+    # The dispatch already started when the request was cancelled: it runs on, and its error
+    # is logged by class (its text can name a path), so it is not lost or left unread.
+    loop_errors: list[dict] = []
+    asyncio.get_running_loop().set_exception_handler(lambda loop, ctx: loop_errors.append(ctx))
+    committed = threading.Event()
+    release = threading.Event()
+
+    def _work(gate):
+        gate.commit()
+        committed.set()
+        release.wait(30)
+        raise supervisor.DispatchError("`claude --bg` failed (exit 1): /secret/path")
+
+    task = asyncio.create_task(agents._resume_within_limit(_work, job_id="0000d010"))
+    with caplog.at_level(logging.WARNING, logger="clauster.routes.agents"):
+        try:
+            assert await asyncio.to_thread(committed.wait, 30)
+            worker = _worker("0000d010")  # found while it is surely still blocked
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        finally:
+            release.set()
+        await asyncio.to_thread(worker.join, 30)
+        for _ in range(3):
+            await asyncio.sleep(0)  # run the hand-back the thread scheduled
+    gc.collect()
+    assert loop_errors == []
+    assert "0000d010 failed after its request ended: DispatchError" in caplog.text
+    assert "/secret/path" not in caplog.text
+
+
+async def test_log_unreported_failure_logs_only_a_failure(caplog):
+    loop = asyncio.get_running_loop()
+    callback = agents._log_unreported_failure("0000d011")
+    ok, cancelled, failed = loop.create_future(), loop.create_future(), loop.create_future()
+    ok.set_result("newjob01")
+    cancelled.cancel()
+    failed.set_exception(supervisor.DispatchError("boom"))
+    with caplog.at_level(logging.WARNING, logger="clauster.routes.agents"):
+        callback(ok)
+        callback(cancelled)
+        assert caplog.text == ""  # a dispatch that worked, or was dropped, is not a failure
+        callback(failed)
+    assert "0000d011 failed after its request ended: DispatchError" in caplog.text
+
+
+class _Abort(BaseException):
+    """A BaseException that is not SystemExit or KeyboardInterrupt."""
+
+
+@pytest.mark.parametrize(
+    "raised", [_Abort("stop"), SystemExit(3), KeyboardInterrupt(), asyncio.CancelledError()]
+)
+async def test_resume_within_limit_hands_back_a_base_exception_as_an_error(raised):
+    # The request waits for a dispatch that claimed the gate with no limit of its own, so the
+    # thread must hand back any exception, or the request would wait forever. One that is
+    # not an Exception goes back as a RuntimeError: SystemExit or KeyboardInterrupt would
+    # stop the event loop, and a CancelledError would read as a cancel of the request.
+    def _work(gate):
+        gate.commit()
+        raise raised
+
+    async with asyncio.timeout(30):  # only reached when the hand-back is missing
+        with pytest.raises(RuntimeError) as info:
+            await agents._resume_within_limit(_work, job_id="0000d012")
+    assert str(info.value) == f"background resume thread raised {type(raised).__name__}"
+    assert info.value.__cause__ is raised
+
+
+async def test_resume_within_limit_cancel_while_waiting_for_a_claimed_dispatch_logs_it(
+    caplog, monkeypatch
+):
+    # The limit passed after the dispatch claimed the gate, so the request waits for it. A
+    # cancel then (a shutdown, say) leaves the dispatch running, and its failure is logged.
+    monkeypatch.setattr(agents, "_RESUME_TIME_LIMIT", 0.05)
+    loop_errors: list[dict] = []
+    asyncio.get_running_loop().set_exception_handler(lambda loop, ctx: loop_errors.append(ctx))
+    committed = threading.Event()
+    waiting = threading.Event()
+    release = threading.Event()
+    real_abandon = supervisor.ResumeGate.abandon
+
+    def _abandon(self):
+        assert committed.wait(30)
+        try:
+            return real_abandon(self)  # False: the dispatch claimed the gate first
+        finally:
+            waiting.set()  # the request now goes straight on to wait for the dispatch
+
+    monkeypatch.setattr(supervisor.ResumeGate, "abandon", _abandon)
+
+    def _work(gate):
+        gate.commit()
+        committed.set()
+        release.wait(30)
+        raise supervisor.DispatchError("`claude --bg` failed (exit 1): /secret/path")
+
+    task = asyncio.create_task(agents._resume_within_limit(_work, job_id="0000d013"))
+    with caplog.at_level(logging.WARNING, logger="clauster.routes.agents"):
+        try:
+            assert await asyncio.to_thread(waiting.wait, 30)
+            worker = _worker("0000d013")  # found while it is surely still blocked
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        finally:
+            release.set()
+        await asyncio.to_thread(worker.join, 30)
+        for _ in range(3):
+            await asyncio.sleep(0)  # run the hand-back the thread scheduled
+    gc.collect()
+    assert loop_errors == []
+    assert "0000d013 failed after its request ended: DispatchError" in caplog.text
+    assert "/secret/path" not in caplog.text
