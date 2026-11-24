@@ -3223,13 +3223,27 @@
       // list without the change. `_configMgmtMarkStale` records it, and Cancel on the
       // editor or the confirm reloads once (`_configMgmtReloadStale`). The mark is only set
       // while the panel shows the scope, project and surface the write went to: after a
-      // switch, that view's own load already reads its list fresh.
+      // switch, that view's own load already reads its list fresh. If the operator already
+      // cancelled that editor or confirm while the write was in flight, the list is on
+      // screen and no Cancel will follow, so the mark reloads it at once.
       _configMgmtViewKey() {
         const c = this.configMgmt;
         return [c.scope, c.scope === "user" ? "" : c.project, c.surface].join("\n");
       },
-      _configMgmtMarkStale(sec, key) {
-        if (key === this._configMgmtViewKey()) sec.listStale = true;
+      // `name` is the section: "subagents", "mcp" or "skills".
+      _configMgmtMarkStale(name, key) {
+        if (key !== this._configMgmtViewKey()) return;
+        const sec = this.configMgmt[name];
+        sec.listStale = true;
+        if (!sec.editing && !sec.deletingName) this._configMgmtReloadSectionStale(name);
+      },
+      // The section's stale reload, as its Cancel makes it, but `quiet`: the operator may be
+      // working in the MCP approvals or skill visibility panel on the same surface, so the
+      // reload leaves those panels as they are.
+      _configMgmtReloadSectionStale(name) {
+        if (name === "mcp") this._configMgmtReloadMcpStale(true);
+        else if (name === "skills") this._configMgmtReloadSkillsStale(true);
+        else this._configMgmtReloadAgentsStale();
       },
       // `load` is the section's list loader, which clears `listStale` when its list lands.
       // Single-flight per section and gen: a second Cancel during the reload starts no
@@ -3395,11 +3409,15 @@
         } catch (e) { if (c.gen === gen) c.error = "Failed to load subagent."; }
         finally { s.ops = Math.max(0, s.ops - 1); s.busy = s.ops > 0; }
       },
+      _configMgmtReloadAgentsStale() {
+        const c = this.configMgmt;
+        this._configMgmtReloadStale(c.subagents, () => this._loadSubagents(c.gen));
+      },
       configMgmtCancelAgent() {
         const c = this.configMgmt;
         c.subagents.editing = false; c.subagents.confirm = ""; c.subagents.converted = ""; c.error = "";
         c.subagents.readOnly = false;
-        this._configMgmtReloadStale(c.subagents, () => this._loadSubagents(c.gen));
+        this._configMgmtReloadAgentsStale();
       },
       configMgmtAgentDirty() {
         const s = this.configMgmt.subagents;
@@ -3430,14 +3448,14 @@
           const res = await fetch(ROOT + "/api/config-write/subagents/" + encodeURIComponent(s.name), {
             method: "PUT", headers: JSON_HEADERS, body: JSON.stringify(body),
           });
-          if (c.gen !== gen) { if (res.ok) this._configMgmtMarkStale(s, key); return; }
+          if (c.gen !== gen) { if (res.ok) this._configMgmtMarkStale("subagents", key); return; }
           if (this._authExpired(res)) return;
           if (res.ok) {
             c.saved = true; s.editing = false; s.confirm = ""; s.converted = "";
             const current = await this._configMgmtTakeWarnings(res, () => c.gen === gen);
             // An editor opened during the wait stays open: the reload would close it, so
             // the list is marked stale for that editor's Cancel to reload (TASK-551).
-            if (!current || s.editing) { this._configMgmtMarkStale(s, key); return; }
+            if (!current || s.editing) { this._configMgmtMarkStale("subagents", key); return; }
             await this._loadSubagents(gen);
           }
           else await this._configMgmtWriteErr(res);
@@ -3456,7 +3474,7 @@
       configMgmtCancelDeleteAgent() {
         const c = this.configMgmt;
         c.subagents.deletingName = ""; c.subagents.confirm = "";
-        this._configMgmtReloadStale(c.subagents, () => this._loadSubagents(c.gen));
+        this._configMgmtReloadAgentsStale();
       },
       configMgmtCanDeleteAgent() {
         const c = this.configMgmt, s = c.subagents;
@@ -3475,7 +3493,7 @@
             ROOT + "/api/config-write/subagents/" + encodeURIComponent(name) + "?" + this._configMgmtQuery({ confirm: s.confirm }),
             { method: "DELETE" },
           );
-          if (c.gen !== gen) { if (res.ok) this._configMgmtMarkStale(s, key); return; }
+          if (c.gen !== gen) { if (res.ok) this._configMgmtMarkStale("subagents", key); return; }
           if (this._authExpired(res)) return;
           if (res.ok) { c.saved = true; c.warnings = []; s.deletingName = ""; s.confirm = ""; await this._loadSubagents(gen); }
           else await this._configMgmtWriteErr(res);
@@ -3585,9 +3603,11 @@
       },
       // A stale list (TASK-551) reloads with its approvals, like the save it stands in for,
       // unless the operator has unsaved approval choices: then the list alone reloads.
-      _configMgmtReloadMcpStale() {
-        const c = this.configMgmt, m = c.mcp;
-        this._configMgmtReloadStale(m, () => this._loadMcp(c.gen, this.configMgmtMcpApprovalsDirty()));
+      // `quiet` also keeps the approvals while a confirm is typed or a save or reset runs.
+      _configMgmtReloadMcpStale(quiet) {
+        const c = this.configMgmt, m = c.mcp, ap = m.approvals;
+        const inUse = !!quiet && !!(ap.confirm || ap.resetConfirm || ap.busy || ap.resetBusy);
+        this._configMgmtReloadStale(m, () => this._loadMcp(c.gen, inUse || this.configMgmtMcpApprovalsDirty()));
       },
       // --- MCP fields editor (TASK-272) ------------------------------------------------
       // A type select shows that transport's fields, and the form builds the same entry
@@ -4025,7 +4045,7 @@
           const res = await fetch(ROOT + "/api/config-write/mcp/server", {
             method: "POST", headers: JSON_HEADERS, body: JSON.stringify(body),
           });
-          if (c.gen !== gen) { if (res.ok) this._configMgmtMarkStale(m, key); return; }
+          if (c.gen !== gen) { if (res.ok) this._configMgmtMarkStale("mcp", key); return; }
           if (this._authExpired(res)) return;
           if (res.ok) {
             c.saved = true; m.editing = false; m.confirm = "";
@@ -4033,7 +4053,7 @@
             // An editor opened during the wait stays open (the reload would close it), so the
             // list is marked stale for its Cancel (TASK-551). An approval toggled during the
             // wait (it clears `saved`) keeps its choice: only the server list reloads.
-            if (!current || m.editing) { this._configMgmtMarkStale(m, key); return; }
+            if (!current || m.editing) { this._configMgmtMarkStale("mcp", key); return; }
             await this._loadMcp(gen, !c.saved);
           }
           else await this._configMgmtWriteErr(res);
@@ -4074,7 +4094,7 @@
           const res = await fetch(ROOT + "/api/config-write/mcp/server", {
             method: "POST", headers: JSON_HEADERS, body: JSON.stringify(body),
           });
-          if (c.gen !== gen) { if (res.ok) this._configMgmtMarkStale(m, key); return; }
+          if (c.gen !== gen) { if (res.ok) this._configMgmtMarkStale("mcp", key); return; }
           if (this._authExpired(res)) return;
           if (res.ok) { c.saved = true; c.warnings = []; m.deletingName = ""; m.confirm = ""; await this._loadMcp(gen); }
           else await this._configMgmtWriteErr(res);
@@ -4224,7 +4244,7 @@
       // The list fetch is guarded by `listId`, not `c.gen`, for the reason the map load is:
       // a SKILL.md save or delete reloads the list while the folder actions stay clickable,
       // and Edit, New skill or Delete in that window bump gen without changing the scope.
-      async _loadSkills(keepOvEdits) {
+      async _loadSkills(keepOvEdits, keepOvPanel) {
         const c = this.configMgmt, local = c.scope === "local";
         const listId = (c.skills.listId += 1);
         c.skills.editing = false; c.skills.deletingName = ""; c.skills.converted = "";
@@ -4278,7 +4298,7 @@
             if (!c.error) c.error = "Failed to load user skills.";
           }
         }
-        await this._loadSkillOverrides(names, keepOvEdits);
+        await this._loadSkillOverrides(names, keepOvEdits, keepOvPanel);
       },
       // The rows: listed folder names first, in list order, then each stored key that no
       // folder has, sorted. A stored value outside the known four shows as "?" and saves
@@ -4330,10 +4350,11 @@
       // closeConfigMgmt: both bump loadId, as does each new map load here.
       // Resolves true when this load is still the current one, so a caller never has to
       // predict the id it takes.
-      async _loadSkillOverrides(names, keepOvEdits) {
+      // `keepOvPanel` (a quiet stale reload, TASK-551) keeps the loaded map even when clean.
+      async _loadSkillOverrides(names, keepOvEdits, keepOvPanel) {
         const c = this.configMgmt, ov = c.skills.ov;
         ov.listed = names;
-        if (keepOvEdits && ov.ready && this.configMgmtSkillOvDirty()) {
+        if (keepOvEdits && ov.ready && (keepOvPanel || this.configMgmtSkillOvDirty())) {
           // Refresh which rows are listed folders; keep every value, hash and baseline.
           const listed = new Set(names), have = new Set();
           ov.rows = ov.rows.filter(r => {
@@ -4542,11 +4563,16 @@
         } catch (e) { if (c.gen === gen) c.error = "Failed to load skill."; }
         finally { s.ops = Math.max(0, s.ops - 1); s.busy = s.ops > 0; }
       },
+      // `true` keeps unsaved visibility choices, as the skill save's own reload does. `quiet`
+      // keeps the whole visibility panel (typed name and confirm too): a SKILL.md write never
+      // touches settings.json, so its map and hash stay current; only the rows' folders refresh.
+      _configMgmtReloadSkillsStale(quiet) {
+        this._configMgmtReloadStale(this.configMgmt.skills, () => this._loadSkills(true, !!quiet));
+      },
       configMgmtCancelSkill() {
         const s = this.configMgmt.skills;
         s.editing = false; s.confirm = ""; s.converted = ""; this.configMgmt.error = "";
-        // `true` keeps unsaved visibility choices, as the skill save's own reload does.
-        this._configMgmtReloadStale(s, () => this._loadSkills(true));
+        this._configMgmtReloadSkillsStale();
       },
       configMgmtSkillDirty() {
         const s = this.configMgmt.skills;
@@ -4575,14 +4601,14 @@
           const res = await fetch(ROOT + "/api/config-write/skills", {
             method: "PUT", headers: JSON_HEADERS, body: JSON.stringify(body),
           });
-          if (c.gen !== gen) { if (res.ok) this._configMgmtMarkStale(s, key); return; }
+          if (c.gen !== gen) { if (res.ok) this._configMgmtMarkStale("skills", key); return; }
           if (this._authExpired(res)) return;
           if (res.ok) {
             c.saved = true; s.editing = false; s.confirm = ""; s.converted = "";
             const current = await this._configMgmtTakeWarnings(res, () => c.gen === gen);
             // An editor opened during the wait (New skill) stays open: the reload closes it,
             // so the list is marked stale for that editor's Cancel to reload (TASK-551).
-            if (!current || s.editing) { this._configMgmtMarkStale(s, key); return; }
+            if (!current || s.editing) { this._configMgmtMarkStale("skills", key); return; }
             await this._loadSkills(true);
           }
           else await this._configMgmtWriteErr(res);
@@ -4601,7 +4627,7 @@
       configMgmtCancelDeleteSkill() {
         const s = this.configMgmt.skills;
         s.deletingName = ""; s.confirm = "";
-        this._configMgmtReloadStale(s, () => this._loadSkills(true));
+        this._configMgmtReloadSkillsStale();
       },
       configMgmtCanDeleteSkill() {
         const c = this.configMgmt, s = c.skills;
@@ -4620,7 +4646,7 @@
           const res = await fetch(ROOT + "/api/config-write/skills/delete", {
             method: "POST", headers: JSON_HEADERS, body: JSON.stringify(body),
           });
-          if (c.gen !== gen) { if (res.ok) this._configMgmtMarkStale(s, key); return; }
+          if (c.gen !== gen) { if (res.ok) this._configMgmtMarkStale("skills", key); return; }
           if (this._authExpired(res)) return;
           if (res.ok) { c.saved = true; c.warnings = []; s.deletingName = ""; s.confirm = ""; await this._loadSkills(true); }
           else await this._configMgmtWriteErr(res);
@@ -7037,7 +7063,11 @@
         const timer = setTimeout(() => ctrl.abort(), this.projectNamesTimeoutMs);
         try {
           const res = await fetch(ROOT + "/api/projects", { signal: ctrl.signal });
-          if (this._authExpired(res) || !res.ok) return;
+          if (this._authExpired(res)) return;
+          if (!res.ok) {
+            console.error("project list refresh: HTTP " + res.status + "; keeping the current list");
+            return;
+          }
           const list = await res.json();
           if (seq !== this._projectNamesSeq || !Array.isArray(list)) return;
           this._setProjectNames(list);

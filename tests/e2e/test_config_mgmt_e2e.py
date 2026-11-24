@@ -4184,3 +4184,109 @@ def test_config_mgmt_cancel_after_a_skipped_mcp_reload_shows_the_saved_server(
     browser.expect_count('[data-test="cm-mcp-edit-first-server"]', 0)
     browser.click('[data-test="cm-mcp-cancel"]')
     browser.expect_visible('[data-test="cm-mcp-edit-first-server"]', timeout_ms=_SAVE_TIMEOUT)
+
+
+def _hold_write_response(method: str, url_part: str) -> str:
+    """JS that holds a config write's whole response (not only its body) until released."""
+    return (
+        "(() => {"
+        "window.__holdResp = new Promise(r => { window.__releaseResp = r; });"
+        "const real = window.fetch;"
+        "window.fetch = function (url, opts) {"
+        "const p = real.apply(this, arguments); const u = String(url);"
+        f"const hit = opts && opts.method === {json.dumps(method)}"
+        f" && u.includes({json.dumps(url_part)});"
+        "return hit ? window.__holdResp.then(() => p) : p;"
+        "}; return true; })()"
+    )
+
+
+def test_config_mgmt_mcp_save_landing_after_new_and_cancel_reloads_the_list(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """A save that lands after Back to list, New server and Back to list still lists the server.
+
+    The save's answer arrives after a New (gen bumped) that was already cancelled, so no
+    editor or confirm is open to make up the skipped reload on its Cancel. The list must
+    reload at once (review of PR 1946).
+    """
+    alpha = _projects_root(config_mgmt_server) / "alpha"
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-mcp"]')
+    browser.expect_visible('[data-test="cm-mcp-new"]', timeout_ms=_SAVE_TIMEOUT)
+    browser.click('[data-test="cm-mcp-new"]')
+    browser.fill('[data-test="cm-mcp-name"]', "late-server")
+    _mcp_raw_mode(browser)
+    browser.fill('[data-test="cm-mcp-entry"]', '{"command": "echo", "env": {"FOO": "bar"}}')
+    browser.fill('[data-test="cm-mcp-confirm"]', "alpha")
+    assert browser.eval_json(_hold_write_response("POST", "/api/config-write/mcp/server")) is True
+    browser.click('[data-test="cm-mcp-save"]')
+    _wait_file(alpha / ".mcp.json")  # the server wrote it; the page has no answer yet
+    browser.click('[data-test="cm-mcp-cancel"]')  # Back to list while the save is in flight
+    browser.expect_visible('[data-test="cm-mcp-new"]', timeout_ms=_SAVE_TIMEOUT)
+    browser.click('[data-test="cm-mcp-new"]')  # bumps gen: the save's answer is now stale
+    browser.expect_visible('[data-test="cm-mcp-editor"]', timeout_ms=_SAVE_TIMEOUT)
+    browser.click('[data-test="cm-mcp-cancel"]')  # nothing stale yet, so nothing reloads
+    browser.expect_visible('[data-test="cm-mcp-new"]', timeout_ms=_SAVE_TIMEOUT)
+    browser.expect_count('[data-test="cm-mcp-edit-late-server"]', 0)
+    browser.eval_json("(() => { window.__releaseResp(); return true; })()")
+    browser.expect_visible('[data-test="cm-mcp-edit-late-server"]', timeout_ms=_SAVE_TIMEOUT)
+
+
+def test_project_list_refresh_logs_a_non_ok_answer_and_keeps_the_list(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """A 500 from /api/projects keeps the picker's list and leaves a console line."""
+    browser.goto(config_mgmt_server.url)
+    browser.expect_visible('[data-project="alpha"]')
+    browser.eval_json(
+        "(()=>{window.__errs=[];const err=console.error;"
+        "console.error=function(){window.__errs.push([...arguments].map(String).join(' '));"
+        "return err.apply(this,arguments)};const real=window.fetch;"
+        "window.fetch=function(url,opts){if(String(url).endsWith('/api/projects'))"
+        "return Promise.resolve(new Response('{}',{status:500}));"
+        "return real.apply(this,arguments)};"
+        "window.__done=false;" + _ROOT + ".refreshProjectNames().then(()=>{window.__done=true});"
+        "return true})()"
+    )
+    deadline = time.monotonic() + 10
+    while browser.eval_json("window.__done") is not True:
+        assert time.monotonic() < deadline, "the refresh never settled"
+        time.sleep(0.1)
+    errs = browser.eval_json("window.__errs")
+    assert any("project list refresh: HTTP 500" in e for e in errs), errs
+    assert browser.eval_json("[..." + _ROOT + ".projectNames]") == ["alpha", "beta", "gamma"]
+
+
+def test_config_mgmt_skill_save_landing_late_lists_it_and_keeps_typed_visibility_text(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """A skill save landing after New and Cancel lists the skill, and keeps a typed name.
+
+    The list reloads at once (no Cancel will follow), but quietly: the visibility panel on
+    the same tab keeps the name the operator is typing (review of PR 1946).
+    """
+    alpha = _projects_root(config_mgmt_server) / "alpha"
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-skills"]')
+    browser.expect_visible('[data-test="cm-skill-new"]', timeout_ms=_SAVE_TIMEOUT)
+    browser.click('[data-test="cm-skill-new"]')
+    browser.fill('[data-test="cm-skill-name"]', "late-skill")
+    browser.fill('[data-test="cm-skill-content"]', "---\nname: late-skill\n---\nBody.\n")
+    browser.fill('[data-test="cm-skill-confirm"]', "alpha")
+    assert browser.eval_json(_hold_write_response("PUT", "/api/config-write/skills")) is True
+    browser.click('[data-test="cm-skill-save"]')
+    _wait_file(alpha / ".claude" / "skills" / "late-skill" / "SKILL.md")
+    browser.click('[data-test="cm-skill-cancel"]')  # back to the list while the save is in flight
+    browser.expect_visible('[data-test="cm-skill-new"]', timeout_ms=_SAVE_TIMEOUT)
+    browser.click('[data-test="cm-skill-new"]')  # bumps gen: the save's answer is now stale
+    browser.expect_visible('[data-test="cm-skill-editor"]', timeout_ms=_SAVE_TIMEOUT)
+    browser.click('[data-test="cm-skill-cancel"]')
+    add = "#cm-skill-ov-add-name"
+    browser.expect_visible(add, timeout_ms=_SAVE_TIMEOUT)
+    browser.fill(add, "keep-me")
+    browser.eval_json("(() => { window.__releaseResp(); return true; })()")
+    browser.expect_visible('[data-test="cm-skill-edit-late-skill"]', timeout_ms=_SAVE_TIMEOUT)
+    browser.expect_value(add, "keep-me")

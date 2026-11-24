@@ -703,6 +703,11 @@ def test_refresh_project_names_is_single_flight_and_fails_soft(write_config):
     assert "setTimeout(() => ctrl.abort(), this.projectNamesTimeoutMs)" in read  # bounded
     assert "if (seq !== this._projectNamesSeq || !Array.isArray(list)) return;" in read
     assert "console.error(" in read  # a failed read keeps the list but leaves a trace
+    # A non-OK answer logs its status too; a 401 stays silent (it redirects to log in).
+    assert "if (this._authExpired(res)) return;" in read
+    assert "if (!res.ok) {" in read
+    assert 'console.error("project list refresh: HTTP " + res.status' in read
+    assert "this._authExpired(res) || !res.ok" not in read
     # The answer REPLACES the list (a merge would keep a removed project offered).
     replace = _script_fn(page, "_setProjectNames(projects) {")
     assert "this.projectNames = projects.map((p) => p && p.name)" in replace

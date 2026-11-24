@@ -758,7 +758,7 @@ def test_skill_editor_shows_the_conversion_note(write_config):
     assert 's.converted = "";' in new_skill
     cancel = _between(html, "configMgmtCancelSkill() {", "configMgmtSkillDirty()")
     assert 's.converted = "";' in cancel
-    reload = _between(html, "async _loadSkills(keepOvEdits) {", "_skillOvRow(")
+    reload = _between(html, "async _loadSkills(keepOvEdits, keepOvPanel) {", "_skillOvRow(")
     assert 'c.skills.converted = "";' in reload
     switch = _between(
         html,
@@ -902,31 +902,37 @@ def test_a_save_that_skips_its_reload_marks_the_list_stale(write_config, section
     assert "const key = this._configMgmtViewKey();" in body
     # Read before the request: the view the write was sent from, not the one after it.
     assert body.index("const key = this._configMgmtViewKey();") < body.index("await fetch(")
-    assert "if (c.gen !== gen) { if (res.ok) this._configMgmtMarkStale(" in body
-    assert "editing) { this._configMgmtMarkStale(" in body
+    mark = f'this._configMgmtMarkStale("{section}", key);'
+    assert "if (c.gen !== gen) { if (res.ok) " + mark + " return; }" in body
+    assert "editing) { " + mark + " return; }" in body
 
 
 @pytest.mark.parametrize(
-    ("start", "end"),
+    ("section", "start", "end"),
     [
-        ("async configMgmtDeleteAgent() {", "// --- MCP servers"),
-        ("async configMgmtDeleteMcp() {", "// --- MCP project approvals"),
-        ("async configMgmtDeleteSkill() {", "// --- plugins + marketplaces"),
+        ("subagents", "async configMgmtDeleteAgent() {", "// --- MCP servers"),
+        ("mcp", "async configMgmtDeleteMcp() {", "// --- MCP project approvals"),
+        ("skills", "async configMgmtDeleteSkill() {", "// --- plugins + marketplaces"),
     ],
 )
-def test_a_delete_that_skips_its_reload_marks_the_list_stale(write_config, start, end):
+def test_a_delete_that_skips_its_reload_marks_the_list_stale(write_config, section, start, end):
     body = _between(_html(write_config, _ON), start, end)
-    assert "if (c.gen !== gen) { if (res.ok) this._configMgmtMarkStale(" in body
+    mark = f'this._configMgmtMarkStale("{section}", key);'
+    assert "if (c.gen !== gen) { if (res.ok) " + mark + " return; }" in body
 
 
 @pytest.mark.parametrize(
     ("start", "end", "reload"),
     [
-        ("configMgmtCancelAgent() {", "configMgmtAgentDirty() {", "this._loadSubagents(c.gen)"),
+        (
+            "configMgmtCancelAgent() {",
+            "configMgmtAgentDirty() {",
+            "this._configMgmtReloadAgentsStale();",
+        ),
         (
             "configMgmtCancelDeleteAgent() {",
             "configMgmtCanDeleteAgent() {",
-            "this._loadSubagents(c.gen)",
+            "this._configMgmtReloadAgentsStale();",
         ),
         (
             "configMgmtCancelMcp() {",
@@ -938,17 +944,49 @@ def test_a_delete_that_skips_its_reload_marks_the_list_stale(write_config, start
             "configMgmtCanDeleteMcp() {",
             "this._configMgmtReloadMcpStale();",
         ),
-        ("configMgmtCancelSkill() {", "configMgmtSkillDirty() {", "this._loadSkills(true)"),
+        (
+            "configMgmtCancelSkill() {",
+            "configMgmtSkillDirty() {",
+            "this._configMgmtReloadSkillsStale();",
+        ),
         (
             "configMgmtCancelDeleteSkill() {",
             "configMgmtCanDeleteSkill() {",
-            "this._loadSkills(true)",
+            "this._configMgmtReloadSkillsStale();",
         ),
     ],
 )
 def test_cancel_reloads_a_stale_list(write_config, start, end, reload):
     body = _between(_html(write_config, _ON), start, end)
     assert reload in body
+
+
+def test_section_stale_reloads_use_each_sections_own_loader(write_config):
+    html = _html(write_config, _ON)
+    agents = _between(html, "_configMgmtReloadAgentsStale() {", "configMgmtCancelAgent() {")
+    assert "this._configMgmtReloadStale(c.subagents, () => this._loadSubagents(c.gen));" in agents
+    skills = _between(html, "_configMgmtReloadSkillsStale(quiet) {", "configMgmtCancelSkill() {")
+    # `true` keeps unsaved visibility choices, as the skill save's own reload does.
+    assert "() => this._loadSkills(true, !!quiet)" in skills
+    route = _between(html, "_configMgmtReloadSectionStale(name) {", "_configMgmtReloadStale(")
+    # The mark's reload is quiet: it leaves a panel the operator is working in alone.
+    assert 'if (name === "mcp") this._configMgmtReloadMcpStale(true);' in route
+    assert 'else if (name === "skills") this._configMgmtReloadSkillsStale(true);' in route
+    assert "else this._configMgmtReloadAgentsStale();" in route
+
+
+def test_a_mark_with_no_editor_or_confirm_open_reloads_at_once(write_config):
+    # Review nit on PR 1946: a write can land after the operator left its editor and
+    # cancelled a later New or Delete confirm. No Cancel follows then, so a mark alone left
+    # the list without the change. With the list on screen, the mark reloads it now.
+    html = _html(write_config, _ON)
+    mark = _between(html, "_configMgmtMarkStale(name, key) {", "// The section's stale reload")
+    assert "if (key !== this._configMgmtViewKey()) return;" in mark
+    assert "sec.listStale = true;" in mark
+    assert "if (!sec.editing && !sec.deletingName) this._configMgmtReloadSectionStale(name);" in (
+        mark
+    )
+    assert mark.index("sec.listStale = true;") < mark.index("this._configMgmtReloadSectionStale(")
 
 
 def test_stale_reload_is_single_flight_and_cleared_by_any_list_load(write_config):
@@ -960,8 +998,8 @@ def test_stale_reload_is_single_flight_and_cleared_by_any_list_load(write_config
     assert "sec.staleLoading = true; sec.staleGen = gen;" in helper
     assert ".finally(() => { if (sec.staleGen === gen) sec.staleLoading = false; });" in helper
     # Only a write to the list still on screen marks it: a switch loads its own list.
-    mark = _between(html, "_configMgmtMarkStale(sec, key) {", "_configMgmtReloadStale(")
-    assert "if (key === this._configMgmtViewKey()) sec.listStale = true;" in mark
+    mark = _between(html, "_configMgmtMarkStale(name, key) {", "// The section's stale reload")
+    assert "if (key !== this._configMgmtViewKey()) return;" in mark
     # Each list loader clears the mark once its list lands.
     assert "c.subagents.list = d.agents || []; c.subagents.listStale = false;" in html
     assert "c.skills.list = local ? [] : skills; c.skills.listStale = false;" in html
@@ -973,8 +1011,29 @@ def test_stale_reload_is_single_flight_and_cleared_by_any_list_load(write_config
 
 def test_mcp_stale_reload_keeps_unsaved_approval_choices(write_config):
     html = _html(write_config, _ON)
-    helper = _between(html, "_configMgmtReloadMcpStale() {", "// --- MCP fields editor")
-    assert "this._loadMcp(c.gen, this.configMgmtMcpApprovalsDirty())" in helper
+    helper = _between(html, "_configMgmtReloadMcpStale(quiet) {", "// --- MCP fields editor")
+    assert "this._loadMcp(c.gen, inUse || this.configMgmtMcpApprovalsDirty())" in helper
+    # A quiet (mark) reload also keeps the approvals while a confirm is typed or a write runs.
+    assert (
+        "const inUse = !!quiet && !!(ap.confirm || ap.resetConfirm || ap.busy || ap.resetBusy);"
+        in helper
+    )
     # An approval toggled during a save's wait keeps its choice, and the list still reloads.
     save = _between(html, "async configMgmtSaveMcp() {", "configMgmtAskDeleteMcp(")
     assert "await this._loadMcp(gen, !c.saved);" in save
+
+
+def test_a_quiet_skill_reload_keeps_the_visibility_panel(write_config):
+    # Review of PR 1946: the mark's immediate reload ran the full visibility reload when the
+    # map was clean, which blanked the rows and cleared a typed "Add a skill name" and its
+    # confirm. A SKILL.md write never touches settings.json, so a quiet reload keeps the map.
+    html = _html(write_config, _ON)
+    assert "async _loadSkills(keepOvEdits, keepOvPanel) {" in html
+    assert "await this._loadSkillOverrides(names, keepOvEdits, keepOvPanel);" in html
+    ov = _between(
+        html, "async _loadSkillOverrides(names, keepOvEdits, keepOvPanel) {", "ov.rows = [];"
+    )
+    assert "if (keepOvEdits && ov.ready && (keepOvPanel || this.configMgmtSkillOvDirty())) {" in ov
+    # Cancel stays as before: it reloads a clean map in full.
+    cancel = _between(html, "configMgmtCancelSkill() {", "configMgmtSkillDirty() {")
+    assert "this._configMgmtReloadSkillsStale();" in cancel
