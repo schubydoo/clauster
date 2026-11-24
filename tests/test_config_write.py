@@ -14,6 +14,7 @@ import contextlib
 import datetime
 import errno
 import json
+import logging
 import math
 from pathlib import Path
 
@@ -1212,6 +1213,16 @@ def test_write_subtree_creates_missing_file(tmp_path: Path) -> None:
     assert out == {"mcpServers": {"srv": {"command": "/bin/x"}}}
 
 
+def test_write_subtree_non_finite_number_is_a_422_and_writes_nothing(tmp_path: Path) -> None:
+    # TASK-484: the ~/.claude.json writer refuses Infinity/NaN like render_json does for the
+    # other config files: a 422 (InvalidCandidateError), never a 500, and the file unchanged.
+    f = tmp_path / "claude.json"
+    f.write_bytes(b'{"misc": 1}')
+    with pytest.raises(cw.InvalidCandidateError, match=r"Infinity or NaN"):
+        cw.write_subtree(f, "mcpServers", lambda current: {"srv": {"timeout": math.inf}})
+    assert f.read_bytes() == b'{"misc": 1}'
+
+
 # --- nested-subtree writer (local-scope MCP: projects[<path>].mcpServers) ----------
 
 
@@ -1989,15 +2000,15 @@ def test_yaml12_view_reads_plain_scalars_by_the_yaml_1_2_core_schema(
 ) -> None:
     # The readings were checked against eemeli/yaml (YAML 1.2, core schema), the stand-in
     # for Bun.YAML, which cannot run on this host.
-    assert cw.yaml12_view(header) == expected
+    assert cw.yaml12_view(header, what="frontmatter") == expected
 
 
 def test_yaml12_view_marks_an_explicit_tag_it_cannot_vouch_for() -> None:
-    value = cw.yaml12_view("a: !!int '5'\nb: !!binary aGk=\n")
+    value = cw.yaml12_view("a: !!int '5'\nb: !!binary aGk=\n", what="frontmatter")
     assert isinstance(value["a"], cw.Yaml12Unknown)
     assert isinstance(value["b"], cw.Yaml12Unknown)
     assert repr(value["a"]) == "<explicitly tagged YAML value>"
-    assert math.isnan(cw.yaml12_view("a: .NaN")["a"])
+    assert math.isnan(cw.yaml12_view("a: .NaN", what="frontmatter")["a"])
 
 
 def test_yaml12_view_maps_a_recursion_error_to_a_rejection(monkeypatch) -> None:
@@ -2006,7 +2017,7 @@ def test_yaml12_view_maps_a_recursion_error_to_a_rejection(monkeypatch) -> None:
 
     monkeypatch.setattr(cw, "_yaml12_node", _deep)
     with pytest.raises(cw.InvalidCandidateError, match="nested too deeply"):
-        cw.yaml12_view("a: 1")
+        cw.yaml12_view("a: 1", what="frontmatter")
 
 
 @pytest.mark.parametrize("entry", ["async: yes", "timeout: 1_000"])
@@ -2029,6 +2040,18 @@ def test_a_nested_number_only_yaml_1_2_reads_is_refused_on_both_surfaces(
     # The other direction: a string to PyYAML, a number to the CLI's YAML 1.2.
     with pytest.raises(cw.InvalidCandidateError, match="nested value at line 7"):
         parse(_NESTED_HOOK.format(entry=entry))
+
+
+@pytest.mark.parametrize("parse", _both_parsers())
+def test_a_nested_decimal_past_the_double_range_hint_names_the_range(parse) -> None:
+    # TASK-492: this IS a plain decimal, so "write a plain decimal" alone could not fix it.
+    with pytest.raises(cw.InvalidCandidateError, match="nested value at line 7") as info:
+        parse(_NESTED_HOOK.format(entry="timeout: " + "9" * 400))
+    assert str(info.value).endswith(
+        "Quote it, or write true, false or a plain decimal inside that range"
+    )
+    assert "past the range of a JavaScript number, about 1.8e308" in str(info.value)
+    parse(_NESTED_HOOK.format(entry="timeout: " + "9" * 300))  # inside the range: no raise
 
 
 # --- TASK-449.6: the CLI's retry for a header that is not valid YAML -------------------
@@ -2094,7 +2117,9 @@ def test_a_valid_header_is_never_retried() -> None:
 
 
 def test_the_yaml12_view_reads_the_retry_text_too() -> None:
-    assert cw.yaml12_view("description: Use this: for x\n") == {"description": "Use this: for x"}
+    assert cw.yaml12_view("description: Use this: for x\n", what="frontmatter") == {
+        "description": "Use this: for x"
+    }
 
 
 def test_a_too_deep_header_is_not_retried() -> None:
@@ -2226,7 +2251,7 @@ def test_a_tab_inside_a_plain_value_loads_as_yaml_1_2_reads_it(
     # PyYAML's own loader refuses the header, so the new loader is what reads it.
     with pytest.raises(yaml.YAMLError):
         yaml.safe_load(f"{lines}\n")
-    assert cw.yaml12_view(f"{lines}\n") == {key: expected}
+    assert cw.yaml12_view(f"{lines}\n", what="frontmatter") == {key: expected}
 
 
 def test_the_depth_check_reads_past_a_tab_in_a_value() -> None:
@@ -2257,7 +2282,7 @@ def test_the_depth_check_reads_past_a_tab_in_a_value() -> None:
     ],
 )
 def test_the_yaml_1_2_view_keeps_an_explicit_str_as_text(header: str, expected: object) -> None:
-    assert cw.yaml12_view(header) == expected
+    assert cw.yaml12_view(header, what="frontmatter") == expected
 
 
 @pytest.mark.parametrize("parse", _both_parsers())
@@ -2409,7 +2434,7 @@ def test_the_yaml12_key_of_a_huge_integer_is_infinity() -> None:
 
 
 def test_yaml12_view_of_a_scalar_header_is_the_scalar() -> None:
-    assert cw.yaml12_view("just text") == "just text"
+    assert cw.yaml12_view("just text", what="frontmatter") == "just text"
 
 
 _MERGE_SPELLINGS = [
@@ -2474,7 +2499,7 @@ def test_every_seam_walk_is_memoized_on_an_override_shaped_pyramid() -> None:
         cw._duplicate_key(root)
         cw._has_enclosing_alias(root)
         cw._has_merge_key(root)
-        cw.yaml12_view(header)
+        cw.yaml12_view(header, what="frontmatter")
 
     count_ops(every_walk, budget=400_000)  # about 128k lines; a walk per path needs 4**20 visits
     every_walk()
@@ -2513,7 +2538,9 @@ def test_a_huge_leading_zero_number_in_a_nested_value_is_refused_not_a_500(parse
     # PyYAML reads `0999...` (5000 digits) as a string; YAML 1.2 reads a decimal number,
     # and int() past Python's digit limit raised ValueError after the load: a 500.
     huge = "0" + "9" * 5000
-    assert cw.yaml12_view(f"y: {huge}") == {"y": math.inf}  # JavaScript Infinity
+    assert cw.yaml12_view(f"y: {huge}", what="frontmatter") == {
+        "y": math.inf
+    }  # JavaScript Infinity
     with pytest.raises(cw.InvalidCandidateError, match="nested value"):
         parse(f"---\nname: a\ndescription: d\nx:\n  y: {huge}\n---\nb\n")
 
@@ -2556,7 +2583,7 @@ def test_a_huge_top_level_hex_key_and_the_largest_nested_decimal_still_load(pars
 
 
 def test_the_yaml12_view_reads_a_huge_hex_or_oct_number_as_infinity() -> None:
-    assert cw.yaml12_view(f"a: {_HUGE_HEX}\nb: -{_HUGE_OCT}\nc: 0x10") == {
+    assert cw.yaml12_view(f"a: {_HUGE_HEX}\nb: -{_HUGE_OCT}\nc: 0x10", what="frontmatter") == {
         "a": math.inf,
         "b": -math.inf,
         "c": 16,
@@ -2648,7 +2675,8 @@ def test_a_tag_or_node_shape_pyyaml_loads_specially_never_escapes_the_seam(
     # walks might read differently from PyYAML's loader. Each loads or is refused by a check
     # that means to refuse it. The crash wrapper is replaced by one that raises a
     # BaseException no seam handler catches, so a check that crashes fails this test, whatever
-    # the wrapper's message says and whatever handler sits around the check.
+    # handler sits around the check. The stand-in is stricter than the real wrapper: it also
+    # counts a RecursionError or a YAMLError as a crash, where the real one refuses them.
     monkeypatch.setattr(cw, "refuse_check_failures", _crash_escapes)
     text = f"---\nname: a\ndescription: d\n{extra}\n---\nb\n"
     surfaces = [
@@ -2656,6 +2684,8 @@ def test_a_tag_or_node_shape_pyyaml_loads_specially_never_escapes_the_seam(
         lambda: config_write_skills.parse_frontmatter(text),
         lambda: config_write_skills.validate_skill_md_content(text),
         lambda: config_write_subagents.validate_agent_content(text, expected_name="a"),
+        # The load path's wrapped site: it turns a refusal into None, never a crash.
+        lambda: config_write_skills._ignorable_keys(text),
     ]
     for surface in surfaces:
         try:
@@ -2669,8 +2699,10 @@ def test_a_tag_or_node_shape_pyyaml_loads_specially_never_escapes_the_seam(
 )
 def test_a_list_or_mapping_key_in_an_ordered_mapping_is_refused(extra: str) -> None:
     # PyYAML builds `!!omap`/`!!pairs` without hashing a key; the YAML 1.2 view raised
-    # TypeError on it (review on PR 1810).
-    with pytest.raises(cw.InvalidCandidateError, match="a list or a mapping as a key"):
+    # TypeError on it (review on PR 1810). The refusal names the file like its neighbors do.
+    with pytest.raises(
+        cw.InvalidCandidateError, match="^SKILL.md frontmatter has a list or a mapping as a key"
+    ):
         config_write_skills.validate_skill_md_content(
             f"---\nname: a\ndescription: d\n{extra}\n---\nb\n"
         )
@@ -2691,15 +2723,25 @@ _CHECK_CRASHES = [
 @pytest.mark.parametrize("crash", _CHECK_CRASHES)
 @pytest.mark.parametrize("check", ["_yaml12_refuses", "_merge_expands_beyond"])
 def test_a_crash_in_any_composed_tree_check_is_a_refusal(
-    parse, crash: Exception, check: str, monkeypatch
+    parse, crash: Exception, check: str, monkeypatch, caplog
 ) -> None:
     def _boom(*_args, **_kwargs):
         raise crash
 
     monkeypatch.setattr(cw, check, _boom)
-    with pytest.raises(cw.InvalidCandidateError, match=type(crash).__name__) as caught:
-        parse("---\nname: a\ndescription: d\n---\nb\n")
+    with caplog.at_level(logging.WARNING, logger="clauster.config_write"):
+        with pytest.raises(cw.InvalidCandidateError, match=type(crash).__name__) as caught:
+            parse("---\nname: a\ndescription: d\n---\nb\n")
     assert "SECRET" not in str(caught.value)  # the class name only, never the payload
+    # TASK-492: the refusal leaves a trace (the class and the frames down to the crash) for
+    # the operator, still without the exception message, which can quote the document.
+    [record] = [r for r in caplog.records if r.name == "clauster.config_write"]
+    assert record.levelno == logging.WARNING
+    logged = record.getMessage()
+    assert f"raised {type(crash).__name__} and was refused" in logged
+    assert "in _boom" in logged
+    assert "SECRET" not in logged
+    assert record.exc_info is None  # exc_info would print str(exc)
 
 
 @pytest.mark.parametrize("parse", _both_parsers())

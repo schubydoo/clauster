@@ -2748,7 +2748,7 @@ def test_a_skill_with_a_long_merge_chain_is_read_without_recursion() -> None:
     # them. 4x the links cost about 4x the lines, and a walk per link of the chain costs 16x.
     base = count_ops(seam_walks(375))
     count_ops(seam_walks(1500), budget=6 * base)
-    view = cw.yaml12_view(content.split("---\n")[1])
+    view = cw.yaml12_view(content.split("---\n")[1], what="frontmatter")
     assert view["metadata"]["x1499"] == {"k": "v"}
 
 
@@ -2803,7 +2803,9 @@ def test_effort_reads_a_number_past_the_double_range_as_ignored() -> None:
     # effort reader refuses (not an integer).
     assert sk._cli_effort("9" * 400) is None
     assert sk._cli_effort("9" * 5000) is None
-    assert sk._cli_effort(10**400) is None  # a YAML 1.2 hex or octal number this large
+    # Only the PyYAML (YAML 1.1) reading gives an int this large, from a long decimal, 0x or
+    # leading-zero octal number: the YAML 1.2 view reads any of them as Infinity.
+    assert sk._cli_effort(10**400) is None
     assert sk._cli_effort("12 tokens") == 12
 
 

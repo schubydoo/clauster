@@ -29,6 +29,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import math
 import os
 import stat
 import tempfile
@@ -99,14 +100,60 @@ class ClaudeJsonUnparseable(ValueError):
         )
 
 
+class ClaudeJsonNotFinite(ValueError):
+    """An update would write ``Infinity`` or ``NaN`` to ``~/.claude.json``; nothing was written.
+
+    JSON has no such numbers: ``json.dumps`` writes them as bare words, and the next read of
+    the file, by Clauster or by Claude Code, would refuse it whole (TASK-484). Raised before
+    the backup and the replace, so the file stays byte-identical. Only the caller's ``mutate``
+    can add such a number, because :func:`_read_claude_json` refuses a file that already
+    holds one (or a number it would read as one). The message names the path, never a value.
+    """
+
+    def __init__(self, path: Path) -> None:
+        """Build the operator-facing message from ``path``."""
+        super().__init__(
+            f"Clauster did not change {path}: the update holds a number that JSON cannot "
+            "store (Infinity or NaN)."
+        )
+
+
+class _NonFiniteNumber(Exception):
+    """``json.loads`` met a number Clauster cannot write back (not a ``ValueError`` on purpose).
+
+    A ``ValueError`` from a parse hook would fall into the reader's generic "cannot be
+    parsed" arm; this keeps the reason specific.
+    """
+
+
+def _refuse_constant(_name: str) -> float:
+    """``parse_constant`` hook: refuse ``Infinity``/``-Infinity``/``NaN``, which are not JSON."""
+    raise _NonFiniteNumber
+
+
+def _parse_float(text: str) -> float:
+    """``parse_float`` hook: refuse a valid JSON number past the double range, such as ``1e400``.
+
+    ``float()`` reads it as ``inf``, which no JSON writer can write back as it was: the old
+    render wrote the bare word ``Infinity`` and broke the file for the CLI.
+    """
+    value = float(text)
+    if math.isinf(value):
+        raise _NonFiniteNumber
+    return value
+
+
 def _read_claude_json(claude_json: Path) -> tuple[str | None, dict]:
     """Return ``(raw_text, parsed_dict)`` for ``claude_json``.
 
     ``raw_text`` is the verbatim on-disk content (for the one-time backup), or ``None``
     when the file is missing. Only a missing file starts from empty state (no backup).
     A file that exists but is not a JSON object raises :class:`ClaudeJsonUnparseable`:
-    undecodable bytes, malformed or truncated JSON, a >4300-digit int literal, nesting
-    too deep for the parser, or a valid-JSON non-object root. A read error
+    undecodable bytes, malformed or truncated JSON, a >4300-digit int literal, an
+    ``Infinity``/``NaN`` literal (Python's parser accepts it, JSON and the CLI do not), a
+    number past the double range such as ``1e400`` (valid JSON, but Python reads it as
+    ``inf`` and no JSON writer can write it back as it was), nesting too deep for the
+    parser, or a valid-JSON non-object root. A read error
     (``PermissionError``) propagates unchanged. Either way the caller writes nothing.
     """
     try:
@@ -121,7 +168,10 @@ def _read_claude_json(claude_json: Path) -> tuple[str | None, dict]:
     # caller touched, and skip the backup: every other project, trust grant and account
     # key was lost (#1600).
     try:
-        data = json.loads(raw)
+        data = json.loads(raw, parse_constant=_refuse_constant, parse_float=_parse_float)
+    except _NonFiniteNumber as exc:
+        reason = "it holds Infinity, NaN or a number too large for Clauster to write back"
+        raise ClaudeJsonUnparseable(claude_json, reason) from exc
     except json.JSONDecodeError as exc:
         reason = f"invalid JSON at line {exc.lineno} column {exc.colno}"
         raise ClaudeJsonUnparseable(claude_json, reason) from exc
@@ -140,9 +190,17 @@ def _atomic_write_claude_json(claude_json: Path, raw: str | None, data: dict) ->
     """Atomically replace ``claude_json`` with ``data`` rendered as ``json.dumps(indent=2)``.
 
     A thin wrapper over :func:`_atomic_write_json` that fixes the ``~/.claude.json`` render;
-    must be called inside :func:`_locked`.
+    must be called inside :func:`_locked`. The render runs first, with ``allow_nan=False``, so
+    a non-finite number raises :class:`ClaudeJsonNotFinite` before the backup or the replace.
     """
-    _atomic_write_json(claude_json, raw, data, lambda d: json.dumps(d, indent=2))
+    try:
+        text = json.dumps(data, indent=2, allow_nan=False)
+    except ValueError as exc:
+        # json.dumps raises a ValueError for a circular reference too; that one is not this.
+        if not str(exc).startswith("Out of range float values"):
+            raise
+        raise ClaudeJsonNotFinite(claude_json) from exc
+    _atomic_write_json(claude_json, raw, data, lambda _d: text)
 
 
 def update_claude_json(claude_json: Path, mutate: Callable[[dict], object]) -> bool:

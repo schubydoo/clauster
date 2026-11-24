@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import errno
 import inspect
 import json
 import logging
 import os
 import signal
+import stat
 import sys
 import time
 from pathlib import Path
@@ -1273,14 +1275,15 @@ def _fake_job(**kw):
     return SimpleNamespace(**base)
 
 
-def test_resume_background_job_dispatches(monkeypatch):
+def test_resume_background_job_dispatches(tmp_path, monkeypatch):
     captured: dict = {}
 
     def _fake_dispatch(cwd, **kw):
         captured["cwd"], captured["kw"] = cwd, kw
         return "newjob01"  # resume mints a NEW 8-hex id
 
-    monkeypatch.setattr(supervisor, "list_background_jobs", lambda *a, **k: [_fake_job()])
+    job = _fake_job(cwd=tmp_path)  # a folder that exists (TASK-559)
+    monkeypatch.setattr(supervisor, "list_background_jobs", lambda *a, **k: [job])
     monkeypatch.setattr(supervisor, "dispatch_background_job", _fake_dispatch)
     seen: list[Path] = []
 
@@ -1292,12 +1295,12 @@ def test_resume_background_job_dispatches(monkeypatch):
         "29e8026f", permission_mode="plan", refuse_cwd=_allow, binary="/abs/claude"
     )
     assert new_id == "newjob01"
-    assert captured["cwd"] == Path("/proj").resolve()  # the drive is added on Windows
+    assert captured["cwd"] == tmp_path.resolve()
     assert captured["kw"]["resume"] == _UUID  # the FULL uuid, not the 8-hex id
     # TASK-335: the mode is passed explicitly (no flag would be the inherit argv), and the
     # caller's ceiling check saw the job's cwd before the dispatch.
     assert captured["kw"]["permission_mode"] == "plan"
-    assert seen == [Path("/proj").resolve()]
+    assert seen == [tmp_path.resolve()]
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="os.symlink needs privilege on Windows")
@@ -1343,6 +1346,52 @@ def test_resume_refuses_a_nul_byte_cwd_before_the_check(monkeypatch):
             "29e8026f", permission_mode="default", refuse_cwd=checked.append
         )
     assert checked == []
+
+
+@pytest.mark.parametrize("kind", ["missing", "file"])
+def test_resume_refuses_a_cwd_that_is_no_longer_a_folder(tmp_path, monkeypatch, kind):
+    # TASK-559: the non-strict resolve() accepts a missing path, so the dispatch raised
+    # DispatchError (502, naming the path). It is a job that cannot be resumed: 409.
+    cwd = tmp_path / "moved-away"
+    if kind == "file":
+        cwd.write_text("x")
+    monkeypatch.setattr(supervisor, "list_background_jobs", lambda *a, **k: [_fake_job(cwd=cwd)])
+    dispatched: list = []
+    monkeypatch.setattr(
+        supervisor, "dispatch_background_job", lambda *a, **k: dispatched.append(a) or "x"
+    )
+    with pytest.raises(supervisor.ResumeError) as info:
+        supervisor.resume_background_job(
+            "29e8026f", permission_mode="default", refuse_cwd=lambda cwd: None
+        )
+    assert str(info.value) == "job '29e8026f' working directory no longer exists as a folder"
+    assert not isinstance(info.value, supervisor.ResumeNotAllowed)
+    assert dispatched == []
+
+
+def test_resume_refuses_a_cwd_it_cannot_check(tmp_path, monkeypatch):
+    # 3.11's is_dir() raises on an error other than "missing" (EACCES): the same 409 shape.
+    monkeypatch.setattr(
+        supervisor, "list_background_jobs", lambda *a, **k: [_fake_job(cwd=tmp_path)]
+    )
+
+    def _denied(self):
+        raise PermissionError(errno.EACCES, "Permission denied", str(self))
+
+    monkeypatch.setattr(Path, "is_dir", _denied)
+    with pytest.raises(supervisor.ResumeError, match="working directory cannot be checked$"):
+        supervisor.resume_background_job(
+            "29e8026f", permission_mode="default", refuse_cwd=lambda cwd: None
+        )
+
+
+def test_api_resume_agent_missing_cwd_is_409(write_config, tmp_path, projects_root, monkeypatch):
+    # The route maps it to 409 with a detail that names neither the path nor the dispatch.
+    gone = projects_root / "alpha" / "gone"
+    r, captured = _resume_via_route(write_config, tmp_path, monkeypatch, cwd=gone)
+    assert r.status_code == 409
+    assert r.json() == {"detail": "job '29e8026f' working directory no longer exists as a folder"}
+    assert captured == []
 
 
 def test_resume_background_job_refused_cwd_never_dispatches(monkeypatch):
@@ -1436,6 +1485,7 @@ def test_api_resume_agent_inherit_with_ceiling_resumes(
 ):
     # Positive control: the ceiling is the only thing the 403 above depends on. A job in a
     # subdirectory of the project (a worktree, say) is covered by that project's ceiling.
+    (projects_root / "alpha" / "sub").mkdir()
     r, captured = _resume_via_route(
         write_config,
         tmp_path,
@@ -1705,6 +1755,8 @@ def test_projects_holding_skips_a_looping_entry(write_config, projects_root, mon
 
     config = load_config(write_config(_ALPHA_CEILING))
     (projects_root / "zeta").mkdir()
+    # Only a link entry is resolved (TASK-487): make zeta read as one.
+    monkeypatch.setattr(agents_module, "_is_link_entry", lambda entry: entry.name == "zeta")
     real_resolve = Path.resolve
 
     def _resolve(self, strict=False):
@@ -1716,19 +1768,132 @@ def test_projects_holding_skips_a_looping_entry(write_config, projects_root, mon
     assert agents_module._projects_holding(config, projects_root / "alpha") == ["alpha"]
 
 
-def test_projects_holding_unreadable_projects_root_matches_nothing(
+def _unlistable(monkeypatch, projects_root: Path) -> None:
+    # Listing projects_root fails as an unreadable directory does, for the ceiling check
+    # only: the app's own startup also lists this directory.
+    from clauster.routes import agents as agents_module
+
+    def _scandir(path):
+        assert Path(path) == projects_root
+        raise PermissionError(errno.EACCES, "Permission denied", str(path))
+
+    monkeypatch.setattr(agents_module, "os", SimpleNamespace(name=os.name, scandir=_scandir))
+
+
+def test_projects_holding_unreadable_projects_root_raises(
     write_config, projects_root, monkeypatch
 ):
-    # Any other failure while listing projects_root refuses the resume (fail closed).
+    # A listing failure is not "in no project" (TASK-487): it raises so the refusal names it.
     from clauster.routes import agents as agents_module
 
     config = load_config(write_config(_ALPHA_CEILING))
+    _unlistable(monkeypatch, projects_root)
+    with pytest.raises(
+        agents_module._ProjectsRootUnlistable, match=r"^PermissionError: Permission denied$"
+    ):
+        agents_module._projects_holding(config, projects_root / "alpha")
 
-    def _boom(self):
-        raise PermissionError("denied")
 
-    monkeypatch.setattr(Path, "iterdir", _boom)
+def test_projects_holding_other_link_resolve_error_matches_nothing(
+    write_config, projects_root, monkeypatch
+):
+    # Any resolve error on a link entry other than a loop refuses the resume (fail closed).
+    from clauster.routes import agents as agents_module
+
+    config = load_config(write_config(_ALPHA_CEILING))
+    (projects_root / "zeta").mkdir()
+    monkeypatch.setattr(agents_module, "_is_link_entry", lambda entry: entry.name == "zeta")
+    real_resolve = Path.resolve
+
+    def _resolve(self, strict=False):
+        if self.name == "zeta":
+            raise PermissionError(errno.EACCES, "Permission denied", str(self))
+        return real_resolve(self, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", _resolve)
     assert agents_module._projects_holding(config, projects_root / "alpha") == []
+
+
+def test_api_resume_agent_unlistable_projects_root_names_the_error(
+    write_config, tmp_path, projects_root, monkeypatch
+):
+    # Still refused (fail closed), but the 403 names the listing error, not "in no project",
+    # and not the path: str(OSError) would have put it in the detail.
+    _unlistable(monkeypatch, projects_root)
+    r, captured = _resume_via_route(
+        write_config,
+        tmp_path,
+        monkeypatch,
+        cwd=projects_root / "alpha",
+        extra=_INHERIT_DEFAULT + _ALPHA_CEILING,
+    )
+    assert r.status_code == 403
+    assert r.json() == {
+        "detail": "inherit is not enabled for this background job: Clauster could not list "
+        "projects_root to find the project that holds its directory (PermissionError: "
+        "Permission denied)."
+    }
+    assert captured == []
+
+
+def test_projects_holding_never_resolves_a_plain_directory_entry(
+    write_config, projects_root, monkeypatch
+):
+    # TASK-487: resolving a plain directory touches it, and a hung network mount there would
+    # block the check. Its resolved path is <root>/<name>, which the first-part check covers.
+    from clauster.routes import agents as agents_module
+
+    config = load_config(write_config(_ALPHA_CEILING))
+    resolved_names: list[str] = []
+    real_resolve = Path.resolve
+
+    def _resolve(self, strict=False):
+        resolved_names.append(self.name)
+        return real_resolve(self, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", _resolve)
+    assert agents_module._projects_holding(config, projects_root / "alpha" / "x") == ["alpha"]
+    # alpha is resolved once, as a config.projects key; beta and gamma are never touched.
+    assert "beta" not in resolved_names
+    assert "gamma" not in resolved_names
+    assert resolved_names.count("alpha") == 1
+
+
+def test_is_link_entry_reads_a_windows_reparse_point(monkeypatch):
+    # A junction is not a symlink to is_symlink(), so on Windows the reparse-point attribute
+    # from the listing decides. Emulated here so the branch runs on every OS.
+    from clauster.routes import agents as agents_module
+
+    def _entry(attributes: int) -> SimpleNamespace:
+        info = SimpleNamespace(st_file_attributes=attributes)
+        return SimpleNamespace(is_symlink=lambda: False, stat=lambda follow_symlinks: info)
+
+    monkeypatch.setattr(agents_module, "os", SimpleNamespace(name="nt"))
+    assert agents_module._is_link_entry(_entry(stat.FILE_ATTRIBUTE_REPARSE_POINT))
+    assert not agents_module._is_link_entry(_entry(stat.FILE_ATTRIBUTE_DIRECTORY))
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="a junction is a Windows reparse point")
+def test_api_resume_agent_unconfigured_junction_alias_denies(
+    write_config, tmp_path, projects_root, monkeypatch
+):
+    # The Windows twin of the symlink-alias test above: projects_root/omega is a junction to
+    # alpha with no ceiling, so a job in alpha is in omega too and is refused.
+    import _winapi  # type: ignore[import-not-found]
+
+    _winapi.CreateJunction(str(projects_root / "alpha"), str(projects_root / "omega"))
+    r, captured = _resume_via_route(
+        write_config,
+        tmp_path,
+        monkeypatch,
+        cwd=projects_root / "alpha",
+        extra=_INHERIT_DEFAULT + _ALPHA_CEILING,
+    )
+    assert r.status_code == 403
+    assert r.json() == {
+        "detail": ClausterConfig.bypass_denied_detail("omega", permission_mode="inherit")
+    }
+    assert captured == []
 
 
 def test_api_resume_agent_unresolvable_cwd_is_409(
@@ -1756,6 +1921,7 @@ def test_api_resume_agent_outside_projects_explicit_mode_resumes(
     write_config, tmp_path, monkeypatch
 ):
     # A non-gated default forces its own flag, so the ceiling does not apply to it.
+    _outside(tmp_path).mkdir()
     r, captured = _resume_via_route(write_config, tmp_path, monkeypatch, cwd=_outside(tmp_path))
     assert r.status_code == 201
     assert captured[0]["permission_mode"] == "default"

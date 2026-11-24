@@ -1147,7 +1147,7 @@ def test_config_mgmt_subagent_keyword_names_read_back_as_the_name(
     for name, text in zip(names, synced, strict=True):
         header = _header(text)
         assert yaml.safe_load(header)["name"] == name, text
-        assert cw.yaml12_view(header)["name"] == name, text
+        assert cw.yaml12_view(header, what="frontmatter")["name"] == name, text
         assert "stale" not in text
     assert synced[-1].startswith("---\nname: my-agent\n")
     assert synced[0].startswith('---\nname: "yes"\n')
@@ -1172,7 +1172,7 @@ def test_config_mgmt_subagent_named_yes_saves_and_reopens(
 
     header = _header((agents / "yes.md").read_text(encoding="utf-8"))
     assert yaml.safe_load(header)["name"] == "yes"
-    assert cw.yaml12_view(header)["name"] == "yes"
+    assert cw.yaml12_view(header, what="frontmatter")["name"] == "yes"
     browser.click('[data-test="cm-agent-edit-yes"]')
     browser.expect_value('[data-test="cm-agent-name"]', "yes")
     browser.expect_hidden('[data-test="cm-error"]')

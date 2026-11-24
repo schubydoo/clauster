@@ -527,7 +527,8 @@ def resume_background_job(
 
     Fail-closed: a job that is still live, no longer exists, has no recorded session
     UUID, or has no resolvable cwd raises :class:`ResumeError` rather than dispatching a duplicate
-    or malformed resume, and a refused mode raises :class:`ResumeNotAllowed`.
+    or malformed resume, as does a cwd that is no longer a folder (moved or deleted), and a
+    refused mode raises :class:`ResumeNotAllowed`.
     """
     job = next((j for j in list_background_jobs(jobs_dir, roster_json) if j.id == job_id), None)
     if job is None:
@@ -555,6 +556,16 @@ def resume_background_job(
     refusal = refuse_cwd(cwd)
     if refusal is not None:
         raise ResumeNotAllowed(refusal)
+    # The non-strict resolve() above accepts a missing path, so check it here: a folder that
+    # was moved or deleted is a job that cannot be resumed (409), not a dispatch failure
+    # (502, TASK-559). The detail does not name the path, like the refusals above. On 3.11
+    # is_dir() raises on an error other than "missing" (EACCES): the same refusal.
+    try:
+        is_dir = cwd.is_dir()
+    except OSError as exc:
+        raise ResumeError(f"job {job_id!r} working directory cannot be checked") from exc
+    if not is_dir:
+        raise ResumeError(f"job {job_id!r} working directory no longer exists as a folder")
     return dispatch_background_job(
         cwd,
         resume=job.session_id,

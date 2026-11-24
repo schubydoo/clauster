@@ -903,7 +903,7 @@ def _refuse_yaml12_only_numbers(header: str, frontmatter: dict[str, Any]) -> Non
     which it ignores. Each check reads the value from :func:`~clauster.config_write.
     yaml12_view`, so ``!!str 1e3`` and a quoted ``'1e3'`` stay text and save.
     """
-    view = cw.yaml12_view(header)
+    view = cw.yaml12_view(header, what="frontmatter")
     if not isinstance(view, dict):  # pragma: no cover - the header loaded as a mapping
         return
     if isinstance(frontmatter.get("model"), str) and not isinstance(view.get("model"), str):
