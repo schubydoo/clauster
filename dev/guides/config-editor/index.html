@@ -2401,10 +2401,13 @@ The helpers are <code>apiKeyHelper</code>, <code>awsAuthRefresh</code>, <code>aw
 as <code>********</code> when they look like a secret. If you leave a mask as it is, the
 save keeps the stored value. If a mask no longer matches a stored value, the
 save is refused (<code>422</code>) and the settings file is not changed. This occurs when
-you rename an <code>env</code> variable that shows a mask, or when you move or remove an entry of a list
-that holds a mask. Type the real value again. All masks look the same, so to
-change one masked entry of a list, type the real value of every masked entry in
-that list.</p>
+you rename an <code>env</code> variable that shows a mask, or when you edit or copy a list
+entry that shows a mask. Type the real value again. In a list, Clauster matches
+each masked entry to the one stored entry that reads the same, so you can
+delete and reorder entries, the masked ones included, and add new ones. A masked entry that reads the same
+as another one cannot be matched. Then the list must keep its length, and each
+mask must stay in its place. All masks look the same, so to change one masked
+entry of such a list, type the real value of every masked entry in that list.</p>
 <p>The <a href="https://code.claude.com/docs/en/settings-reference">settings reference</a>
 gives each key a scope. Claude Code reads some keys only from user settings,
 only from user and local settings, only from managed settings, or only from
@@ -3023,7 +3026,10 @@ The scope rules and the update results below were checked against Claude Code
   you chose. At User scope, that is the home directory of the user that runs
   Clauster. The list shows the plugins of that one marketplace, with the version
   and description that the marketplace gives. A plugin that is installed for that
-  directory is marked <code>installed</code>. It shows the installed version and no
+  directory is marked <code>installed</code>. It shows the installed version. Claude Code
+  gives an installed plugin no description, so Clauster reads it from the
+  marketplace's own <code>marketplace.json</code> file. That is the file that the
+  marketplace Update reads. If Clauster cannot read that file, the row shows no
   description. A plugin that is installed only in another project shows an
   Install button, because Claude Code offers it again here. A marketplace with no
   plugins, or a failed read, shows a message.</li>
@@ -3059,9 +3065,13 @@ The scope rules and the update results below were checked against Claude Code
   value. An <code>args</code> list shows as one <code>********</code>, so you keep it whole or type
   the full list again. Clauster refuses the save (<code>422</code>) if a masked value can no
   longer be matched to its stored value. This happens when you rename or move an
-  entry or a header that holds one. It also happens when you delete, reorder or
-  edit an element of a list (such as a <code>settings</code> source's <code>plugins</code>) that holds
-  one. Type the real values again, then save.</li>
+  entry or a header that holds one, or when you edit or copy a list element (such
+  as one of a <code>settings</code> source's <code>plugins</code>) that holds one. You can delete,
+  add and reorder elements of such a list. Clauster matches each masked element
+  to the one stored element that reads the same, so its credential stays with
+  it. If two stored elements read the same, Clauster cannot tell them apart.
+  Then the list must keep its length and order. Type the real values again,
+  then save.</li>
 <li><strong>A masked credential stays bound to its marketplace URL.</strong> If you change any
   <code>url</code> in a marketplace entry on the Settings tab, or remove one, Clauster
   refuses the save (<code>422</code>) while that entry still holds any masked value, for
@@ -3072,8 +3082,12 @@ The scope rules and the update results below were checked against Claude Code
   stored URL only when every visible character of it is unchanged. Any change to
   it, or a rename of its entry, refuses the save (<code>422</code>). Inside a list, such as
   a <code>settings</code> source's <code>plugins</code>, the element that holds the URL must also be
-  unchanged and keep its place, and the list must keep its length. Type the
-  full URL again.</li>
+  unchanged. It can move, and other elements can be deleted, as for the other
+  masked values above. If such a list holds a masked value, you can also delete
+  an element that has no mask together with its <code>url</code>, or remove the <code>url</code> of
+  such an element, because no credential goes to a new host. A new element that
+  adds a <code>url</code> to an entry with masked values refuses the save (<code>422</code>), because
+  that is a new host. Type the full URL again.</li>
 <li><strong>The <code>additionalMarketplaces</code> spelling is read too.</strong> Claude Code 2.1.232 and
   later accept it as another name for <code>extraKnownMarketplaces</code>. When a file sets
   both, the canonical key wins, as it does in Claude Code.</li>
@@ -3428,6 +3442,11 @@ space at the start or the end is part of the name.</p>
 <td>Enable or Disable fails with "is already enabled" or "is installed at project scope, not user"</td>
 <td>The badge is the merged state, and the chosen scope already has that value or cannot override it</td>
 <td>Pick the scope that the message names, or use the Local scope to override a project setting for yourself</td>
+</tr>
+<tr>
+<td>A marketplace Add or Update, or a plugin Install or Update, returns <code>400</code> with "could not fetch its git source"</td>
+<td>git reports that the repository does not exist, or that this host has no access to it. When git prints the URL, the message names it. A user name, a password, query values and the fragment show as <code>********</code>, and the host stays visible. It is not a missing plugin or marketplace, so it is not a <code>404</code></td>
+<td>Make sure that the URL is correct, and that the host can fetch it with the credentials that git on the host has</td>
 </tr>
 <tr>
 <td>Removing a marketplace returns <code>404</code> with "is not declared at … scope"</td>
