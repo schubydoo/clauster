@@ -1668,6 +1668,49 @@ async def test_poll_between_keeper_error_and_watch_tick_is_not_a_crash(
 
 
 @_POSIX_ONLY
+@pytest.mark.parametrize("grace", [30, 0], ids=["before-deadline", "on-deadline-tick"])
+async def test_pty_keeper_death_between_the_watchs_reads_is_the_next_ticks(
+    runner_config, monkeypatch, grace
+) -> None:
+    """TASK-545: a keeper that dies after the watch read it alive is the next tick's death.
+
+    The watch reads the keeper alive, then reads its sidecar. A death in that gap used to end
+    the row ERROR on a second liveness read, and on the grace deadline's tick as "alive but
+    never registered" with Clauster's generic reason. The next tick now counts the crash once.
+    """
+    sidecars = _late_keeper(monkeypatch, '{"state": "exited", "bridge_exit": 1}')
+    runner, _ = _pty_runner(runner_config)
+    runner._config.claude.startup_grace_seconds = grace
+    events = _lifecycle_events(runner, monkeypatch)
+    real_adopt = runner._spawner._adopt_keeper_identity
+
+    async def adopt_then_die(instance, info, proc):
+        # Only the watch's call: the spawn's own call comes before the watch exists.
+        watching = instance.instance_id in runner._registry._startup_watches
+        if watching and proc.poll() is None:
+            (sidecar,) = sidecars
+            Path(f"{sidecar}.go").touch()
+            await asyncio.to_thread(proc.wait, 10)  # dead before the sidecar is applied
+        return await real_adopt(instance, info, proc)
+
+    monkeypatch.setattr(runner._spawner, "_adopt_keeper_identity", adopt_then_die)
+    monkeypatch.setattr("clauster.spawn_coordinator._STARTUP_WATCH_INTERVAL", 0.05)
+    await runner.poll_once()  # this runner is the one that announces crashes
+    assert runner._poll_loop.reports_crashes
+    inst = await runner.spawn("alpha")
+    try:
+        assert inst.status is InstanceStatus.STARTING
+        watch = runner._startup_watches.get(inst.instance_id)
+        if watch is not None:
+            await watch
+        assert inst.status is InstanceStatus.CRASHED
+        assert runner._registry._crash_counts["alpha"] == 1
+        assert events.count("crash") == 1
+    finally:
+        await runner.stop(inst.instance_id)
+
+
+@_POSIX_ONLY
 async def test_pty_startup_crash_with_a_poll_in_the_gap_is_counted_once(
     runner_config, monkeypatch
 ) -> None:

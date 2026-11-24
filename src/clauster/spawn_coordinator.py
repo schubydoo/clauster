@@ -1597,6 +1597,11 @@ class SpawnCoordinator:
                     await self._registry._persist()
                     return
             if time.monotonic() >= deadline:
+                if proc.poll() is not None:
+                    # It died after this tick's liveness read: not "alive but never
+                    # registered". The next tick's death branch gives its own reason, or ends
+                    # it CRASHED or STOPPED by the poll loop's rule.
+                    continue
                 # The reason first, then the status, with no await between them (TASK-544):
                 # a reader in the detail read must not see ERROR with no reason. A standard
                 # bridge's stderr tail is the bridge's own account. A pty bridge has no stderr
