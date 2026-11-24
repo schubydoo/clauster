@@ -663,6 +663,18 @@ def _conversion_notes(servers: dict[str, Any]) -> list[dict[str, str]]:
 _ALWAYS_SECRET_MAPS = ("env", "headers")
 
 
+def _args_view(args: list[Any]) -> list[Any]:
+    """Return the display copy of an ``args`` list, item for item.
+
+    An item that :func:`~clauster.config_write.redact_secrets` masks (a ``${VAR}``, a
+    credential URL) keeps that view. Any other item takes the view of
+    :func:`~clauster.config_write.mask_secret_args` (TASK-558).
+    """
+    shown = cw.redact_secrets(args)
+    flagged = cw.mask_secret_args(args)
+    return [s if s != a else f for a, s, f in zip(args, shown, flagged, strict=True)]
+
+
 def _redact_entry(entry: Any) -> Any:
     """Return the display copy of one server entry, with every secret-bearing field masked.
 
@@ -675,6 +687,9 @@ def _redact_entry(entry: Any) -> Any:
     as the sentinel, which :func:`~clauster.config_write.merge_redacted` turns back into the
     stored value. Whole keys are replaced on the copy, never a nested value in place (the
     copy may share nested objects, see ``redact_secrets``).
+
+    The value of a secret-named flag in ``args`` is masked too (:func:`_args_view`).
+    ``--api-key=********`` keeps its flag, and :func:`_restore_masked_args` binds it back.
 
     ``toolPermissions`` is keyed by TOOL names, so a tool called ``get_token`` would act as
     a secret hint and mask its own ``"allow"``; the validator then refuses the sentinel and
@@ -701,6 +716,9 @@ def _redact_entry(entry: Any) -> Any:
     helper = out.get("headersHelper")
     if isinstance(helper, str) and helper:
         out["headersHelper"] = cw.REDACTION_SENTINEL
+    args = entry.get("args")
+    if isinstance(args, list):
+        out["args"] = _args_view(args)
     url = entry.get("url")
     if isinstance(url, str):
         # A token in the query string or path (`?token=…`) passes redact_secrets: mask the
@@ -1018,6 +1036,42 @@ def _restore_masked_url(name: str, entry: Any, stored: Any) -> Any:
     return {**entry, "url": held}
 
 
+def _restore_masked_args(name: str, entry: Any, stored: Any) -> Any:
+    """Return ``entry`` with each partly masked ``args`` item put back, or refuse (→ 422).
+
+    The read view shows ``--api-key=********`` (:func:`_args_view`). Such an item keeps the
+    stored item at the SAME index only when it is exactly the view of that stored item, as
+    text. Anything else that holds the mask (a changed flag name, a moved item, a new
+    server) is refused, because it would otherwise be written as the literal sentinel. An
+    item that IS the sentinel is left to :func:`~clauster.config_write.merge_redacted` and
+    :func:`_check_destination`, as before. The message names the server and the index,
+    never a value or its size.
+    """
+    if not isinstance(entry, dict) or not isinstance(entry.get("args"), list):
+        return entry
+    args = entry["args"]
+    partial = [
+        i
+        for i, a in enumerate(args)
+        if isinstance(a, str) and a != cw.REDACTION_SENTINEL and cw.REDACTION_SENTINEL in a
+    ]
+    if not partial:
+        return entry
+    held = stored.get("args") if isinstance(stored, dict) else None
+    held = held if isinstance(held, list) else []
+    shown = _args_view(held)
+    out = list(args)
+    for i in partial:
+        if i >= len(held) or not isinstance(held[i], str) or shown[i] != args[i]:
+            raise cw.InvalidCandidateError(
+                f"server {name!r} args[{i}] keeps a masked part '********', but it is not the "
+                "stored item at that place, so there is no stored value to keep. Type the "
+                "real value"
+            )
+        out[i] = held[i]
+    return {**entry, "args": out}
+
+
 def contains_sentinel(value: Any) -> bool:
     """Whether the redaction sentinel appears anywhere in ``value`` (dicts and lists).
 
@@ -1047,17 +1101,23 @@ def _merge_kept(incoming: Any, stored: Any, path: str = "") -> Any:
     removed by a concurrent edit is caught too. Raising here aborts the transaction before
     anything is written.
 
-    A partly masked ``url`` is first put back to the stored url, or refused
-    (:func:`_restore_masked_url`), so the checks below compare the real url text.
+    A partly masked ``url`` or ``args`` item is first put back to the stored text, or
+    refused (:func:`_restore_masked_url`, :func:`_restore_masked_args`), so the checks below
+    compare the real text.
     """
     sent = incoming
     if path:
         incoming = _restore_masked_url(path, incoming, stored)
+        incoming = _restore_masked_args(path, incoming, stored)
     else:
         # A whole server map; the writers validated it as an object before the lock.
         held_map = stored if isinstance(stored, dict) else {}
         incoming = {
-            name: _restore_masked_url(str(name), entry, held_map.get(name))
+            name: _restore_masked_args(
+                str(name),
+                _restore_masked_url(str(name), entry, held_map.get(name)),
+                held_map.get(name),
+            )
             for name, entry in incoming.items()
         }
     missing = _unbacked_sentinel(incoming, stored, path)

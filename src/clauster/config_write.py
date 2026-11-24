@@ -960,6 +960,39 @@ def redact_secret_lines(text: str) -> str:
     return "".join(out)
 
 
+#: A command-line flag at the start of an ``args`` item: one or two dashes, its name, and
+#: the ``=`` of a ``--name=value`` item if it has one.
+_ARG_FLAG_RE = re.compile(r"-{1,2}(?P<name>[A-Za-z0-9][\w.\-]*)(?P<eq>=?)")
+
+
+def mask_secret_args(args: list[Any]) -> list[Any]:
+    """Return a copy of an ``args`` list with the value of each secret-named flag masked.
+
+    A flag is secret-named when its name matches :data:`_SECRET_KEY_RE`. ``--api-key=x``
+    keeps its flag and shows as ``--api-key=********``. For the separate form (``--token``,
+    ``x``) the next item shows as the sentinel. That item is left alone when it is empty,
+    is not a string, or starts with ``-``, because it is then another flag. A ``--no-*``
+    flag takes no value, so the item after it is left alone too.
+
+    Best effort, by flag name only (TASK-558): a secret under another flag name, or a
+    secret value that starts with ``-``, is not detected. Every item keeps its index, so a
+    mask binds back to the stored value at the same place. One pass over the items.
+    """
+    out = list(args)
+    for index, item in enumerate(args):
+        flag = _ARG_FLAG_RE.match(item) if isinstance(item, str) else None
+        if flag is None or not _SECRET_KEY_RE.search(flag["name"]):
+            continue
+        if flag["eq"]:
+            if flag.end() < len(item):
+                out[index] = item[: flag.end()] + REDACTION_SENTINEL
+        elif flag.end() == len(item) and not flag["name"].lower().startswith("no-"):
+            value = args[index + 1] if index + 1 < len(args) else None
+            if isinstance(value, str) and value and not value.startswith("-"):
+                out[index + 1] = REDACTION_SENTINEL
+    return out
+
+
 def same_yaml_value(a: Any, b: Any) -> bool:
     """Whether two loaded YAML values are equal with the same type at every level.
 

@@ -1235,13 +1235,14 @@ def test_a_nested_yaml_1_1_only_spelling_blocks_the_conversion(tmp_path: Path) -
     # The unquoted `DEBUG: yes` is a boolean to PyYAML and the string "yes" to the CLI, so
     # the shared seam refuses the header (TASK-449.6). The file is shown as it is, with the
     # error, and is not converted: the conversion never builds on a header the seam refused.
+    # TASK-558: the refused header takes the Skills header view, so the `env` value is masked.
     text = (
         "---\nname: my-agent\ndescription: d\nmcpServers:\n  srv:\n    command: x\n"
         "    env:\n      DEBUG: yes\n---\nbody\n"
     )
     _place(tmp_path, "my-agent", text)
     doc = sub.read_project_agent(tmp_path, "my-agent")
-    assert doc["content"] == text
+    assert doc["content"] == text.replace("DEBUG: yes", f"DEBUG: {cw.REDACTION_SENTINEL}")
     assert not doc.get("converted")
 
 
@@ -1304,7 +1305,9 @@ def test_conversion_keeps_an_anchor_used_after_the_block(tmp_path: Path) -> None
 def test_conversion_falls_back_to_the_raw_file_when_unsafe(tmp_path: Path, text: str) -> None:
     _place(tmp_path, "my-agent", text)
     doc = sub.read_project_agent(tmp_path, "my-agent")
-    assert doc["content"] == text
+    # The stored file, not a converted one. A header the seam refuses is masked by the
+    # Skills header view (TASK-558), so a repeated key shows every line as the mask.
+    assert doc["content"] == sub._mask_agent_text(text)
     assert doc["converted"] is None
 
 
@@ -1770,7 +1773,8 @@ def test_inline_conversion_skips_read_only_files(tmp_path: Path) -> None:
 def test_inline_conversion_falls_back_to_the_raw_file(tmp_path: Path, text: str) -> None:
     _place(tmp_path, "my-agent", text)
     doc = sub.read_project_agent(tmp_path, "my-agent")
-    assert (doc["content"], doc["converted"]) == (text, None)
+    # The stored file, masked as stored (TASK-558), and not converted.
+    assert (doc["content"], doc["converted"]) == (sub._mask_agent_text(text), None)
 
 
 @pytest.mark.parametrize(

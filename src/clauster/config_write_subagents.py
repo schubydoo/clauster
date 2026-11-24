@@ -115,6 +115,7 @@ from .config_write_mcp import (
 )
 from .config_write_permissions import RECOGNIZED_MODES, is_bypass_mode
 from .config_write_settings import _orphan_sentinel_path
+from .config_write_skills import _mask_header_values, _merge_line_views
 
 #: The directory name holding subagent files under ``.claude/`` at either scope.
 AGENTS_DIRNAME = "agents"
@@ -1791,15 +1792,33 @@ def _rewrite_values(text: str, target: dict[str, Any], *, stored: str | None) ->
     return None
 
 
+def _unloaded_header_view(header: str) -> str:
+    """Return the view of a frontmatter ``header`` that the shared seam refuses.
+
+    The Skills editor's header view, then its line masks (TASK-558): every by-place and
+    loaded-value mask of :func:`~clauster.config_write_skills._mask_header_values`, which
+    masks each non-blank line whole where it cannot prove that PyYAML reads the header as
+    Claude Code does (the header does not compose, is over the size cap, holds ``---``, a
+    YAML 1.1-only line break, a flow ``?``, or syntax YAML 1.2 refuses). Then
+    :func:`~clauster.config_write.redact_secret_lines`. That line masker carries state from
+    line to line, so a value the header view masked first can stop it from masking a later
+    line. Each line therefore goes through
+    :func:`~clauster.config_write_skills._no_less_masked`: the result never shows text that
+    the old view (the line masks alone) hid. A save cannot keep a mask in such a header
+    (:func:`_keep_masked_values`).
+    """
+    shown = cw.redact_secret_lines(_mask_header_values(header, readable=True))
+    return _merge_line_views(header, cw.redact_secret_lines(header), shown)
+
+
 def _mask_agent_text(text: str) -> str | None:
     """Return a subagent file with its frontmatter secret values masked, or None.
 
     The masked values are :func:`frontmatter_view`'s, written in place by
     :func:`_rewrite_values`; the Markdown body is never masked or rewritten, and a byte
     order mark is kept. A file with no frontmatter fence is all body and is returned as it
-    is. A header that does not load is masked line by line
-    (:func:`~clauster.config_write.redact_secret_lines`), the best that can be done without
-    its structure. ``None`` when the view cannot be written in place
+    is. A header that does not load has no structure to mask by, so it takes
+    :func:`_unloaded_header_view`. ``None`` when the view cannot be written in place
     (:data:`MASK_UNAVAILABLE_NOTE`); the caller then shows nothing.
     """
     bom = "\ufeff" if text.startswith("\ufeff") else ""
@@ -1812,7 +1831,7 @@ def _mask_agent_text(text: str) -> str | None:
         with cw.refuse_check_failures("frontmatter"):
             view = frontmatter_view(frontmatter)
     except cw.InvalidCandidateError:
-        masked = cw.redact_secret_lines(match.group(1))
+        masked = _unloaded_header_view(match.group(1))
         return bom + core[: match.start(1)] + masked + core[match.end(1) :]
     shown = _rewrite_values(core, view, stored=None)
     return None if shown is None else bom + shown
