@@ -2069,7 +2069,17 @@ def _bound_resume(monkeypatch, cwd: Path, *, run=None):
         spawned.append(argv)
         return _FakeProc(stdout=_BANNER)
 
-    trusted, _ = _patch_dispatch(monkeypatch, run=run or _run)
+    # Only the dispatch reaches the fake. subprocess is one module, so on Windows the
+    # state writes' `icacls` call (atomicio) went through it too and read as a spawn.
+    real_run = supervisor.subprocess.run
+    dispatch = run or _run
+
+    def _only_dispatch(argv, **kw):
+        if not argv or argv[0] != "/abs/claude":
+            return real_run(argv, **kw)
+        return dispatch(argv, **kw)
+
+    trusted, _ = _patch_dispatch(monkeypatch, run=_only_dispatch)
     monkeypatch.setattr(supervisor, "list_background_jobs", lambda *a, **k: [_fake_job(cwd=cwd)])
     finished = threading.Event()
     errors: list[BaseException] = []
