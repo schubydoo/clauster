@@ -615,6 +615,7 @@ class SessionRunner:
             reconcile_status=lambda inst, alive: self._reconcile_status(inst, alive),
             project_path=lambda name: self._project_path(name),
             capture_error_detail=lambda inst: self._capture_error_detail(inst),
+            retire_ended_starters=lambda: self._retire_ended_starters(),
         )
 
     # ----- read API -------------------------------------------------------
@@ -3154,10 +3155,11 @@ class SessionRunner:
             for inst in self._registry._instances.values()
             if inst.channel == "remote-control"
             and inst.resume_mode == "standard"
-            and inst.session_url is not None
+            and inst.starter_session_id is not None
+            and not inst.starter_archived
         }
 
-        def _scan() -> list[str]:
+        def _scan() -> dict[str, session_ends.LinkEvidence]:
             """Read the logs off the loop: the tracker's lock is held across a file read."""
             # The raw file is missing when redaction was turned on after this bridge started:
             # the bridge still writes the public log then.
@@ -3166,26 +3168,30 @@ class SessionRunner:
                 for iid, (_sid, _env, raw, public) in targets.items()
             }
             self._session_ends.keep_only({p for p in sources.values() if p is not None})
-            return [
-                iid
+            return {
+                iid: self._session_ends.evidence(sources[iid], sid, env)
                 for iid, (sid, env, _raw, _public) in targets.items()
-                if sid is not None and self._session_ends.has_ended(sources[iid], sid, env)
-            ]
+                if sid is not None
+            }
 
         try:
-            ended = await asyncio.to_thread(_scan)
+            found = await asyncio.to_thread(_scan)
         except Exception:
             _log.exception("could not check for ended starter sessions; continuing")
             return
-        for iid in ended:
+        for iid, evidence in found.items():
             inst = self._registry._instances.get(iid)
             # Re-checked across the await: a spawn can have replaced the row or its log.
             if (
-                inst is not None
-                and inst.starter_session_id == targets[iid][0]
-                and (inst.bridge_raw_log_path, inst.bridge_debug_log_path) == targets[iid][2:]
+                inst is None
+                or inst.starter_session_id != targets[iid][0]
+                or (inst.bridge_raw_log_path, inst.bridge_debug_log_path) != targets[iid][2:]
             ):
-                inst.retire_starter_session()
+                continue
+            if evidence is session_ends.LinkEvidence.ARCHIVED:
+                inst.mark_starter_archived()
+            elif evidence is not session_ends.LinkEvidence.READ_ERROR:
+                inst.set_starter_vouched(evidence is session_ends.LinkEvidence.LIVE)
 
     def _reattach_pty_from_sidecar(
         self, name: str, saved: dict, *, exclude_pids: frozenset[int]

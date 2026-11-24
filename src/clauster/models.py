@@ -226,9 +226,12 @@ class RemoteControlInstance(BaseModel):
     daemon_last_seq: int = 0  # highest daemon frame seq seen; reattach cursor across restarts
     hosted_log_path: Path | None = None  # redacted on-disk mirror of the hosted stream
     is_orphan: bool = False  # CL-8: live pid that Clauster could not reattach (no session)
-    # The starter session that must no longer be linked (TASK-557). Private: it is never
-    # serialized or persisted, because each process derives it again from the bridge log.
-    _ended_session_id: str | None = PrivateAttr(default=None)
+    # Why the starter session is not linked (TASK-557). Private: never serialized or persisted.
+    # Proven by an archive request in the bridge log. A Resume carries this one, but a clauster
+    # restart can only read it again from the row's current log.
+    _archived_session_id: str | None = PrivateAttr(default=None)
+    # No log can vouch for this session right now. Re-judged on every poll, never carried.
+    _unvouched_session_id: str | None = PrivateAttr(default=None)
 
     def model_post_init(self, context: Any, /) -> None:
         """Store the ids this record was built with for exact-value redaction (#1621)."""
@@ -288,28 +291,42 @@ class RemoteControlInstance(BaseModel):
 
         Lands directly in the ready starter session named after the project
         (feature 5). ``url`` is the secondary "New session" composer link, and every
-        consumer falls back to it when this is ``None``: no starter session, or one that
-        :meth:`retire_starter_session` marked as ended (TASK-557).
+        consumer falls back to it when this is ``None``: no starter session, one that the
+        bridge archived, or one that no log can vouch for (TASK-557).
         """
-        if self.starter_session_id is None or self.starter_session_id == self._ended_session_id:
+        sid = self.starter_session_id
+        if sid is None or sid in (self._archived_session_id, self._unvouched_session_id):
             return None
         return f"https://claude.ai/code/{self.starter_session_id}?from=cli"
 
-    def retire_starter_session(self) -> None:
-        """Stop linking the current starter session; a different starter id links again.
+    @property
+    def starter_archived(self) -> bool:
+        """Whether the bridge log proved that the current starter session was archived."""
+        return (
+            self.starter_session_id is not None
+            and self.starter_session_id == self._archived_session_id
+        )
+
+    def mark_starter_archived(self) -> None:
+        """Stop linking the current starter session, which the bridge archived.
 
         ``starter_session_id`` itself stays: the pointer would seed the same id back, and
-        the id remains a known value for exact-value redaction.
+        the id remains a known value for exact-value redaction. A different id links again.
         """
-        self._ended_session_id = self.starter_session_id
+        self._archived_session_id = self.starter_session_id
 
-    def carry_ended_session(self, previous: RemoteControlInstance) -> None:
-        """Keep ``previous``'s ended session id on the row that replaces it at a Resume.
+    def set_starter_vouched(self, vouched: bool) -> None:
+        """Record whether a bridge log can vouch for the current starter session."""
+        self._unvouched_session_id = None if vouched else self.starter_session_id
+
+    def carry_archived_session(self, previous: RemoteControlInstance) -> None:
+        """Keep ``previous``'s proven archive on the row that replaces it at a Resume.
 
         The archive line is in the old bridge's log, and the pointer can seed the same id
-        into the new row, so the new log alone would report that session as live.
+        into the new row, so the new log alone would report that session as live. Doubt is
+        not carried: the new bridge's log can vouch for the session.
         """
-        self._ended_session_id = previous._ended_session_id
+        self._archived_session_id = previous._archived_session_id
 
     @computed_field  # type: ignore[prop-decorator]
     @property

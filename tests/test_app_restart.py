@@ -219,13 +219,14 @@ def test_force_restart_archives_env_drops_pointer_and_skips_session(runner_confi
 
 
 def test_open_qr_panel_reloads_when_the_link_changes(runner_config):
-    # TASK-557: the image URL must change when session_url goes null, or an open panel keeps
-    # showing the code of the session that ended.
+    # TASK-557: an open panel must refetch when the link moves, or it keeps showing the code
+    # of the session that ended. The link itself must stay out of the image URL.
     app, _runner = _bridge_app(runner_config)
     with TestClient(app) as client:
         page = client.get("/").text
-    assert '(this.rowOf(name) || {}).session_url ? "s" : "e"' in page
-    assert '"&link=" + linkState' in page
+    assert "this.refreshOpenQrs(this._byId, byId);" in page
+    assert "(before.session_url || before.url) !== (row.session_url || row.url)" in page
+    assert '"/qr?t=" + (this.qrNonce[name] || 0);' in page
 
 
 def test_force_restart_carries_the_old_pointers_identity(runner_config, monkeypatch):

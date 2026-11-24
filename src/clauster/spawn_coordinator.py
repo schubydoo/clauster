@@ -150,6 +150,7 @@ class SpawnCoordinator:
         reconcile_status: Callable[[RemoteControlInstance, bool], None],
         project_path: Callable[[str], Path | None],
         capture_error_detail: Callable[[RemoteControlInstance], None],
+        retire_ended_starters: Callable[[], Awaitable[None]],
     ) -> None:
         """Bind to config + the shared registry/record/launch/rediscovery and injected helpers.
 
@@ -198,6 +199,7 @@ class SpawnCoordinator:
         self._reconcile_status = reconcile_status
         self._project_path = project_path
         self._capture_error_detail = capture_error_detail
+        self._retire_ended_starters = retire_ended_starters
         # Mark remote control as acknowledged once, before the first spawn.
         self._rc_setting_ensured = False
         # Install the resume-recap SessionStart hook once, before the first spawn.
@@ -749,6 +751,11 @@ class SpawnCoordinator:
         # anchor is healthy/indeterminate.
         await self._clear_pointer_if_anchor_poisoned(proj.path)
 
+        # A Resume replaces the row and its log, and the poll may not have read the old log
+        # since the session ended. Read it now, while the old row can still record it (TASK-557).
+        if resume and resume_target is not None and effective_resume_mode == "standard":
+            await self._retire_ended_starters()
+
         # Before the cap: the cap and the row registration must stay close together, because
         # another project can pass the cap during any await between them. Also before every
         # side effect, so a cancel during this probe leaves no row, log file, or trust grant.
@@ -833,7 +840,7 @@ class SpawnCoordinator:
             # session's uncommitted work.
             instance.worktree_name = resume_target.worktree_name
             if instance.resume_mode == "standard":
-                instance.carry_ended_session(resume_target)
+                instance.carry_archived_session(resume_target)
         # Register under instance_id — the stable UUID minted by RemoteControlInstance
         # (via new_instance_id default_factory) or carried over from the instance
         # being resumed, NOT the project name.

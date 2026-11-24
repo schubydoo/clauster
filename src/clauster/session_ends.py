@@ -15,6 +15,7 @@ import os
 import threading
 from collections.abc import Collection, Iterator
 from dataclasses import dataclass, field
+from enum import Enum, auto
 from pathlib import Path
 
 from . import bridge_log
@@ -22,6 +23,15 @@ from . import bridge_log
 _log = logging.getLogger("clauster.session_ends")
 
 _READ_SIZE = 1024 * 1024
+
+
+class LinkEvidence(Enum):
+    """What a bridge log says about a deep link to one session."""
+
+    LIVE = auto()  # the log is this bridge's and has not archived the session
+    ARCHIVED = auto()  # proven: the log holds the archive request for the session
+    NO_EVIDENCE = auto()  # no log can speak for this bridge, so the link cannot be vouched for
+    READ_ERROR = auto()  # a transient failure: keep what is known and try again next poll
 
 
 @dataclass
@@ -41,31 +51,32 @@ class SessionEndTracker:
         self._logs: dict[Path, _LogState] = {}
         self._lock = threading.Lock()
 
-    def has_ended(
+    def evidence(
         self, log_path: Path | None, session_id: str, environment_id: str | None
-    ) -> bool:
-        """Return whether a deep link to ``session_id`` can no longer be vouched for.
+    ) -> LinkEvidence:
+        """Return what the log says about a deep link to ``session_id``.
 
-        ``True`` when the log archived the session, and also when no log can speak for this
-        bridge: there is no path, the file is gone, or it never names the bridge's
-        environment (the newest log of a project can belong to another bridge there). The
-        environment link is always safe, so the doubt goes that way. A transient read error
-        returns ``False`` and the next poll tries again.
+        :attr:`~LinkEvidence.NO_EVIDENCE` covers a missing path, a missing file, and a log
+        that never names the bridge's environment (the newest log of a project can belong
+        to another bridge there). The environment link is always safe, so doubt goes that
+        way. An archive request for this exact session is proof whichever log holds it.
         """
         if log_path is None:
-            return True
+            return LinkEvidence.NO_EVIDENCE
         with self._lock:
             state = self._logs.setdefault(log_path, _LogState())
             try:
                 self._read_new_lines(log_path, state)
             except FileNotFoundError:
-                return True
+                return LinkEvidence.NO_EVIDENCE
             except OSError as exc:
                 _log.debug("could not read bridge log %s: %s", log_path, exc)
-                return False
+                return LinkEvidence.READ_ERROR
+            if bridge_log.session_key(session_id) in state.archived:
+                return LinkEvidence.ARCHIVED
             if environment_id is not None and environment_id not in state.environments:
-                return True
-            return bridge_log.session_key(session_id) in state.archived
+                return LinkEvidence.NO_EVIDENCE
+            return LinkEvidence.LIVE
 
     def keep_only(self, log_paths: Collection[Path]) -> None:
         """Forget every log not in ``log_paths``, so the map cannot grow without bound."""
@@ -80,15 +91,17 @@ class SessionEndTracker:
             if os.fstat(fh.fileno()).st_size < state.offset:
                 state.offset = 0  # truncated or replaced: what it already said stays true
             fh.seek(state.offset)
-            pending = b""
+            # Pieces of the line in progress. A list, and a search of only the new chunk, keep
+            # one very long line linear. A tail with no newline is read again next pass.
+            partial: list[bytes] = []
             while chunk := fh.read(_READ_SIZE):
-                data = pending + chunk
-                end = data.rfind(b"\n") + 1
-                pending = data[end:]  # still being written: read it whole on the next pass
+                end = chunk.rfind(b"\n") + 1
                 if not end:
+                    partial.append(chunk)
                     continue
-                state.offset += end
-                complete = data[:end]
+                complete = b"".join([*partial, chunk[:end]])
+                partial = [chunk[end:]]
+                state.offset += len(complete)
                 for line in _lines_naming(complete, b"/archive"):
                     key = bridge_log.archived_session_key(line)
                     if key is not None:

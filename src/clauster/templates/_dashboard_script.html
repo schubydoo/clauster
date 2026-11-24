@@ -5408,6 +5408,7 @@
             // Browser notifications (#541): fire on a status TRANSITION, before we swap
             // in the new maps — diffed by rk so every pty session is tracked (#779).
             this.notifyOnTransitions(this._byId, byId);
+            this.refreshOpenQrs(this._byId, byId);
             this.instances = next;
             this.ptySessions = pty;
             this._byId = byId;
@@ -6312,11 +6313,20 @@
       qrSrc(name) {
         const id = this.bridgeIdOf(name);
         if (!id) return "";
-        // The link state is in the URL so that an open panel reloads when the starter
-        // session ends: the code then opens the environment, not the ended session.
-        const linkState = (this.rowOf(name) || {}).session_url ? "s" : "e";
         return ROOT + "/api/instances/" + encodeURIComponent(id)
-          + "/qr?t=" + (this.qrNonce[name] || 0) + "&link=" + linkState;
+          + "/qr?t=" + (this.qrNonce[name] || 0);
+      },
+      // An open panel must follow the link when the starter session ends, or a Resume or
+      // Force restart moves it. A new nonce refetches the image; the link itself stays out
+      // of the query string, because a session id must not reach an access log.
+      refreshOpenQrs(prev, next) {
+        for (const [rk, row] of Object.entries(next)) {
+          const before = prev[rk];
+          if (this.qrOpen[rk] && before &&
+              (before.session_url || before.url) !== (row.session_url || row.url)) {
+            this.qrNonce[rk] = Date.now();
+          }
+        }
       },
       toggleQr(name) {
         const opening = !this.qrOpen[name];

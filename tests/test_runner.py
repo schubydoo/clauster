@@ -35,6 +35,7 @@ from clauster.runner import (
     SpawnError,
     UnknownProject,
 )
+from clauster.session_ends import LinkEvidence
 from clauster.trust import is_trusted
 from conftest import _raise_cancelled
 
@@ -4800,15 +4801,16 @@ async def test_retire_pass_skips_a_row_replaced_during_the_scan(runner_config, m
 
     def _replaced_mid_scan(_path, _sid, _env):
         row.starter_session_id = "session_new"  # a spawn landed while the thread ran
-        return True
+        return LinkEvidence.ARCHIVED
 
-    monkeypatch.setattr(runner._session_ends, "has_ended", _replaced_mid_scan)
+    monkeypatch.setattr(runner._session_ends, "evidence", _replaced_mid_scan)
     await runner._retire_ended_starters()
     assert row.session_url == "https://claude.ai/code/session_new?from=cli"
 
 
+@pytest.mark.parametrize("field", ["bridge_debug_log_path", "bridge_raw_log_path"])
 async def test_retire_pass_skips_a_row_whose_log_changed_during_the_scan(
-    runner_config, tmp_path, monkeypatch
+    runner_config, tmp_path, monkeypatch, field
 ):
     runner = _make_runner(runner_config)
     row = RemoteControlInstance(
@@ -4816,14 +4818,15 @@ async def test_retire_pass_skips_a_row_whose_log_changed_during_the_scan(
         label="a",
         starter_session_id="session_same",
         bridge_debug_log_path=tmp_path / "old.log",
+        bridge_raw_log_path=tmp_path / "old.raw.log",
     )
     runner._registry._instances[row.instance_id] = row
 
     def _moved_mid_scan(_path, _sid, _env):
-        row.bridge_debug_log_path = tmp_path / "new.log"  # same session id, new process
-        return True
+        setattr(row, field, tmp_path / "new.log")  # same session id, new process
+        return LinkEvidence.ARCHIVED
 
-    monkeypatch.setattr(runner._session_ends, "has_ended", _moved_mid_scan)
+    monkeypatch.setattr(runner._session_ends, "evidence", _moved_mid_scan)
     await runner._retire_ended_starters()
     assert row.session_url is not None
 
@@ -4850,10 +4853,12 @@ async def test_pointer_built_pty_card_keeps_its_link_with_no_log(runner_config):
     assert built["standard"].session_url is None
 
 
-@pytest.mark.parametrize("ended", [False, True])
-async def test_resume_does_not_relink_a_session_that_ended(runner_config, monkeypatch, ended):
+@pytest.mark.parametrize(("ended", "polled"), [(False, True), (True, True), (True, False)])
+async def test_resume_does_not_relink_a_session_that_ended(
+    runner_config, monkeypatch, ended, polled
+):
     # The archive line is in the old log and the pointer can seed the same id again, so
-    # the resumed row must keep what the old row learned.
+    # the resumed row must keep what the old row learned, even if no poll read that line.
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
     runner = _make_runner(runner_config)
     first = await runner.spawn("alpha")
@@ -4862,7 +4867,8 @@ async def test_resume_does_not_relink_a_session_that_ended(runner_config, monkey
     if ended:
         assert first.bridge_debug_log_path is not None
         _append(first.bridge_debug_log_path, _archive_line(sid))
-    await runner.poll_once()
+    if polled:
+        await runner.poll_once()
     await runner.stop(first.instance_id)
 
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "resume")
@@ -4883,6 +4889,67 @@ async def test_resume_does_not_relink_a_session_that_ended(runner_config, monkey
             assert resumed.session_url == f"https://claude.ai/code/{sid}?from=cli"
     finally:
         await runner.stop(first.instance_id)
+
+
+async def test_resume_does_not_carry_mere_doubt(runner_config, monkeypatch):
+    # A row with no usable log hides its link on doubt. The resumed bridge has a log that
+    # can vouch for the session, so the link must come back.
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    runner = _make_runner(runner_config)
+    first = await runner.spawn("alpha")
+    sid = "session_01RESUMEDBBBBBBBBBBB"
+    first.starter_session_id = sid
+    first.set_starter_vouched(False)
+    assert first.session_url is None
+    first.bridge_debug_log_path = None
+    first.bridge_raw_log_path = None
+    await runner.stop(first.instance_id)
+
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "resume")
+
+    class FakePtr:
+        pid, proc_start = 1, "1000"
+        environment_id = "env_01TESTENVAAAAAAAAAAAAAAAA"
+        session_id = sid
+
+    monkeypatch.setattr("clauster.pointers.pointer_for_project", lambda *a, **k: FakePtr())
+    resumed = await runner.resume(first.instance_id)
+    try:
+        await runner.poll_once()
+        assert resumed.session_url == f"https://claude.ai/code/{sid}?from=cli"
+    finally:
+        await runner.stop(first.instance_id)
+
+
+async def test_doubt_clears_when_the_log_starts_to_vouch(runner_config, tmp_path):
+    runner = _make_runner(runner_config)
+    log = tmp_path / "alpha-1-1.log"
+    log.write_text("2026-11-17T01:25:00.000Z [DEBUG] [bridge:init] starting\n")
+    row = RemoteControlInstance(
+        project="alpha",
+        label="a",
+        environment_id="env_x",
+        starter_session_id="session_x",
+        bridge_debug_log_path=log,
+    )
+    runner._registry._instances[row.instance_id] = row
+    await runner._retire_ended_starters()
+    assert row.session_url is None  # the log does not name this environment yet
+    _append(log, "2026-11-17T01:25:01.000Z [DEBUG] [bridge:api] x environment_id=env_x\n")
+    await runner._retire_ended_starters()
+    assert row.session_url is not None
+
+
+async def test_a_read_error_leaves_the_link_as_it_was(runner_config, monkeypatch):
+    runner = _make_runner(runner_config)
+    row = RemoteControlInstance(project="alpha", label="a", starter_session_id="session_x")
+    runner._registry._instances[row.instance_id] = row
+    monkeypatch.setattr(runner._session_ends, "evidence", lambda *_a: LinkEvidence.READ_ERROR)
+    await runner._retire_ended_starters()
+    assert row.session_url is not None
+    row.set_starter_vouched(False)
+    await runner._retire_ended_starters()
+    assert row.session_url is None
 
 
 async def test_retire_pass_reads_the_public_log_when_the_raw_file_is_missing(
@@ -4917,7 +4984,7 @@ async def test_retire_pass_failure_never_breaks_the_tick(runner_config, monkeypa
     def _boom(*_a, **_k):
         raise RuntimeError("scan failed")
 
-    monkeypatch.setattr(runner._session_ends, "has_ended", _boom)
+    monkeypatch.setattr(runner._session_ends, "evidence", _boom)
     await runner._retire_ended_starters()
     assert row.session_url is not None
     assert "could not check for ended starter sessions" in caplog.text
