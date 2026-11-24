@@ -521,17 +521,83 @@ def test_a_subagent_header_pyyaml_refuses_hides_each_form(tmp_path: Path, form: 
     assert path.read_bytes() == stored.encode()
 
 
+#: Text that makes PyYAML refuse to compose a header, as Claude Code's YAML 1.2 does not.
+_NO_COMPOSE = "x-note: y\t# note\n"
+
+
 @pytest.mark.parametrize(
     "header",
     [
-        "name: my-agent\ndescription: --token=x\t# note\n",  # no mcpServers
-        "name: my-agent\nmcpServers:\n  - a:\n      command: x\t# note\n",  # no secret flag
+        # The key spelled with an escape or a line continuation.
+        f'"mcp\\x53ervers":\n  - gh:\n      args: [--token, {HELD_B}]\n{_NO_COMPOSE}',
+        f'"mcp\\u0053ervers":\n  - gh:\n      args: [--token, {HELD_B}]\n{_NO_COMPOSE}',
+        f'{{"mcp\\\n  Servers": [{{gh: {{args: [--token, {HELD_B}]}}}}]}}\n{_NO_COMPOSE}',
+        # The flag name spelled with an escape or a line continuation.
+        f'mcpServers:\n  - gh:\n      args: ["--api\\x2dkey={HELD_B}"]\n{_NO_COMPOSE}',
+        f'mcpServers:\n  - gh:\n      args: ["--t\\u006fken", {HELD_B}]\n{_NO_COMPOSE}',
+        f'mcpServers:\n  - gh:\n      args: ["--to\\\n        ken", {HELD_B}]\n{_NO_COMPOSE}',
+        # A binary tag can hold the value too.
+        f"x-v: !!binary {HELD_B}\n{_NO_COMPOSE}",
+        # A value that no flag names, by its place under the server.
+        f"mcpServers:\n  - gh:\n      env: {{MODE: {HELD_B}}}\n{_NO_COMPOSE}",
+        f"mcpServers:\n  - gh:\n      headers: {{X-A: {HELD_B}}}\n{_NO_COMPOSE}",
+        f"mcpServers:\n  - gh:\n      headersHelper: echo {HELD_B}\n{_NO_COMPOSE}",
+    ],
+)
+def test_a_header_that_does_not_compose_is_masked_whole(tmp_path: Path, header: str) -> None:
+    stored = f"---\nname: my-agent\ndescription: d\n{header}---\nbody\n"
+    root, path = _place_agent(tmp_path, stored)
+    doc = sub._read_agent(root, "my-agent", "project")
+    assert HELD_B not in doc["content"] and HELD_B not in json.dumps(doc["frontmatter"])
+    assert "name: my-agent\n" not in doc["content"]
+    with pytest.raises(cw.InvalidCandidateError):
+        sub._write_agent(root, "my-agent", doc["content"], doc["hash"])
+    assert path.read_bytes() == stored.encode()
+
+
+@pytest.mark.parametrize(
+    "item",
+    [f'"--api\\x2dkey={HELD_B}"', f'"--t\\u006fken", {HELD_B}', f"--token, {HELD_B}"],
+)
+def test_a_refused_header_that_composes_reads_the_loaded_flag(tmp_path: Path, item: str) -> None:
+    # `DEBUG: yes` composes, and the shared seam refuses it (a YAML 1.1-only boolean).
+    stored = (
+        "---\nname: my-agent\ndescription: d\nmcpServers:\n  - gh:\n      command: npx\n"
+        f"      args: [{item}]\n      env:\n        DEBUG: yes\n---\nbody\n"
+    )
+    root, path = _place_agent(tmp_path, stored)
+    doc = sub._read_agent(root, "my-agent", "project")
+    assert HELD_B not in doc["content"]
+    with pytest.raises(cw.InvalidCandidateError):
+        sub._write_agent(root, "my-agent", doc["content"], doc["hash"])
+    assert path.read_bytes() == stored.encode()
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        # Does not compose, and holds nothing the editor masks by place.
+        "name: my-agent\ndescription: --token=x\t# note\n",
+        # Composes to nothing: a header of comments only.
+        "# only a comment\n",
+        # Composes, is refused, and no server has a secret-named flag (hyphens are not flags).
+        "name: my-auth-agent\ndescription: re-authenticate\nmcpServers:\n  - a:\n"
+        "      command: x\n      env:\n        DEBUG: yes\n",
     ],
 )
 def test_another_broken_header_stays_readable_for_repair(tmp_path: Path, header: str) -> None:
     root, _path = _place_agent(tmp_path, f"---\n{header}---\nbody\n")
     doc = sub._read_agent(root, "my-agent", "project")
-    assert "name: my-agent\n" in doc["content"]
+    assert header.splitlines()[0] in doc["content"]
+
+
+def test_an_oversized_refused_header_is_masked_whole_without_a_parse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sub, "MAX_FILE_BYTES", 40)
+    stored = f"---\nname: my-agent\ndescription: d\t# note\nx-pad: {'p' * 40}\n---\nbody\n"
+    root, _path = _place_agent(tmp_path, stored)
+    assert "name: my-agent\n" not in sub._read_agent(root, "my-agent", "project")["content"]
 
 
 @pytest.mark.parametrize("form", list(_FORMS))

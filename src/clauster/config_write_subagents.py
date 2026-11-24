@@ -115,7 +115,12 @@ from .config_write_mcp import (
 )
 from .config_write_permissions import RECOGNIZED_MODES, is_bypass_mode
 from .config_write_settings import _orphan_sentinel_path
-from .config_write_skills import _masked_whole
+from .config_write_skills import (
+    MAX_FILE_BYTES,
+    _masked_whole,
+    _may_hold_masked,
+    _secret_arg_views,
+)
 
 #: The directory name holding subagent files under ``.claude/`` at either scope.
 AGENTS_DIRNAME = "agents"
@@ -1792,18 +1797,41 @@ def _rewrite_values(text: str, target: dict[str, Any], *, stored: str | None) ->
     return None
 
 
+def _unloaded_header_view(header: str) -> str:
+    """Return the view of a frontmatter ``header`` that the shared seam refuses.
+
+    Every non-blank line is masked whole in two cases, because Claude Code's YAML 1.2 can
+    read a header that PyYAML refuses and the line masks do not see every value (TASK-558):
+
+    * the header does not compose, or is over the size cap, and its text can spell a value
+      the editor masks (:func:`~clauster.config_write_skills._may_hold_masked`: also through
+      a backslash escape or a binary tag);
+    * it composes and a server has a secret-named flag in ``args``, read from the loaded
+      text, so an escape in the key or the flag name is read too.
+
+    Any other header is masked line by line and stays readable, so the operator can repair
+    it. A save cannot keep a mask in such a header (:func:`_keep_masked_values`).
+    """
+    whole = "".join(_masked_whole(line) for line in header.splitlines(keepends=True))
+    if len(header.encode("utf-8")) > MAX_FILE_BYTES:
+        return whole
+    try:
+        root = yaml.compose(cw.cli_frontmatter_text(header), Loader=yaml.SafeLoader)
+    except (*cw._CHECK_FAILURES, RecursionError):
+        return whole if _may_hold_masked(header) else cw.redact_secret_lines(header)
+    if root is not None and _secret_arg_views(root):
+        return whole
+    return cw.redact_secret_lines(header)
+
+
 def _mask_agent_text(text: str) -> str | None:
     """Return a subagent file with its frontmatter secret values masked, or None.
 
     The masked values are :func:`frontmatter_view`'s, written in place by
     :func:`_rewrite_values`; the Markdown body is never masked or rewritten, and a byte
     order mark is kept. A file with no frontmatter fence is all body and is returned as it
-    is. A header that does not load is masked line by line
-    (:func:`~clauster.config_write.redact_secret_lines`), the best that can be done without
-    its structure. If it names ``mcpServers`` and holds a secret-named flag, each line is
-    masked whole: Claude Code's YAML 1.2 can read a header that PyYAML refuses, and the line
-    masks do not see every ``args`` form (TASK-558). Any other such header stays readable,
-    so the operator can repair it. ``None`` when the view cannot be written in place
+    is. A header that does not load has no structure to mask by, so it takes
+    :func:`_unloaded_header_view`. ``None`` when the view cannot be written in place
     (:data:`MASK_UNAVAILABLE_NOTE`); the caller then shows nothing.
     """
     bom = "\ufeff" if text.startswith("\ufeff") else ""
@@ -1816,13 +1844,7 @@ def _mask_agent_text(text: str) -> str | None:
         with cw.refuse_check_failures("frontmatter"):
             view = frontmatter_view(frontmatter)
     except cw.InvalidCandidateError:
-        header = match.group(1)
-        if "mcpservers" in header.casefold() and any(
-            cw._SECRET_KEY_RE.search(flag["name"]) for flag in cw._ARG_FLAG_RE.finditer(header)
-        ):
-            masked = "".join(_masked_whole(line) for line in header.splitlines(keepends=True))
-        else:
-            masked = cw.redact_secret_lines(header)
+        masked = _unloaded_header_view(match.group(1))
         return bom + core[: match.start(1)] + masked + core[match.end(1) :]
     shown = _rewrite_values(core, view, stored=None)
     return None if shown is None else bom + shown

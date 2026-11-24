@@ -638,10 +638,15 @@ The Markdown body after the frontmatter is never masked or changed. Comments in
 the frontmatter are not masked either. Do not put a secret in the body or in a
 comment. If the frontmatter is not valid YAML, the editor cannot read its
 fields. It then masks the frontmatter line by line, as the Skills editor does,
-and that misses a secret under a key that does not look secret. If such a
-frontmatter holds `mcpServers` and a secret-named flag, every line that is not
-blank shows as `********`, because Claude Code can still read some of these
-files. A masked value
+and that misses a secret under a key that does not look secret. Claude Code can
+still read some of these files, so every line that is not blank shows as
+`********` in two cases:
+
+- The text cannot be parsed and holds `mcpServers`, `hooks`, a URL, a backslash
+  escape or a binary tag.
+- The text can be parsed and a server has a secret-named flag in `args`.
+
+A masked value
 in such a file cannot be kept, so type the real values when you repair it. If
 the file holds masked values and its frontmatter is valid YAML only after Claude
 Code adds quotes to some values, the editor shows those values with the quotes,
@@ -668,7 +673,8 @@ refused, and nothing is written, in these cases:
 Type the real value again to save the change. If a secret is on a value with a
 YAML anchor, an alias, or a merge key, or inside an ordered map or a set, the
 editor cannot mask it in place. It then shows a note and not the file. Edit
-that file on the host.
+that file on the host. This also applies to a value that is masked only because
+of its flag name, such as the value of `--max-tokens` in a shared `args` list.
 
 The Skills editor masks each file line by line: a `key: value` line with a
 secret-shaped key, also as a list item (`- token: ...`), a `${...}` reference,
