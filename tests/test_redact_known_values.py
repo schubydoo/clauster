@@ -684,6 +684,22 @@ def test_a_record_that_frees_a_lifetime_slot_still_stores_the_value() -> None:
     assert not _leaks(redact.sanitize_line(f"xyz{late}"), late) and _leaks(f"xyz{late}", late)
 
 
+def test_an_id_another_run_stored_takes_no_slot_of_this_run() -> None:
+    # The lifetime rule can admit an id the stream holds already (stored by another run). That
+    # id must not use up a slot of the run that read it again.
+    cap, limit = 4, 64
+    a, b, c = (f"/srv/projects/alpha/{name}.log" for name in "abc")
+    for i in range(cap):  # run a fills the lifetime cap
+        redact.remember_stream_value("iid-1", _env_value(i), run=a, cap=cap, limit=limit)
+    redact.remember_stream_value("iid-1", _env_value(20), run=c, cap=cap, limit=limit)
+    for i in range(10, 10 + cap - 1):  # run b takes all but one of its slots
+        redact.remember_stream_value("iid-1", _env_value(i), run=b, cap=cap, limit=limit)
+    redact.remember_known_values("iid-1", _env_value(0))  # frees a lifetime slot
+    redact.remember_stream_value("iid-1", _env_value(20), run=b, cap=cap, limit=limit)
+    redact.remember_stream_value("iid-1", _env_value(13), run=b, cap=cap, limit=limit)
+    assert _env_value(13) in _streamed("iid-1")  # run b still had its last slot
+
+
 def test_the_store_holds_every_value_the_lifetime_rule_holds() -> None:
     """Differential: for random calls, the store holds what the old rule stored, and more."""
     import random

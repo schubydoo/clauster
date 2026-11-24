@@ -1589,7 +1589,7 @@ def remember_stream_value(owner: str, value: str, *, run: str, cap: int, limit: 
             if _count_kind(held - record, kind) >= limit:
                 return  # all runs together stored the most this owner may hold
         if forms <= held:
-            return  # an earlier run stored it: it takes no slot of this run
+            return  # the stream stored it already: it takes no new slot of this run
         runs = _stream_runs.setdefault(stream, {})
         runs[run] = runs.get(run, frozenset()) | forms
         _known_owners[stream] = held | forms
