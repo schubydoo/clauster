@@ -1320,6 +1320,17 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#a-worktree-interactive-session-goes-straight-to-error" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A worktree Interactive Session goes straight to "error"
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#the-card-goes-straight-to-crashed" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2154,6 +2165,17 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#a-worktree-interactive-session-goes-straight-to-error" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A worktree Interactive Session goes straight to "error"
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#the-card-goes-straight-to-crashed" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2789,13 +2811,27 @@ database</a> and
 <p><strong>What you see:</strong> the project card shows <code>starting</code>, then flips to <code>error</code>.</p>
 <p><strong>Most likely cause:</strong> the bridge spawned but never registered an environment
 within <code>startup_grace_seconds</code> — most often a <code>claude</code> login problem (the
-bridge starts, then hangs unauthenticated).</p>
+bridge starts, then hangs unauthenticated). The card's reason shows the stderr
+tail of a standard bridge when it wrote some. An Interactive Session, or a bridge
+with no stderr, gets Clauster's reason: the bridge did not register within
+<code>startup_grace_seconds</code>.</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a>clauster<span class="w"> </span>doctor<span class="w">                          </span><span class="c1"># read the claude-login row</span>
 <a id="__codelineno-12-2" name="__codelineno-12-2" href="#__codelineno-12-2"></a>tail<span class="w"> </span>~/.clauster/logs/&lt;label&gt;-*.log<span class="w">      </span><span class="c1"># the bridge's own account of it</span>
 </code></pre></div>
 <p><strong>Mechanism:</strong> <a href="../operations/#reading-the-bridge-debug-log">Reading the bridge debug
 log</a> · <a href="../architecture/#bridge-lifecycle">Bridge
 lifecycle</a>.</p>
+<h3 id="a-worktree-interactive-session-goes-straight-to-error">A worktree Interactive Session goes straight to "error"<a class="headerlink" href="#a-worktree-interactive-session-goes-straight-to-error" title="Permanent link">&para;</a></h3>
+<p><strong>What you see:</strong> an Interactive Session in <code>worktree</code> spawn mode shows <code>error</code>
+at once. The card says that worktree mode needs a commit and that <code>HEAD</code> names
+no commit.</p>
+<p><strong>Most likely cause:</strong> the project is a git repository with no commit yet, for
+example one made with <code>git init</code> and nothing committed. A worktree branches from
+the commit at <code>HEAD</code>, and an empty repository has none. A branch made with
+<code>git checkout --orphan</code> and not yet committed has the same problem. Clauster
+checks this before it starts the session, so no <code>claude</code> process runs.</p>
+<p><strong>The fix:</strong> make a commit in the repository, or start the session in the
+<code>same-dir</code> spawn mode.</p>
 <h3 id="the-card-goes-straight-to-crashed">The card goes straight to "crashed"<a class="headerlink" href="#the-card-goes-straight-to-crashed" title="Permanent link">&para;</a></h3>
 <p><strong>What you see:</strong> the card shows <code>crashed</code> shortly after spawn.</p>
 <p><strong>Most likely cause:</strong> the <code>claude</code> process exited unexpectedly. The bridge
