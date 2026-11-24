@@ -3998,10 +3998,11 @@ async def test_recheck_never_waits_for_a_row_a_lifecycle_op_owns(monkeypatch):
 
 
 async def test_recheck_skips_rows_retired_or_reattached_during_the_probe(monkeypatch):
-    """A Resume that retires the row, or a reattach that revives it, wins over the probe."""
+    """A Resume, a reattach or a Kill that lands during the probe wins over it."""
     mgr = HostedManager()
-    resumed, revived, closed = _orphan_instance(), _orphan_instance(), _orphan_instance()
-    for n, inst in enumerate((resumed, revived, closed)):
+    rows = [_orphan_instance() for _ in range(4)]
+    resumed, revived, killed, closed = rows
+    for n, inst in enumerate(rows):
         inst.claustrum_process_id = f"01ORPHAN{n:016d}"
         mgr._instances[inst.claustrum_process_id] = inst
 
@@ -4010,6 +4011,11 @@ async def test_recheck_skips_rows_retired_or_reattached_during_the_probe(monkeyp
             mgr._instances.pop(instance.claustrum_process_id)
         elif instance is revived:
             mgr._sessions[instance.claustrum_process_id] = object()
+        elif instance is killed:
+            # kill_orphan changes the same object in place, and its lock is free again.
+            instance.is_orphan = False
+            instance.status = InstanceStatus.STOPPED
+            instance.error_detail = None
         else:
             mgr._closing = True
         return True
@@ -4017,6 +4023,8 @@ async def test_recheck_skips_rows_retired_or_reattached_during_the_probe(monkeyp
     monkeypatch.setattr(HostedManager, "_agent_gone", staticmethod(_probe))
     await mgr.recheck_orphans()
     assert resumed.is_orphan and revived.is_orphan and closed.is_orphan
+    # A clean stop stays one: not rewritten as "the agent exited ... session lost".
+    assert (killed.status, killed.error_detail) == (InstanceStatus.STOPPED, None)
     assert mgr._id_locks == {}
 
 
