@@ -129,6 +129,8 @@ class PollLoop:
         self._record = record
         # Last refused-fork counters of each live bridge, the baseline for a crash reason.
         self._task_counts: dict[str, task_limits.TaskEventCount] = {}
+        # Set once this process runs a side-effecting poll (see `reports_crashes`).
+        self._reports_crashes = False
         self._sample_one_bridge = sample_one_bridge
         self._warn_if_refresh_slow = warn_if_refresh_slow
         self._reconcile_status = reconcile_status
@@ -197,6 +199,59 @@ class PollLoop:
             self._warn_if_refresh_slow(time.monotonic() - started)
             await asyncio.sleep(self._config.metrics.poll_seconds)
 
+    def _startup_owned(self, instance: RemoteControlInstance) -> bool:
+        """Return True while a STARTING row's own spawn or startup watch still runs (TASK-545).
+
+        Either one reads the bridge's death and decides the outcome, so the poll loop must
+        not decide it first. A watch that is done, even before its done-callback removed it,
+        leaves the row to the poll loop again, so a startup death is never lost.
+        """
+        if instance.status is not InstanceStatus.STARTING:
+            return False
+        if instance.instance_id in self._registry._spawn_in_flight:
+            return True
+        watch = self._registry._startup_watches.get(instance.instance_id)
+        return watch is not None and not watch.done()
+
+    @property
+    def reports_crashes(self) -> bool:
+        """Whether this process announces crashes: it runs the side-effecting poll loop.
+
+        A peer process (``clauster mcp``, or a one-shot ``clauster start``) can run a startup
+        watch for a bridge that the live service also adopts. Only the live service announces
+        a crash, so one death gives one notification (#1104).
+        """
+        return self._reports_crashes
+
+    async def crash_note(self, instance: RemoteControlInstance, pid: int | None) -> str | None:
+        """Return the task-limit reason for a crash of ``pid``, and drop its baseline.
+
+        Keyed to this pid: a resumed row keeps its instance id, and the counters of the
+        previous process say nothing about this one. The startup watch also calls this, for a
+        crash it reconciles itself. The baseline is dropped only after the read, so a reader
+        cancelled in the thread hop leaves it for the poll loop that then takes the crash.
+        """
+        base = self._task_counts.get(instance.instance_id)
+        if base is None or base.pid != pid:
+            self._task_counts.pop(instance.instance_id, None)
+            return None
+        note = await asyncio.to_thread(task_limits.crash_note, base)
+        self._task_counts.pop(instance.instance_id, None)
+        return note
+
+    def announce_crash(self, instance: RemoteControlInstance, note: str | None) -> None:
+        """Count a crash, record its task-limit reason, and announce it once.
+
+        The one place a crash is counted, for the poll loop and for the startup watch. The
+        crash notification is fired inside ``_emit_lifecycle`` (#541), so the single
+        chokepoint owns history + webhook + notification together.
+        """
+        self._registry._crash_counts[instance.project] = (
+            self._registry._crash_counts.get(instance.project, 0) + 1
+        )
+        instance.task_limit_note = note
+        self._record._emit_lifecycle("crash", instance)
+
     async def _link_orphans(self, sessions: list[WorkingSession]) -> None:
         """Mark each session that outlived its crashed standard bridge as ORPHANED (TASK-562).
 
@@ -245,6 +300,8 @@ class PollLoop:
         The default stays ``True`` so the server's own poll loop is unaffected and a new
         caller cannot silently lose crash detection by forgetting the flag.
         """
+        if side_effects:
+            self._reports_crashes = True
         # Take over anything another process started before reconciling (#1091). Without
         # this the registry stays frozen at whatever `rediscover` found at startup, so a
         # `clauster start` / MCP-spawned bridge is never adopted and the cross-check below
@@ -363,7 +420,14 @@ class PollLoop:
                 else:
                     self._task_counts[instance.instance_id] = count
             prev_status = instance.status
-            self._reconcile_status(instance, alive)
+            # A STARTING row with a live startup watch belongs to that watch (TASK-545). A
+            # pty keeper can write its sidecar error and exit before the next watch tick, and
+            # read here first, that failed start would be counted and announced as a crash.
+            # The watch decides the outcome, and counts and announces a real startup crash
+            # itself, through the two helpers below. The spawn's own readiness wait owns the
+            # row in the same way, before the watch exists.
+            if not self._startup_owned(instance):
+                self._reconcile_status(instance, alive)
             if (
                 side_effects
                 and prev_status is not InstanceStatus.CRASHED
@@ -374,20 +438,7 @@ class PollLoop:
                 # announce it. A one-shot reader has no standing to tell the operator a
                 # bridge died: the live service owns that, and both firing would
                 # double-notify for one death (#1104).
-                self._registry._crash_counts[instance.project] = (
-                    self._registry._crash_counts.get(instance.project, 0) + 1
-                )
-                # Keyed to this pid: a resumed row keeps its instance id, and the counters
-                # of the previous process say nothing about this one.
-                base = self._task_counts.pop(instance.instance_id, None)
-                instance.task_limit_note = (
-                    await asyncio.to_thread(task_limits.crash_note, base)
-                    if base is not None and base.pid == pid
-                    else None
-                )
-                # The crash notification is now fired inside _emit_lifecycle (#541), so
-                # the single chokepoint owns history + webhook + notification together.
-                self._record._emit_lifecycle("crash", instance)
+                self.announce_crash(instance, await self.crash_note(instance, pid))
             if alive:
                 live_projects.add(instance.project)
                 if side_effects:
@@ -458,8 +509,11 @@ class PollLoop:
         # here, so a real flag-form/tmux bridge at its cwd still surfaces as external. The
         # STARTING arm is safe for the same reason — a dead STARTING row was already
         # reconciled to CRASHED/STOPPED in the loop above, so it can't shadow an external
-        # bridge; it only covers a just-spawned bridge whose pid isn't live yet but whose
-        # auto-created session `agents --json` already reports.
+        # bridge. (A row that its spawn or startup watch owns, TASK-545, is not reconciled
+        # there: it stays STARTING until its owner ends it, at most one readiness wait or
+        # watch tick later, plus a keeper's held-screen stop delay.) It only covers a just-spawned
+        # bridge whose pid isn't live yet but whose auto-created session `agents --json`
+        # already reports.
         #
         # Values are LISTS of instance_id, never a project name (#1020 symptom A3): a
         # project may run a standard bridge AND N interactive bridges at once (#778), so
@@ -818,7 +872,8 @@ class PollLoop:
         shows "preparing connect link…" forever for a bridge that is fine.
 
         Re-read that evidence here for exactly the rows that can be stuck: STARTING, pid
-        provably still ours, no connect URL yet, and no startup watch of their own.
+        provably still ours, no connect URL yet, no startup watch of their own, and no
+        spawn still in flight (TASK-545).
         Promotion still requires the evidence itself — ``_connect_facts_for`` resolves
         only from a live pointer or a ready sidecar — so a bridge that is merely alive
         stays STARTING, which is the honest state and the rule ``_reconcile_status``
@@ -838,6 +893,8 @@ class PollLoop:
             and inst.bridge_pid is not None
             and pid_is_ours.get(inst.instance_id, False)
             and inst.instance_id not in self._registry._startup_watches
+            # The spawn's readiness wait owns the row as its watch does (TASK-545).
+            and inst.instance_id not in self._registry._spawn_in_flight
         ]
         if not stuck:
             return
@@ -893,6 +950,7 @@ class PollLoop:
                 inst is None
                 or inst.status is not InstanceStatus.STARTING
                 or inst.instance_id in self._registry._startup_watches
+                or inst.instance_id in self._registry._spawn_in_flight
                 or inst.bridge_pid != expected[2]
                 or inst.bridge_proc_start != expected[3]
             ):

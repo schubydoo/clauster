@@ -308,9 +308,9 @@ class InstanceDefaults(BaseModel):
     spawn_mode: SpawnMode = Field(
         default="same-dir",
         description="Default spawn mode for new **bridge** sessions (the standard / pty launch "
-        "flow) — where the session's working directory lives. `worktree` requires a git repo; "
-        "`session` runs in a fresh sandbox. Bridge launches only — hosted (browser) sessions "
-        "ignore this.",
+        "flow) — where the session's working directory lives. `worktree` requires a git repo, "
+        "and for an Interactive Session at least one commit; `session` runs in a fresh "
+        "sandbox. Bridge launches only — hosted (browser) sessions ignore this.",
     )
     permission_mode: PermissionMode = Field(
         default="default",

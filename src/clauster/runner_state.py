@@ -125,6 +125,10 @@ class RunnerState:
         # registers an environment (-> RUNNING) or proves stuck (-> ERROR).
         # Keyed by instance_id (one watch per spawned instance).
         self._startup_watches: dict[str, asyncio.Task] = {}
+        # Instance ids whose spawn is still running, mapped to their project (TASK-545). The
+        # spawn decides a death in its readiness wait, before any watch exists, so the poll
+        # loop leaves these rows alone too. Cleared under the project's spawn lock.
+        self._spawn_in_flight: dict[str, str] = {}
         # Per-project locks serializing concurrent spawns of the SAME project (see
         # ``spawn``). Keyed by project name — the per-project standard-singleton check
         # and pty-warning logic must run serially for the same project.

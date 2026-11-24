@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
+import shutil
 import subprocess
 import sys
 import time
@@ -14,7 +16,7 @@ from pathlib import Path
 import psutil
 import pytest
 
-from clauster import procutil
+from clauster import procutil, spawn_coordinator, task_limits
 from clauster.bridge_launch import BridgeLaunch
 from clauster.config import ClausterConfig
 from clauster.db.persistence import Persistence
@@ -1501,9 +1503,9 @@ async def test_late_settings_error_screen_is_an_error_not_a_crash(runner_config,
 async def test_late_login_screen_is_an_error_not_a_crash(runner_config, monkeypatch):
     """TASK-533: the login screen drawn after the readiness wait still ends ERROR.
 
-    The startup watch owns the row then, and the poll loop runs beside it. The keeper keeps
-    the bridge up while the watch reads the error, so the poll loop never sees a dead
-    STARTING bridge to call CRASHED.
+    The startup watch owns the row then, so the poll loop leaves it alone (TASK-545). The
+    keeper also keeps the bridge up while the watch reads the error, so the poll loop never
+    sees a dead STARTING bridge to call CRASHED.
     """
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "pty_not_logged_in")
     monkeypatch.setenv("FAKE_CLAUDE_SLOW", "1.0")
@@ -1580,6 +1582,274 @@ async def test_startup_watch_sets_a_dead_keepers_reason_with_its_status(
         await _watch_until_resolved(inst)
         assert inst.status is InstanceStatus.ERROR
         assert inst.error_detail == "keeper said no"
+    finally:
+        await runner.stop(inst.instance_id)
+
+
+def _late_keeper(monkeypatch, sidecar_json: str) -> list[Path]:
+    """Launch a keeper that writes ``sidecar_json`` after the readiness wait, then exits.
+
+    The keeper waits for a ``.go`` file next to its sidecar, which
+    :func:`_poll_after_keeper_exit` creates once the spawn returned. A fixed sleep raced the
+    readiness wait on a slow runner (macOS CI), and the spawn then read the error itself.
+    The returned list receives the sidecar path when the keeper launches.
+    """
+    keeper = (
+        "import os, sys, time\n"
+        "go = sys.argv[1] + '.go'\n"
+        "end = time.monotonic() + 30\n"
+        "while not os.path.exists(go) and time.monotonic() < end:\n"
+        "    time.sleep(0.01)\n"
+        f"open(sys.argv[1], 'w').write({sidecar_json!r})\n"
+    )
+    sidecars: list[Path] = []
+
+    def launch(sidecar, *a, **k):
+        sidecars.append(Path(sidecar))
+        return [sys.executable, "-c", keeper, str(sidecar)]
+
+    monkeypatch.setattr(BridgeLaunch, "_keeper_launch_cmd", staticmethod(launch))
+    monkeypatch.setattr("clauster.spawn_coordinator._READY_TIMEOUT", 0.1)
+    # Wide enough that the poll below runs after the keeper exits and before the first tick,
+    # also on a slow CI runner (macOS).
+    monkeypatch.setattr("clauster.spawn_coordinator._STARTUP_WATCH_INTERVAL", 3.0)
+    return sidecars
+
+
+def _lifecycle_events(runner, monkeypatch) -> list[str]:
+    """Record every lifecycle event the runner emits, in order."""
+    seen: list[str] = []
+    real = runner._record._emit_lifecycle
+
+    def spy(event, instance):
+        seen.append(event)
+        return real(event, instance)
+
+    monkeypatch.setattr(runner._record, "_emit_lifecycle", spy)
+    return seen
+
+
+async def _poll_after_keeper_exit(runner, inst, sidecars: list[Path]) -> subprocess.Popen:
+    """Let the keeper write and exit, give the row its dead bridge pid, and poll once."""
+    proc = runner._registry._procs[inst.instance_id]
+    inst.bridge_pid = proc.pid  # the keeper here is also the bridge, and dies with it
+    (sidecar,) = sidecars
+    Path(f"{sidecar}.go").touch()  # the spawn returned: the keeper may write now
+    await asyncio.to_thread(proc.wait, 10)
+    await runner.poll_once()  # between the keeper's exit and the watch's first tick
+    return proc
+
+
+@_POSIX_ONLY
+async def test_poll_between_keeper_error_and_watch_tick_is_not_a_crash(
+    runner_config, monkeypatch
+) -> None:
+    """TASK-545: a keeper error read by the poll loop first is still ERROR, not a crash.
+
+    The keeper writes its sidecar error and exits after the readiness wait. A poll that ran
+    before the next watch tick used to read the dead STARTING row as CRASHED, count it, and
+    announce it, and the watch then found the row resolved and left it so.
+    """
+    sidecars = _late_keeper(monkeypatch, '{"error": "keeper said no"}')
+    runner, _ = _pty_runner(runner_config)
+    events = _lifecycle_events(runner, monkeypatch)
+    inst = await runner.spawn("alpha")
+    try:
+        assert inst.status is InstanceStatus.STARTING
+        await _poll_after_keeper_exit(runner, inst, sidecars)
+        assert inst.status is InstanceStatus.STARTING, "the poll loop decided a watched start"
+        await runner._startup_watches[inst.instance_id]
+        assert inst.status is InstanceStatus.ERROR
+        assert inst.error_detail == "keeper said no"
+        assert runner._registry._crash_counts.get("alpha", 0) == 0
+        assert "crash" not in events
+        assert inst.task_limit_note is None
+    finally:
+        await runner.stop(inst.instance_id)
+
+
+@_POSIX_ONLY
+@pytest.mark.parametrize("grace", [30, 0], ids=["before-deadline", "on-deadline-tick"])
+async def test_pty_keeper_death_between_the_watchs_reads_is_the_next_ticks(
+    runner_config, monkeypatch, grace
+) -> None:
+    """TASK-545: a keeper that dies after the watch read it alive is the next tick's death.
+
+    The watch reads the keeper alive, then reads its sidecar. A death in that gap used to end
+    the row ERROR on a second liveness read, and on the grace deadline's tick as "alive but
+    never registered" with Clauster's generic reason. The next tick now counts the crash once.
+    """
+    sidecars = _late_keeper(monkeypatch, '{"state": "exited", "bridge_exit": 1}')
+    runner, _ = _pty_runner(runner_config)
+    runner._config.claude.startup_grace_seconds = grace
+    events = _lifecycle_events(runner, monkeypatch)
+    real_adopt = runner._spawner._adopt_keeper_identity
+
+    async def adopt_then_die(instance, info, proc):
+        # Only the watch's call: the spawn's own call comes before the watch exists.
+        watching = instance.instance_id in runner._registry._startup_watches
+        if watching and proc.poll() is None:
+            (sidecar,) = sidecars
+            Path(f"{sidecar}.go").touch()
+            await asyncio.to_thread(proc.wait, 10)  # dead before the sidecar is applied
+        return await real_adopt(instance, info, proc)
+
+    monkeypatch.setattr(runner._spawner, "_adopt_keeper_identity", adopt_then_die)
+    monkeypatch.setattr("clauster.spawn_coordinator._STARTUP_WATCH_INTERVAL", 0.05)
+    await runner.poll_once()  # this runner is the one that announces crashes
+    assert runner._poll_loop.reports_crashes
+    inst = await runner.spawn("alpha")
+    try:
+        assert inst.status is InstanceStatus.STARTING
+        watch = runner._startup_watches.get(inst.instance_id)
+        if watch is not None:
+            await watch
+        assert inst.status is InstanceStatus.CRASHED
+        assert runner._registry._crash_counts["alpha"] == 1
+        assert events.count("crash") == 1
+    finally:
+        await runner.stop(inst.instance_id)
+
+
+@_POSIX_ONLY
+async def test_pty_startup_crash_with_a_poll_in_the_gap_is_counted_once(
+    runner_config, monkeypatch
+) -> None:
+    """TASK-545: a real startup crash (no sidecar error) is counted and announced once.
+
+    The watch owns it now, so it also records the task-limit reason the poll loop would.
+    """
+    sidecars = _late_keeper(monkeypatch, '{"state": "exited", "bridge_exit": 1}')
+    monkeypatch.setattr(
+        "clauster.poll_loop.task_limits.crash_note", lambda base: f"limit hit by {base.pid}"
+    )
+    runner, _ = _pty_runner(runner_config)
+    events = _lifecycle_events(runner, monkeypatch)
+    inst = await runner.spawn("alpha")
+    try:
+        assert inst.status is InstanceStatus.STARTING
+        pid = runner._registry._procs[inst.instance_id].pid
+        runner._poll_loop._task_counts[inst.instance_id] = task_limits.TaskEventCount(
+            pid=pid, cgroup=Path("/nonexistent"), own=0, parent=None
+        )
+        await _poll_after_keeper_exit(runner, inst, sidecars)
+        assert inst.status is InstanceStatus.STARTING, "the poll loop decided a watched start"
+        await runner._startup_watches[inst.instance_id]
+        assert inst.status is InstanceStatus.CRASHED
+        assert runner._registry._crash_counts["alpha"] == 1
+        assert events.count("crash") == 1
+        assert inst.task_limit_note == f"limit hit by {pid}"
+        await runner.poll_once()
+        assert runner._registry._crash_counts["alpha"] == 1
+        assert events.count("crash") == 1
+    finally:
+        await runner.stop(inst.instance_id)
+
+
+@_POSIX_ONLY
+async def test_pty_grace_deadline_gives_a_reason(runner_config, monkeypatch) -> None:
+    """TASK-544: a pty row at the grace deadline shows a reason, with its status.
+
+    The deadline read the standard launch's stderr file, which a pty launch never writes, so
+    the row kept no reason for good. The keeper's sidecar is present here.
+    """
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "pty_no_url")
+    monkeypatch.setattr("clauster.spawn_coordinator._READY_TIMEOUT", 0.2)
+    monkeypatch.setattr("clauster.spawn_coordinator._READY_POLL_INTERVAL", 0.05)
+    monkeypatch.setattr("clauster.spawn_coordinator._STARTUP_WATCH_INTERVAL", 0.05)
+    runner, _ = _pty_runner(runner_config)
+    runner._config.claude.startup_grace_seconds = 0.5
+    inst = await runner.spawn("alpha")
+    try:
+        assert inst.status is InstanceStatus.STARTING
+        await _watch_until_resolved(inst)
+        assert inst.status is InstanceStatus.ERROR
+        assert "did not register" in (inst.error_detail or "")
+        assert "0.5 seconds" in (inst.error_detail or "")
+    finally:
+        await runner.stop(inst.instance_id)
+
+
+def _git(*args: str) -> None:
+    subprocess.run(
+        [shutil.which("git") or "git", *args],
+        check=True,
+        capture_output=True,
+        env={**os.environ, "GIT_CONFIG_NOSYSTEM": "1"},
+    )
+
+
+_NEEDS_GIT = pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
+
+
+@_NEEDS_GIT
+def test_repo_has_no_commit_only_for_an_unborn_head(tmp_path) -> None:
+    """TASK-555: only a repository before its first commit counts as having no commit."""
+    empty, full = tmp_path / "empty", tmp_path / "full"
+    _git("init", "-q", str(empty))
+    _git("init", "-q", str(full))
+    _git(
+        "-C", str(full), "-c", "user.email=t@example.invalid", "-c", "user.name=t",
+        "commit", "-q", "--allow-empty", "-m", "first",
+    )  # fmt: skip
+    assert spawn_coordinator._repo_has_no_commit(empty) is True
+    assert spawn_coordinator._repo_has_no_commit(full) is False
+    # Not known is not "no commit": the spawn goes on and claude answers for itself.
+    assert spawn_coordinator._repo_has_no_commit(tmp_path / "missing") is False
+
+
+def test_repo_has_no_commit_is_false_without_git(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("clauster.spawn_coordinator.shutil.which", lambda name: None)
+    assert spawn_coordinator._repo_has_no_commit(tmp_path) is False
+
+
+def test_repo_has_no_commit_is_false_when_git_cannot_run(tmp_path, monkeypatch) -> None:
+    def _fail(*a, **k):
+        raise subprocess.TimeoutExpired("git", 10)
+
+    monkeypatch.setattr("clauster.spawn_coordinator.subprocess.run", _fail)
+    assert spawn_coordinator._repo_has_no_commit(tmp_path) is False
+
+
+@_POSIX_ONLY
+@_NEEDS_GIT
+async def test_worktree_pty_in_a_repo_with_no_commit_names_the_missing_commit(
+    runner_config, monkeypatch
+) -> None:
+    """TASK-555: the card names the missing commit, and no keeper is launched.
+
+    claude's flag form exits at once with "Failed to resolve base branch" and prints that only
+    on its terminal, so the row used to end ERROR with no reason.
+    """
+    config, _ = runner_config
+    alpha = config.projects_root / "alpha"
+    shutil.rmtree(alpha / ".git")
+    _git("init", "-q", str(alpha))
+    launched: list[object] = []
+    monkeypatch.setattr(
+        BridgeLaunch, "_popen_keeper", lambda *a, **k: launched.append(a) or pytest.fail()
+    )
+    runner, _ = _pty_runner(runner_config)
+    inst = await runner.spawn("alpha", spawn_mode="worktree")
+    assert inst.status is InstanceStatus.ERROR
+    assert "no commit" in (inst.error_detail or "")
+    assert launched == []
+    assert inst.instance_id not in runner._registry._procs
+
+
+@_POSIX_ONLY
+@_NEEDS_GIT
+async def test_same_dir_pty_in_a_repo_with_no_commit_still_starts(runner_config) -> None:
+    """TASK-555: only worktree mode needs a commit, so a same-dir session starts as before."""
+    config, _ = runner_config
+    alpha = config.projects_root / "alpha"
+    shutil.rmtree(alpha / ".git")
+    _git("init", "-q", str(alpha))
+    runner, _ = _pty_runner(runner_config)
+    inst = await runner.spawn("alpha", spawn_mode="same-dir")
+    try:
+        assert inst.status is InstanceStatus.RUNNING
+        assert inst.error_detail is None
     finally:
         await runner.stop(inst.instance_id)
 
