@@ -2042,8 +2042,8 @@ the way out.</p>
 identical mode policy, singleton cap, and option validation to the dashboard. Both
 take <code>--json</code>; <code>start</code> exits non-zero on failure (<code>2</code> = bad request — unknown
 project, untrusted directory, invalid option; <code>1</code> = clauster tried and could not —
-bridge cap or launch failure). They are meant for driving clauster with <strong>no
-server running</strong>, but a concurrent live server is safe: the two processes
+bridge cap, launch failure, or a new bridge that ended in <code>error</code>). They are meant
+for driving clauster with <strong>no server running</strong>, but a concurrent live server is safe: the two processes
 serialize their per-project spawn/stop sections on a cross-process file lock in
 the deployment state dir, the spawn re-checks the on-disk bridge record under
 that lock (a bridge the server already started is handed back or reattached,
@@ -2056,6 +2056,14 @@ fully serialized.)</p>
 <a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a>               [--name NAME] [--trust] [--json]
 <a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a>clauster stop  &lt;instance&gt; [--json]        # stop a bridge by id / unique prefix / identity
 </code></pre></div>
+<p>When a new bridge ends in <code>error</code>, <code>clauster start</code> exits <code>1</code> and prints the reason
+on stderr. With <code>--json</code>, stdout still holds the instance, with <code>"status": "error"</code>.
+Use this exit code to detect the failed start. A later <code>clauster status</code> can show
+that bridge as <code>stopped</code> or <code>starting</code>.</p>
+<p>A bridge that is still coming up reports <code>starting</code>, and <code>clauster start</code> exits <code>0</code>
+without waiting for it. After the command exits, no process applies a startup
+deadline to that bridge, so it does not move to <code>error</code>. Run <code>clauster status</code>
+later, and treat a bridge that stays in <code>starting</code> as not ready.</p>
 <p><code>&lt;instance&gt;</code> resolves the same way as for the read commands above — full id, unique
 prefix, or project name — and an ambiguous reference (a prefix, or a project name with
 more than one instance) is refused with the candidates listed.</p>
