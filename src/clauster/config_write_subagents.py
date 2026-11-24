@@ -2086,14 +2086,10 @@ def _write_agent(root: Path, name: str, content: str, expected_hash: str | None)
         current = target.read_bytes()
         found = True
     except FileNotFoundError:
+        # Also a Windows path over MAX_PATH (CPython maps that error to ENOENT): the write
+        # below then fails on the longer temp path, and that failure is the 422 (TASK-468).
         current = b""
         found = False
-    except OSError as exc:
-        # Windows can refuse a too-long path here with another error (TASK-468).
-        too_long = _path_too_long_error(target, name, exc)
-        if too_long is None:
-            raise
-        raise too_long from exc
     if found and _is_read_only_file(target, current):
         raise ReadOnlyAgentError(f"{name!r} is a plugin-provided subagent (read-only)")
 
@@ -2146,9 +2142,10 @@ def _path_too_long_error(target: Path, name: str, exc: OSError) -> cw.InvalidCan
     )
     if windows_limit or getattr(exc, "winerror", None) == _WINERROR_FILENAME_EXCED_RANGE:
         room = _WINDOWS_MAX_PATH_CHARS - (longest - len(name))
+        # A shorter name helps only when one fits and this name does not.
         fix = (
             f"use a name of at most {room} characters"
-            if room > 0
+            if 0 < room < len(name)
             else "move the project to a shorter path"
         )
         return cw.InvalidCandidateError(

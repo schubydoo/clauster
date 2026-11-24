@@ -575,6 +575,43 @@ def test_config_mgmt_failed_surface_load_shows_detail_or_status(
     assert "<html>" not in browser.get_text('[data-test="cm-error"]')
 
 
+# The list fails with a 404 whose body arrives late, so the operator switches tabs while
+# the load error is still being read.
+_SLOW_FAILING_SUBAGENTS_LIST = """(() => {
+  const orig = window.fetch;
+  window.slowBodyRead = false;
+  window.fetch = (url, opts) => {
+    if (!String(url).includes("/api/config-write/subagents?")) return orig(url, opts);
+    return Promise.resolve({
+      ok: false, status: 404,
+      json: () => new Promise((resolve) => setTimeout(() => {
+        window.slowBodyRead = true; resolve({ detail: "late subagents detail" });
+      }, 1500)),
+    });
+  };
+  return "stubbed";
+})()"""
+
+
+def test_config_mgmt_superseded_load_error_never_reaches_the_banner(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """A load error read after a tab switch stays out of the new tab's banner (TASK-512)."""
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    assert browser.eval_json(_SLOW_FAILING_SUBAGENTS_LIST) == "stubbed"
+    browser.click('[data-test="cm-surface-subagents"]')
+    browser.click('[data-test="cm-surface-settings"]')
+    browser.expect_visible('[data-test="cm-settings-rows"]')
+    deadline = time.monotonic() + 5
+    while not browser.eval_json("window.slowBodyRead") and time.monotonic() < deadline:
+        time.sleep(0.2)
+    assert browser.eval_json("window.slowBodyRead") is True
+    time.sleep(0.3)  # one more tick for the awaiting loader to run
+    assert "late subagents detail" not in browser.get_text('[data-test="cm-error-live"]')
+    browser.expect_hidden('[data-test="cm-error"]')
+
+
 # --- TASK-271: a typed row for every top-level key --------------------------------------
 
 
@@ -1154,8 +1191,10 @@ def test_config_mgmt_subagent_name_box_keeps_to_the_backend_cap(
     browser.expect_attr(box, "aria-describedby", "cm-agent-name-rule")
     browser.expect_visible('[data-test="cm-agent-name-rule"]')
     browser.expect_text('[data-test="cm-agent-name-rule"]', f"{MAX_NAME_CHARS} characters")
-    browser.fill(box, "a" * (MAX_NAME_CHARS + 40))  # the browser cuts it at maxlength
-    assert browser.get_value(box) == "a" * MAX_NAME_CHARS
+    # One raw fill, not browser.fill: its verify loop waits for the full text, which
+    # maxlength never lets in. The browser cuts the text at maxlength.
+    browser._run("fill", box, "a" * (MAX_NAME_CHARS + 40), check=True)
+    browser.expect_value(box, "a" * MAX_NAME_CHARS)
     assert browser.eval_json(f"{_ROOT}.configMgmt.subagents.name.length") == MAX_NAME_CHARS
 
 

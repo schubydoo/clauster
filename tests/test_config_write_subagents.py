@@ -233,9 +233,12 @@ def _mkstemp_failing_past(limit: int, exc_for: Callable[[], OSError]) -> Callabl
     """Return a ``mkstemp`` that fails like Windows when the temp path is over ``limit``."""
 
     def _mkstemp(*args: object, **kwargs: object) -> object:
-        path = f"{kwargs['dir']}{os.sep}{kwargs['prefix']}{'x' * 8}{kwargs['suffix']}"
-        if len(path) > limit:
-            raise exc_for()
+        # This patches the process-wide `tempfile.mkstemp`: a call that is not the writer's
+        # (no `dir=` keyword) passes straight through.
+        if "dir" in kwargs and not args:
+            path = f"{kwargs['dir']}{os.sep}{kwargs['prefix']}{'x' * 8}{kwargs['suffix']}"
+            if len(path) > limit:
+                raise exc_for()
         return _REAL_MKSTEMP(*args, **kwargs)  # type: ignore[call-overload]
 
     return _mkstemp
@@ -311,7 +314,8 @@ def test_windows_long_path_with_another_error_keeps_that_error(
 
 
 def _winerror_206() -> OSError:
-    exc = OSError(errno.EINVAL, "The filename or extension is too long")
+    # CPython maps ERROR_FILENAME_EXCED_RANGE to ENOENT, so it arrives as FileNotFoundError.
+    exc = FileNotFoundError(errno.ENOENT, "The filename or extension is too long")
     exc.winerror = 206  # type: ignore[attr-defined]
     return exc
 
@@ -333,27 +337,26 @@ def test_a_too_long_path_error_from_the_os_is_a_422(
         sub.write_project_agent(tmp_path, "my-agent", _content(), None)
 
 
-@pytest.mark.parametrize(
-    ("exc_for", "raised"),
-    [(_winerror_206, cw.InvalidCandidateError), (lambda: PermissionError(13, "no"), OSError)],
-    ids=["too-long", "other"],
-)
-def test_the_pre_write_read_maps_only_a_too_long_path(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exc_for, raised: type
+def test_posix_long_path_file_not_found_is_not_reported_as_the_windows_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # The write first reads the current file (the read-only check). Windows can refuse a
-    # long path there with an error that is not FileNotFoundError.
-    real_read = Path.read_bytes
+    # Off Windows, a FileNotFoundError on a long path (the agents dir removed under the
+    # write, say) is a real failure: the Windows limit must not explain it.
+    monkeypatch.setattr(sub, "_is_windows", lambda: False)
+    monkeypatch.setattr(fw.tempfile, "mkstemp", _mkstemp_failing_past(259, _enoent))
+    name = "a" * sub.MAX_NAME_CHARS
+    with pytest.raises(FileNotFoundError):
+        sub.write_project_agent(tmp_path, name, _content(name), None)
 
-    def _read(self: Path) -> bytes:
-        if self.name == "my-agent.md":
-            raise exc_for()
-        return real_read(self)
 
-    monkeypatch.setattr(Path, "read_bytes", _read)
-    with pytest.raises(raised):
+def test_winerror_206_on_a_short_path_does_not_ask_for_a_shorter_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The name already fits the computed room, so "a name of at most N" would not help.
+    monkeypatch.setattr(sub, "_is_windows", lambda: True)
+    monkeypatch.setattr(fw.tempfile, "mkstemp", _mkstemp_failing_past(0, _winerror_206))
+    with pytest.raises(cw.InvalidCandidateError, match="move the project to a shorter path"):
         sub.write_project_agent(tmp_path, "my-agent", _content(), None)
-    assert not (sub.project_agents_dir(tmp_path) / "my-agent.md").exists()
 
 
 def test_posix_oserror_that_is_not_about_length_is_reraised(

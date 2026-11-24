@@ -2825,16 +2825,18 @@ def load_settings_json_obj(raw: bytes) -> dict[str, Any]:
     maps to 422): we will not overwrite a file we could not parse.
     """
     try:
-        text = raw.decode("utf-8").strip()
+        text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
         # The position only: the codec's own message quotes the offending byte, and the
         # dashboard now shows this detail in the load banner (TASK-512).
         raise InvalidCandidateError(
             f"existing settings file is not valid UTF-8 (at byte {exc.start})"
         ) from exc
-    if not text:
+    if not text.strip():
         return {}
     try:
+        # The text as stored, not stripped: the error's line and column must point into the
+        # file, and the dashboard shows them (TASK-512). JSON allows the whitespace around it.
         data = json.loads(text)
     except json.JSONDecodeError as exc:
         raise InvalidCandidateError(f"existing settings file is not valid JSON: {exc}") from exc
