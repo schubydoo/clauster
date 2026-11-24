@@ -2900,8 +2900,9 @@ def test_config_mgmt_plugins_rows_follow_the_install_scope(
     browser.expect_text(f'[data-test="cm-plugin-readonly-{hello}"]', "Local override")
     browser.expect_visible(f'[data-test="cm-plugin-disable-{hello}"]')
     browser.expect_visible(f'[data-test="cm-plugin-disable-{shared}"]')
-    assert browser.get_count(f'[data-test="cm-plugin-update-{hello}"]') == 0
-    assert browser.get_count(f'[data-test="cm-plugin-uninstall-{hello}"]') == 0
+    # The gates above hold on the old rows too: `atScope` changes only when the reload lands.
+    browser.expect_count(f'[data-test="cm-plugin-update-{hello}"]', 0)
+    browser.expect_count(f'[data-test="cm-plugin-uninstall-{hello}"]', 0)
 
     # Another project's install is read-only here, and its link selects that project.
     other = "other@market"

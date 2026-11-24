@@ -69,6 +69,32 @@ _FILL_VERIFY_TIMEOUT_MS = 4_000
 # the selector in the message rather than dispatching a click it knows will misfire.
 _CLICK_VISIBLE_TIMEOUT_MS = 5_000
 
+# agent-browser reads the target's centre and then dispatches a mouse event at that point.
+# A non-first ``x-show`` applies on the next animation frame, so a control below a row that
+# is about to hide moves AFTER the read and the click lands on the container (TASK-553).
+# The Node launcher hid this until 0.43.0: it added about 30 ms per command, and the native
+# binary takes about 2 ms. :meth:`click` and :meth:`check` therefore wait until the target's
+# box is unchanged across two animation frames, like Playwright's "stable" actionability
+# check. The timer is a fallback for a page that produces no frames.
+_STABLE_TIMEOUT_MS = 5_000
+_STABLE_BOX_JS = """(async () => {
+  const el = document.querySelector(%s);
+  if (!el) return true;
+  const box = () => {
+    const r = el.getBoundingClientRect();
+    return [r.x, r.y, r.width, r.height].join();
+  };
+  const frame = () => new Promise((done) => {
+    requestAnimationFrame(done);
+    setTimeout(done, 100);
+  });
+  const first = box();
+  await frame();
+  const second = box();
+  await frame();
+  return el.isConnected && second === first && box() === first;
+})()"""
+
 # agent-browser ≥ 0.34 races its own daemon startup: the FIRST command after a
 # ``close --all`` (the previous test's teardown) can exit 1 with
 # ``✗ Could not configure browser: Failed to connect: No such file or directory`` while
@@ -248,7 +274,21 @@ class AgentBrowser:
             _CLICK_VISIBLE_TIMEOUT_MS,
             f"{selector} visible (before click)",
         )
+        self._wait_stable(selector)
         self._run("click", selector, check=True)
+
+    def _wait_stable(self, selector: str) -> None:
+        """Wait until the box of ``selector`` stops moving; see :data:`_STABLE_TIMEOUT_MS`.
+
+        An absent target counts as stable, so the action that follows reports the real
+        error. A target that never settles fails here and no click is dispatched.
+        """
+        script = _STABLE_BOX_JS % json.dumps(selector)
+        self._poll(
+            lambda: self._run("eval", script).stdout.strip() == "true",
+            _STABLE_TIMEOUT_MS,
+            f"{selector} stable (before click)",
+        )
 
     def click_role(self, role: str, name: str) -> None:
         """Click an element found by ARIA ``role`` + accessible ``name``.
@@ -268,7 +308,16 @@ class AgentBrowser:
         legitimately normalizes still proceeds to the caller's own assertion rather than
         hanging here. ``get_value`` strips its output, so compare against stripped text —
         callers must not depend on significant leading/trailing whitespace in ``text``.
+
+        Waits for the field to be visible first: agent-browser 0.44.0 refuses a field that
+        cannot take focus (``not_editable``), and a non-first ``x-show`` reveals its field
+        on the next animation frame.
         """
+        self._poll(
+            lambda: self.is_visible(selector),
+            _CLICK_VISIBLE_TIMEOUT_MS,
+            f"{selector} visible (before fill)",
+        )
         want = text.strip()
         deadline = time.monotonic() + _FILL_VERIFY_TIMEOUT_MS / 1000
         while True:
@@ -278,7 +327,8 @@ class AgentBrowser:
             time.sleep(_POLL_INTERVAL_S)
 
     def check(self, selector: str) -> None:
-        """Check the checkbox matching ``selector``."""
+        """Check the checkbox matching ``selector`` once its box is stable."""
+        self._wait_stable(selector)
         self._run("check", selector, check=True)
 
     def scroll_into_view(self, selector: str) -> None:
