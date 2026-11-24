@@ -589,6 +589,12 @@ _READ_ANOTHER_WAY = [
     f"mcpServers:\n  - gh:\n      command: c\n      env: {{DEBUG: yes, FOO: {HELD_B}}}\n",
     f"mcpServers:\n  - gh:\n      type: http\n      url: https://e.example.com\n"
     f"      headers: {{X-Key: {HELD_B}, X-On: yes}}\n",
+    # The old line masks hid a deeper line after `{token:`; the header view masks that text
+    # first, so the old view must still hold for the lines it masked.
+    f'mcpServers:\n  - url: "https://h.example.com/?q={{token:"\n    note: {HELD_B}\n'
+    "    env: {DEBUG: yes}\n",
+    f'mcpServers:\n  - args: [--token, "{{api_key:"]\n    command: run --password {HELD_B}\n'
+    "    env: {DEBUG: yes}\n",
 ]
 
 
@@ -603,6 +609,20 @@ def test_a_header_read_another_way_hides_the_value(tmp_path: Path, header: str) 
     with pytest.raises(cw.InvalidCandidateError):
         sub._write_agent(root, "my-agent", doc["content"], doc["hash"])
     assert path.read_bytes() == stored.encode()
+
+
+@pytest.mark.parametrize("header", _READ_ANOTHER_WAY)
+def test_a_skill_never_shows_a_line_the_line_masks_hide(tmp_path: Path, header: str) -> None:
+    # The args mask can remove the `{api_key:` that made the line masker hide a deeper
+    # line; that line keeps the line masks' view.
+    stored = f"---\ndescription: d\n{header}---\nRun it.\n"
+    _place_skill(tmp_path, stored)
+    content = _skill_view(tmp_path)[0]
+    before = cw.redact_secret_lines(stored)
+    lines = zip(stored.splitlines(), before.splitlines(), content.splitlines(), strict=True)
+    for raw, old, new in lines:
+        if old != raw:
+            assert new != raw
 
 
 def _old_fallback(text: str) -> str:

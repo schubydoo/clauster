@@ -2364,6 +2364,11 @@ def _member_view(text: str) -> str:
     frontmatter fence gets only the line masks, as before. The write path binds a resent
     mask through this same function (:func:`_keep_masked_lines`), so the read and the
     restore never disagree.
+
+    The line masker carries state from line to line (a ``{token:`` masks the deeper lines
+    after it), and the header view can mask the text that set it off first. So a line that
+    the line masks alone would mask, but that this view leaves exactly as stored, takes the
+    line masks' view (TASK-558): the view never masks a line less than the line masks do.
     """
     bom = "\ufeff" if text.startswith("\ufeff") else ""
     core = text[len(bom) :]
@@ -2376,8 +2381,15 @@ def _member_view(text: str) -> str:
         cli = _CLI_FENCE_RE.match(core)
         header, start = (cli.group(1), cli.start(1)) if cli else ("", 0)
     masked = _mask_header_values(header, readable=match is not None)
-    text = bom + core[:start] + masked + core[start + len(header) :]
-    return cw.redact_secret_lines(text)
+    shown = cw.redact_secret_lines(bom + core[:start] + masked + core[start + len(header) :])
+    lines_only = cw.redact_secret_lines(text)
+    if shown == lines_only:
+        return shown
+    raw = text.splitlines(keepends=True)
+    old, new = lines_only.splitlines(keepends=True), shown.splitlines(keepends=True)
+    if not len(raw) == len(old) == len(new):  # pragma: no cover - both views keep lines
+        return "".join(_masked_whole(line) for line in raw)
+    return "".join(o if o != r and n == r else n for r, o, n in zip(raw, old, new, strict=True))
 
 
 def read_skill_file(

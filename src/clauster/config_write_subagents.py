@@ -115,7 +115,7 @@ from .config_write_mcp import (
 )
 from .config_write_permissions import RECOGNIZED_MODES, is_bypass_mode
 from .config_write_settings import _orphan_sentinel_path
-from .config_write_skills import _mask_header_values
+from .config_write_skills import _mask_header_values, _masked_whole
 
 #: The directory name holding subagent files under ``.claude/`` at either scope.
 AGENTS_DIRNAME = "agents"
@@ -1800,11 +1800,23 @@ def _unloaded_header_view(header: str) -> str:
     masks each non-blank line whole where it cannot prove that PyYAML reads the header as
     Claude Code does (the header does not compose, is over the size cap, holds ``---``, a
     YAML 1.1-only line break, a flow ``?``, or syntax YAML 1.2 refuses). Then
-    :func:`~clauster.config_write.redact_secret_lines`, the view this fallback had before,
-    so the result masks at least what that view masked. A save cannot keep a mask in such
-    a header (:func:`_keep_masked_values`).
+    :func:`~clauster.config_write.redact_secret_lines`. That line masker carries state from
+    line to line, so a value the header view masked first can stop it from masking a later
+    line. Each line that the old view (the line masks alone) masked therefore keeps that
+    view, or shows the mask whole where the two views differ: the result never masks less
+    than the old view. A save cannot keep a mask in such a header
+    (:func:`_keep_masked_values`).
     """
-    return cw.redact_secret_lines(_mask_header_values(header, readable=True))
+    raw = header.splitlines(keepends=True)
+    old = cw.redact_secret_lines(header).splitlines(keepends=True)
+    new = cw.redact_secret_lines(_mask_header_values(header, readable=True))
+    new_lines = new.splitlines(keepends=True)
+    if not len(raw) == len(old) == len(new_lines):  # pragma: no cover - both keep lines
+        return "".join(_masked_whole(line) for line in raw)
+    return "".join(
+        _masked_whole(r) if o != r and n != o else n
+        for r, o, n in zip(raw, old, new_lines, strict=True)
+    )
 
 
 def _mask_agent_text(text: str) -> str | None:
