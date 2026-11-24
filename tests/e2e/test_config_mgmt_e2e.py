@@ -3964,3 +3964,219 @@ def test_config_mgmt_claude_md_save_reveals_saved(
     _park_modal_body_at_foot(browser)
     browser.click('[data-test="cm-save"]')
     _expect_in_modal_view(browser, '[data-test="cm-saved"]')
+
+
+# ---- TASK-521: the Project picker follows the projects on the host -----------------
+
+
+def _picker_options(browser: AgentBrowser) -> list[str]:
+    """The values the Project picker offers now, without the disabled removed-project one."""
+    return browser.eval_json(
+        "[...document.querySelectorAll('[data-test=\"cm-project\"] option')]"
+        ".filter(o => !o.disabled).map(o => o.value)"
+    )
+
+
+def _wait_picker_options(browser: AgentBrowser, want: list[str]) -> None:
+    deadline = time.monotonic() + 10
+    while _picker_options(browser) != want:
+        assert time.monotonic() < deadline, _picker_options(browser)
+        time.sleep(0.1)
+
+
+def test_config_mgmt_picker_lists_a_project_created_after_page_load(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """A project created from the dashboard is in the Project picker with no reload."""
+    browser.goto(config_mgmt_server.url)
+    browser.expect_visible("#project-grid")
+    browser.eval_js("window.__e2e_no_reload = true")  # a full-page reload would wipe this
+    browser.click('[data-test="new-project-toggle"]')
+    browser.fill("#np-name", "delta")
+    browser.click('[data-test="new-project-submit"]')
+    browser.expect_visible('[data-project="delta"]', timeout_ms=_SAVE_TIMEOUT)
+    browser.expect_hidden("#np-name", timeout_ms=_SAVE_TIMEOUT)  # the form collapse settles
+
+    browser.click('[data-test="configmgmt-trigger"]')
+    browser.expect_visible('[data-test="configmgmt-modal"]')
+    _wait_picker_options(browser, ["alpha", "beta", "delta", "gamma"])
+    # The new project is usable: picking it loads its (empty) CLAUDE.md surface.
+    browser.select('[data-test="cm-project"]', "delta")
+    browser.expect_visible('[data-test="cm-view-claude-md"]', timeout_ms=_SAVE_TIMEOUT)
+    browser.expect_text('[data-test="cm-project-gone"]', "")
+    assert browser.eval_js("window.__e2e_no_reload") == "true", "the page reloaded"
+
+
+def test_batched_readiness_refresh_covers_a_project_created_after_page_load(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """The batched readiness load (Trust all runs it) applies to a project made since load.
+
+    The batch looped over the page-load list, so the new project's answer was dropped. The
+    new project is untrusted, so its own check warns; a stubbed batch answer then passes
+    every project, and the new project must take that answer too.
+    """
+    browser.goto(config_mgmt_server.url)
+    browser.expect_visible("#project-grid")
+    browser.click('[data-test="new-project-toggle"]')
+    browser.fill("#np-name", "delta")
+    browser.click('[data-test="new-project-submit"]')
+    browser.expect_visible('[data-project="delta"]', timeout_ms=_SAVE_TIMEOUT)
+
+    def state() -> str:
+        return browser.eval_json("(()=>" + _ROOT + ".preflightState('delta'))()")
+
+    # The row's own load lands first (a warning: the new project is untrusted), so a pass
+    # seen later can only come from the batch.
+    deadline = time.monotonic() + 10
+    while state() != "warning":
+        assert time.monotonic() < deadline, state()
+        time.sleep(0.1)
+    ok = {"ok": True, "checks": [{"name": "git", "status": "ok", "detail": "stubbed batch"}]}
+    body = json.dumps(json.dumps({n: ok for n in ("alpha", "beta", "delta", "gamma")}))
+    browser.eval_json(
+        "(()=>{const real=window.fetch;window.fetch=function(url,opts){"
+        "if(String(url).endsWith('/api/projects/preflight'))return Promise.resolve("
+        "new Response(" + body + ",{status:200,headers:{'Content-Type':'application/json'}}));"
+        "return real.apply(this,arguments)};" + _ROOT + ".loadAllPreflight();return true})()"
+    )
+    deadline = time.monotonic() + 10
+    while state() != "passed":
+        assert time.monotonic() < deadline, state()
+        time.sleep(0.1)
+
+
+def test_config_mgmt_picker_drops_a_removed_project_and_says_so(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """A project removed on disk leaves the picker, and a remembered pick says it is gone."""
+    import shutil
+
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "gamma")
+    browser.expect_visible('[data-test="cm-view-claude-md"]', timeout_ms=_SAVE_TIMEOUT)
+    browser.click('[data-test="configmgmt-modal"] .btn-close')
+    browser.expect_hidden('[data-test="configmgmt-modal"]')
+
+    shutil.rmtree(_projects_root(config_mgmt_server) / "gamma")
+    browser.click('[data-test="configmgmt-trigger"]')
+    browser.expect_visible('[data-test="configmgmt-modal"]')
+    _wait_picker_options(browser, ["alpha", "beta"])
+    gone = '[data-test="cm-project-gone"]'
+    browser.expect_text(gone, "gamma is no longer on this host. Pick another project.")
+    browser.expect_attr(gone, "role", "status")
+    browser.expect_count('[data-test="cm-project-gone-option"]', 1)  # an <option> has no box
+    # Nothing loads or saves for it: the pick-a-project note shows instead of the editor.
+    browser.expect_visible('[data-test="cm-need-project"]')
+    browser.expect_hidden('[data-test="cm-view-claude-md"]')
+    # Picking a listed project clears the state.
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.expect_visible('[data-test="cm-view-claude-md"]', timeout_ms=_SAVE_TIMEOUT)
+    browser.expect_text(gone, "")
+    browser.expect_count('[data-test="cm-project-gone-option"]', 0)
+
+
+# ---- TASK-551: a skipped list reload is made up on Cancel --------------------------
+
+
+def _hold_write_body(method: str, url_part: str) -> str:
+    """JS that lets a config write's headers through but holds its body until released."""
+    return (
+        "(() => {"
+        "window.__holdBody = new Promise(r => { window.__releaseBody = r; });"
+        "const real = window.fetch;"
+        "window.fetch = function (url, opts) {"
+        "const p = real.apply(this, arguments); const u = String(url);"
+        f"const hit = opts && opts.method === {json.dumps(method)}"
+        f" && u.includes({json.dumps(url_part)});"
+        "if (!hit) return p;"
+        "return p.then(res => { const json = res.json.bind(res);"
+        " res.json = () => window.__holdBody.then(json); return res; });"
+        "}; return true; })()"
+    )
+
+
+def _wait_file(path: Path) -> None:
+    deadline = time.monotonic() + 10
+    while not path.exists():
+        assert time.monotonic() < deadline, "the held save never reached the server"
+        time.sleep(0.1)
+
+
+def test_config_mgmt_cancel_after_a_skipped_skill_reload_shows_the_saved_skill(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """A skill saved while a New editor opened is in the list once that editor is cancelled."""
+    alpha = _projects_root(config_mgmt_server) / "alpha"
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-skills"]')
+    browser.expect_visible('[data-test="cm-skill-new"]')
+    browser.click('[data-test="cm-skill-new"]')
+    browser.fill('[data-test="cm-skill-name"]', "first-skill")
+    browser.fill('[data-test="cm-skill-content"]', "---\nname: first-skill\n---\nBody.\n")
+    browser.fill('[data-test="cm-skill-confirm"]', "alpha")
+    assert browser.eval_json(_hold_write_body("PUT", "/api/config-write/skills")) is True
+    browser.click('[data-test="cm-skill-save"]')
+    _wait_file(alpha / ".claude" / "skills" / "first-skill" / "SKILL.md")
+    browser.expect_visible('[data-test="cm-skill-new"]')
+    browser.click('[data-test="cm-skill-new"]')  # a second editor during the body wait
+    browser.expect_visible('[data-test="cm-skill-editor"]')  # open before the body lands
+    _release_body(browser)
+    _stays_visible(browser, '[data-test="cm-skill-editor"]', seconds=1.0)
+    browser.expect_count('[data-test="cm-skill-edit-first-skill"]', 0)  # the skipped reload
+    browser.click('[data-test="cm-skill-cancel"]')
+    browser.expect_visible('[data-test="cm-skill-edit-first-skill"]', timeout_ms=_SAVE_TIMEOUT)
+
+
+def test_config_mgmt_cancel_after_a_skipped_subagent_reload_shows_the_saved_agent(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """A subagent saved while a New editor opened is in the list once that editor is cancelled."""
+    alpha = _projects_root(config_mgmt_server) / "alpha"
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-subagents"]')
+    browser.expect_visible('[data-test="cm-agent-new"]')
+    browser.click('[data-test="cm-agent-new"]')
+    browser.fill('[data-test="cm-agent-name"]', "first-agent")
+    browser.fill('[data-test="cm-agent-content"]', "---\ndescription: first\n---\nDo it.\n")
+    browser.fill('[data-test="cm-agent-confirm"]', "alpha")
+    assert browser.eval_json(_hold_write_body("PUT", "/api/config-write/subagents/")) is True
+    browser.click('[data-test="cm-agent-save"]')
+    _wait_file(alpha / ".claude" / "agents" / "first-agent.md")
+    browser.expect_visible('[data-test="cm-agent-new"]')
+    browser.click('[data-test="cm-agent-new"]')
+    browser.expect_visible('[data-test="cm-agent-editor"]')  # open before the body lands
+    _release_body(browser)
+    _stays_visible(browser, '[data-test="cm-agent-editor"]', seconds=1.0)
+    browser.expect_count('[data-test="cm-agent-edit-first-agent"]', 0)
+    browser.click('[data-test="cm-agent-cancel"]')
+    browser.expect_visible('[data-test="cm-agent-edit-first-agent"]', timeout_ms=_SAVE_TIMEOUT)
+
+
+def test_config_mgmt_cancel_after_a_skipped_mcp_reload_shows_the_saved_server(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """An MCP server saved while a New editor opened is listed once that editor is cancelled."""
+    alpha = _projects_root(config_mgmt_server) / "alpha"
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-mcp"]')
+    browser.expect_visible('[data-test="cm-mcp-new"]')
+    browser.click('[data-test="cm-mcp-new"]')
+    browser.fill('[data-test="cm-mcp-name"]', "first-server")
+    _mcp_raw_mode(browser)
+    browser.fill('[data-test="cm-mcp-entry"]', '{"command": "echo", "env": {"FOO": "bar"}}')
+    browser.fill('[data-test="cm-mcp-confirm"]', "alpha")
+    assert browser.eval_json(_hold_write_body("POST", "/api/config-write/mcp/server")) is True
+    browser.click('[data-test="cm-mcp-save"]')
+    _wait_file(alpha / ".mcp.json")
+    browser.expect_visible('[data-test="cm-mcp-new"]')
+    browser.click('[data-test="cm-mcp-new"]')
+    browser.expect_visible('[data-test="cm-mcp-editor"]')  # open before the body lands
+    _release_body(browser)
+    _stays_visible(browser, '[data-test="cm-mcp-editor"]', seconds=1.0)
+    browser.expect_count('[data-test="cm-mcp-edit-first-server"]', 0)
+    browser.click('[data-test="cm-mcp-cancel"]')
+    browser.expect_visible('[data-test="cm-mcp-edit-first-server"]', timeout_ms=_SAVE_TIMEOUT)

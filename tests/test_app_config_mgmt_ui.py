@@ -830,3 +830,140 @@ def test_every_config_mgmt_write_reveals_its_result(write_config):
     assert mcp.count("return this._configMgmtRefuse(") == 2
     # The reveal honors the OS reduced-motion preference.
     assert 'behavior: reduce ? "auto" : "smooth"' in html
+
+
+# ---- TASK-521: the Project picker follows the projects on the host -----------------
+
+
+def test_open_rereads_the_project_list_before_it_loads(write_config):
+    # The picker looped over the page-load list, so a project created or removed since
+    # page load was missing or still offered until a reload.
+    html = _html(write_config, _ON)
+    body = _between(html, "openConfigMgmt(opts) {", "openMcpApprovalsFor(name) {")
+    assert "this.refreshProjectNames().then(() => {" in body
+    # The reload and the first-project seed wait for the fresh list, and a window that was
+    # closed (or reopened) meanwhile drops this one.
+    then = body[body.index("this.refreshProjectNames().then(") :]
+    assert "if (c.gen !== gen || !c.open) return;" in then
+    assert "c.project = this.projectNames[0];" in then
+    assert "this.configMgmtReload();" in then
+    assert "c.loading = true;" in body
+
+
+def test_a_project_that_left_the_list_counts_as_none(write_config):
+    # A remembered project that was removed must not load or write: it reads as "no
+    # project" for every gate, and the picker says why.
+    html = _html(write_config, _ON)
+    needs = _between(html, "configMgmtNeedsProject() {", "configMgmtProjectGone() {")
+    assert "(!c.project || !this.projectNames.includes(c.project))" in needs
+    gone = _between(html, "configMgmtProjectGone() {", "configMgmtProjectGoneText() {")
+    assert "!!c.project && !this.projectNames.includes(c.project)" in gone
+    assert 'is no longer on this host. Pick another project."' in html
+
+
+def test_picker_names_a_removed_project_and_announces_it(write_config):
+    html = _html(write_config, _ON)
+    picker = _between(html, 'id="cm-project" data-test="cm-project"', "<!-- Surface tabs -->")
+    # The box keeps naming the removed pick, as a choice that cannot be made again.
+    assert '<template x-if="configMgmtProjectGone()">' in picker
+    assert 'data-test="cm-project-gone-option"' in picker
+    option = picker[picker.index("<option", picker.index("configMgmtProjectGone()")) :]
+    assert " disabled " in option[: option.index(">")]
+    # An always-mounted status region: its text changes, it is never shown by x-show.
+    status = picker[picker.index('data-test="cm-project-gone"') :]
+    status = status[: status.index("</div>")]
+    assert 'role="status"' in picker[picker.index('data-test="cm-project-gone"') - 80 :][:200]
+    assert 'x-text="configMgmtProjectGoneText()"' in status
+    assert "x-show" not in status
+    assert "text-warning-emphasis" in picker  # AA contrast, unlike plain text-warning
+
+
+# ---- TASK-551: a skipped list reload is made up on Cancel --------------------------
+
+# (save, start, end, the Cancel functions that reload a stale list)
+_LIST_SECTIONS = [
+    ("subagents", "async configMgmtSaveAgent() {", "configMgmtAskDeleteAgent("),
+    ("mcp", "async configMgmtSaveMcp() {", "configMgmtAskDeleteMcp("),
+    ("skills", "async configMgmtSaveSkill() {", "configMgmtAskDeleteSkill("),
+]
+
+
+@pytest.mark.parametrize(("section", "start", "end"), _LIST_SECTIONS)
+def test_a_save_that_skips_its_reload_marks_the_list_stale(write_config, section, start, end):
+    # An editor opened while the save waited (gen bumped by New or Edit, or `editing` set)
+    # made the save return without its list reload, and nothing ever reloaded it.
+    body = _between(_html(write_config, _ON), start, end)
+    assert "const key = this._configMgmtViewKey();" in body
+    assert "if (c.gen !== gen) { if (res.ok) this._configMgmtMarkStale(" in body
+    assert "editing) { this._configMgmtMarkStale(" in body
+
+
+@pytest.mark.parametrize(
+    ("start", "end"),
+    [
+        ("async configMgmtDeleteAgent() {", "// --- MCP servers"),
+        ("async configMgmtDeleteMcp() {", "// --- MCP project approvals"),
+        ("async configMgmtDeleteSkill() {", "// --- plugins + marketplaces"),
+    ],
+)
+def test_a_delete_that_skips_its_reload_marks_the_list_stale(write_config, start, end):
+    body = _between(_html(write_config, _ON), start, end)
+    assert "if (c.gen !== gen) { if (res.ok) this._configMgmtMarkStale(" in body
+
+
+@pytest.mark.parametrize(
+    ("start", "end", "reload"),
+    [
+        ("configMgmtCancelAgent() {", "configMgmtAgentDirty() {", "this._loadSubagents(c.gen)"),
+        (
+            "configMgmtCancelDeleteAgent() {",
+            "configMgmtCanDeleteAgent() {",
+            "this._loadSubagents(c.gen)",
+        ),
+        (
+            "configMgmtCancelMcp() {",
+            "// --- MCP fields editor",
+            "this._configMgmtReloadMcpStale();",
+        ),
+        (
+            "configMgmtCancelDeleteMcp() {",
+            "configMgmtCanDeleteMcp() {",
+            "this._configMgmtReloadMcpStale();",
+        ),
+        ("configMgmtCancelSkill() {", "configMgmtSkillDirty() {", "this._loadSkills(true)"),
+        (
+            "configMgmtCancelDeleteSkill() {",
+            "configMgmtCanDeleteSkill() {",
+            "this._loadSkills(true)",
+        ),
+    ],
+)
+def test_cancel_reloads_a_stale_list(write_config, start, end, reload):
+    body = _between(_html(write_config, _ON), start, end)
+    assert reload in body
+
+
+def test_stale_reload_is_single_flight_and_cleared_by_any_list_load(write_config):
+    html = _html(write_config, _ON)
+    helper = _between(html, "_configMgmtReloadStale(sec, load) {", "async _configMgmtWriteErr(")
+    assert "if (!sec.listStale || sec.staleLoading) return;" in helper
+    assert ".finally(() => { sec.staleLoading = false; });" in helper
+    # Only a write to the list still on screen marks it: a switch loads its own list.
+    mark = _between(html, "_configMgmtMarkStale(sec, key) {", "_configMgmtReloadStale(")
+    assert "if (key === this._configMgmtViewKey()) sec.listStale = true;" in mark
+    # Each list loader clears the mark once its list lands.
+    assert "c.subagents.list = d.agents || []; c.subagents.listStale = false;" in html
+    assert "c.skills.list = local ? [] : skills; c.skills.listStale = false;" in html
+    mcp = _between(html, "async _loadMcp(myGen, keepApprovals) {", "configMgmtNewMcp() {")
+    assert "m.listStale = false;" in mcp
+    assert mcp.index("m.listStale = false;") < mcp.index("if (keepApprovals) return;")
+    assert html.count("listStale: false, staleLoading: false") == 3
+
+
+def test_mcp_stale_reload_keeps_unsaved_approval_choices(write_config):
+    html = _html(write_config, _ON)
+    helper = _between(html, "_configMgmtReloadMcpStale() {", "// --- MCP fields editor")
+    assert "this._loadMcp(c.gen, this.configMgmtMcpApprovalsDirty())" in helper
+    # An approval toggled during a save's wait keeps its choice, and the list still reloads.
+    save = _between(html, "async configMgmtSaveMcp() {", "configMgmtAskDeleteMcp(")
+    assert "await this._loadMcp(gen, !c.saved);" in save

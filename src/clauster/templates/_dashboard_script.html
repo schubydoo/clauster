@@ -191,7 +191,12 @@
       // CSP build (#533): the expression evaluator resolves bare identifiers ONLY against
       // the component data-stack (no window fallback), so script-level consts referenced
       // from DIRECTIVES must be surfaced as component state under a scoped name.
-      projectNames: PROJECT_NAMES,
+      // TASK-521: a COPY, kept current after page load. A created project joins it
+      // (_addProjectName) and opening the config window re-reads it from the server
+      // (refreshProjectNames). PROJECT_NAMES itself stays the page-load list.
+      projectNames: [...PROJECT_NAMES],
+      _projectNamesSeq: 0,          // the newest refreshProjectNames answer wins
+      _projectNamesLoading: false,  // single-flight: one /api/projects read at a time
       // rk -> a STANDARD bridge row (rk = instance_id), N per project (#1109/#1143). The
       // one deliberate exception is start()'s optimistic placeholder, whose identity is
       // not minted yet, so `_stamp` falls its rk back to the project name.
@@ -326,6 +331,9 @@
           // `busy` is derived from `ops` (a concurrent-op counter) so an early op's
           // finally can't clear it while another subagent request is still in flight.
           confirm: "", busy: false, ops: 0, deletingName: "",
+          // TASK-551: a save landed but skipped its list reload (an editor opened during
+          // it); Cancel reloads (_configMgmtReloadStale). Cleared by any list load.
+          listStale: false, staleLoading: false,
         },
         // MCP servers (#773 slice D): a list surface — the {name: entry} map edited
         // per-entry as JSON, add/edit/delete across all three scopes via the
@@ -336,6 +344,7 @@
           editing: false, isNew: false,
           name: "", entryText: "", orig: "",
           confirm: "", busy: false, ops: 0, deletingName: "",
+          listStale: false, staleLoading: false,  // TASK-551, as for subagents
           // TASK-272 fields editor: `mode` is "fields" or "raw"; `f` holds the form (see
           // _mcpBlankFields); `fieldsError` says why an entry can't be shown as fields;
           // `base` is the loaded (masked) entry, the baseline for the retype check.
@@ -362,6 +371,7 @@
           converted: "",
           confirm: "", busy: false, ops: 0, deletingName: "",
           listId: 0,  // guards the folder-list fetch (see _loadSkills)
+          listStale: false, staleLoading: false,  // TASK-551, as for subagents
           // Visibility (TASK-249): the `skillOverrides` settings key, all three scopes. One
           // row per listed skill folder and per key already in the file, so a key that
           // matches no folder stays visible and removable. `stored` is the map as read;
@@ -663,7 +673,10 @@
         if (active) this.$nextTick(() => { if (refs.mcpResolveBtn) refs.mcpResolveBtn.focus(); });
       },
       async init() {
-        for (const n of PROJECT_NAMES) {
+        // A snapshot, so a project that insertCard adds during the first refresh (and
+        // loads itself) is not loaded a second time by the usage loop below.
+        const names = this.projectNames.slice();
+        for (const n of names) {
           this.spawnMode[n] = DEFAULT_SPAWN_MODE;
           this.permMode[n] = DEFAULT_PERMISSION_MODE;
           this.resumeMode[n] = DEFAULT_RESUME_MODE;
@@ -679,7 +692,7 @@
         const firstRefresh = this.refresh();
         this.loadAllPreflight();
         await firstRefresh;
-        for (const n of PROJECT_NAMES) { this.loadUsage(n); }
+        for (const n of names) { this.loadUsage(n); }
         this.loadReadiness();  // fire-and-forget: doctor runs subprocess probes, don't block first paint
         this.loadLoginStatus();  // #838: login pill on its own path — never gates core refresh()
         this.reattachActiveClones();  // #659: a clone started in another tab streams here too
@@ -1161,7 +1174,9 @@
       // so Alpine's reactive Proxy sees the change (avoids the frame-drop class #310/#315).
       recomputeProjectRanks() {
         // Name sort: rank by the stable A–Z position (the Jinja render order == PROJECT_NAMES
-        // order), so `projectRanks` stays POPULATED in every sort. That keeps projectVisible's
+        // order), so `projectRanks` stays POPULATED in every sort. The page-load list, NOT
+        // projectNames, on purpose: a project created since stays unranked, and an unranked
+        // row is never capped out (projectVisible), so a just-created project always shows. That keeps projectVisible's
         // reactive dep set stable and the cap correctly re-applied on the return-to-A–Z path
         // (#585 symptom (b)). The `:style` order binding still no-ops in name sort (it's gated on
         // `projectSort !== 'name'`), so these ranks only drive the cap, not a visual reorder.
@@ -1833,13 +1848,21 @@
         c.open = true; c.error = ""; c.saved = false; c.confirm = "";
         const o = opts || {};
         if (o.project) c.project = o.project;
-        // Seed a project so project/local scope is usable immediately; user scope
-        // ignores it. An empty list leaves it "" and the pick-a-project note shows.
-        if (!c.project && this.projectNames.length) c.project = this.projectNames[0];
         if (o.surface) c.surface = o.surface;
         if (o.scope) c.scope = o.scope;
         document.body.style.overflow = "hidden";
-        this.configMgmtReload();
+        // TASK-521: re-read the project list first, so the picker offers a project created
+        // or removed since page load. `loading` shows "Loading…" (and keeps a second open
+        // out) for that short wait; the gen check drops it when the window closed meanwhile.
+        const gen = c.gen;
+        c.loading = true;
+        this.refreshProjectNames().then(() => {
+          if (c.gen !== gen || !c.open) return;
+          // Seed a project so project/local scope is usable immediately; user scope
+          // ignores it. An empty list leaves it "" and the pick-a-project note shows.
+          if (!c.project && this.projectNames.length) c.project = this.projectNames[0];
+          this.configMgmtReload();
+        });
       },
       // Jump straight to this project's Server-approvals panel (#837 readiness
       // warning link) — project scope (approvals are project-scope only), mcp
@@ -1891,9 +1914,21 @@
       },
       // Project/local scope is meaningless without a selected project — the surface
       // views + confirm hide and Save disables until one is chosen.
+      // A selected project that is no longer listed counts as none (TASK-521), so nothing
+      // loads or writes for a project that left the host.
       configMgmtNeedsProject() {
         const c = this.configMgmt;
-        return c.scope !== "user" && !c.project;
+        return c.scope !== "user" && (!c.project || !this.projectNames.includes(c.project));
+      },
+      // The selected project left the list (removed on disk since it was picked).
+      configMgmtProjectGone() {
+        const c = this.configMgmt;
+        return c.scope !== "user" && !!c.project && !this.projectNames.includes(c.project);
+      },
+      // The picker's status line: empty unless the selected project is gone.
+      configMgmtProjectGoneText() {
+        if (!this.configMgmtProjectGone()) return "";
+        return this.configMgmt.project + " is no longer on this host. Pick another project.";
       },
       configMgmtSetScope(scope) {
         const c = this.configMgmt;
@@ -3179,6 +3214,28 @@
         c.warnings = list.filter((w) => typeof w === "string" && w);
         return true;
       },
+      // TASK-551: a list write (subagent, MCP server, skill) that landed but skipped its
+      // reload, because an editor or a Delete confirm opened while it waited, leaves that
+      // list without the change. `_configMgmtMarkStale` records it, and Cancel on the
+      // editor or the confirm reloads once (`_configMgmtReloadStale`). The mark is only set
+      // while the panel shows the scope, project and surface the write went to: after a
+      // switch, that view's own load already reads its list fresh.
+      _configMgmtViewKey() {
+        const c = this.configMgmt;
+        return [c.scope, c.scope === "user" ? "" : c.project, c.surface].join("\n");
+      },
+      _configMgmtMarkStale(sec, key) {
+        if (key === this._configMgmtViewKey()) sec.listStale = true;
+      },
+      // `load` is the section's list loader, which clears `listStale` when its list lands.
+      // Single-flight per section: a second Cancel during the reload starts no second one.
+      _configMgmtReloadStale(sec, load) {
+        if (!sec.listStale || sec.staleLoading) return;
+        sec.staleLoading = true;
+        Promise.resolve().then(load)
+          .catch((e) => console.error(e))
+          .finally(() => { sec.staleLoading = false; });
+      },
       async _configMgmtWriteErr(res) {
         const c = this.configMgmt;
         if (res.status === 409) {
@@ -3252,7 +3309,7 @@
           }
           const d = await res.json();
           if (c.gen !== myGen) return;
-          c.subagents.list = d.agents || [];
+          c.subagents.list = d.agents || []; c.subagents.listStale = false;
         } catch (e) { if (c.gen === myGen) c.error = "Failed to load subagents."; }
       },
       configMgmtNewAgent() {
@@ -3335,6 +3392,7 @@
         const c = this.configMgmt;
         c.subagents.editing = false; c.subagents.confirm = ""; c.subagents.converted = ""; c.error = "";
         c.subagents.readOnly = false;
+        this._configMgmtReloadStale(c.subagents, () => this._loadSubagents(c.gen));
       },
       configMgmtAgentDirty() {
         const s = this.configMgmt.subagents;
@@ -3354,6 +3412,7 @@
         const c = this.configMgmt, s = c.subagents;
         if (!this.configMgmtCanSaveAgent()) return;
         const gen = c.gen, origin = document.activeElement;
+        const key = this._configMgmtViewKey();  // the list this write lands in (TASK-551)
         s.ops += 1; s.busy = true; c.error = ""; c.saved = false;
         try {
           const body = Object.assign(this._configMgmtTarget(), {
@@ -3364,13 +3423,14 @@
           const res = await fetch(ROOT + "/api/config-write/subagents/" + encodeURIComponent(s.name), {
             method: "PUT", headers: JSON_HEADERS, body: JSON.stringify(body),
           });
-          if (c.gen !== gen) return;
+          if (c.gen !== gen) { if (res.ok) this._configMgmtMarkStale(s, key); return; }
           if (this._authExpired(res)) return;
           if (res.ok) {
             c.saved = true; s.editing = false; s.confirm = ""; s.converted = "";
             const current = await this._configMgmtTakeWarnings(res, () => c.gen === gen);
-            // An editor opened during the wait stays open: the reload would close it.
-            if (!current || s.editing) return;
+            // An editor opened during the wait stays open: the reload would close it, so
+            // the list is marked stale for that editor's Cancel to reload (TASK-551).
+            if (!current || s.editing) { this._configMgmtMarkStale(s, key); return; }
             await this._loadSubagents(gen);
           }
           else await this._configMgmtWriteErr(res);
@@ -3387,7 +3447,9 @@
         this.revealFeedback('[data-test="cm-agent-delete-confirm"]', true);
       },
       configMgmtCancelDeleteAgent() {
-        this.configMgmt.subagents.deletingName = ""; this.configMgmt.subagents.confirm = "";
+        const c = this.configMgmt;
+        c.subagents.deletingName = ""; c.subagents.confirm = "";
+        this._configMgmtReloadStale(c.subagents, () => this._loadSubagents(c.gen));
       },
       configMgmtCanDeleteAgent() {
         const c = this.configMgmt, s = c.subagents;
@@ -3398,6 +3460,7 @@
         const c = this.configMgmt, s = c.subagents;
         if (!this.configMgmtCanDeleteAgent()) return;
         const gen = c.gen, origin = document.activeElement;
+        const key = this._configMgmtViewKey();  // the list this write lands in (TASK-551)
         s.ops += 1; s.busy = true; c.error = ""; c.saved = false;
         const name = s.deletingName;
         try {
@@ -3405,7 +3468,7 @@
             ROOT + "/api/config-write/subagents/" + encodeURIComponent(name) + "?" + this._configMgmtQuery({ confirm: s.confirm }),
             { method: "DELETE" },
           );
-          if (c.gen !== gen) return;
+          if (c.gen !== gen) { if (res.ok) this._configMgmtMarkStale(s, key); return; }
           if (this._authExpired(res)) return;
           if (res.ok) { c.saved = true; c.warnings = []; s.deletingName = ""; s.confirm = ""; await this._loadSubagents(gen); }
           else await this._configMgmtWriteErr(res);
@@ -3434,7 +3497,9 @@
         const args = Array.isArray(entry.args) ? entry.args.join(" ") : "";
         return ("stdio: " + (entry.command || "") + " " + args).trim();
       },
-      async _loadMcp(myGen) {
+      // `keepApprovals` reloads the server list only, so unsaved approval choices survive
+      // (a save or a Cancel that reloads after the operator toggled one, TASK-551).
+      async _loadMcp(myGen, keepApprovals) {
         const c = this.configMgmt, m = c.mcp;
         m.editing = false; m.deletingName = "";
         try {
@@ -3452,8 +3517,10 @@
           m.list = this._mcpServerRows(d.servers || {});
           m.hash = d.hash || null;
           m.conversions = Array.isArray(d.conversions) ? d.conversions : [];
+          m.listStale = false;
           // Approvals are a project-only concept (committed .mcp.json servers); other
           // scopes have none. Load them under the same gen so a switch drops both.
+          if (keepApprovals) return;
           if (c.scope === "project") await this._loadMcpApprovals(myGen);
           else {
             m.approvals.enabled = []; m.approvals.disabled = []; m.approvals.locked = [];
@@ -3507,6 +3574,13 @@
         // are already loaded (loading false), preserve them — reloading here would
         // silently discard any unsaved toggle choices made before opening the editor.
         if (m.approvals.loading) this.configMgmtReload();
+        else this._configMgmtReloadMcpStale();
+      },
+      // A stale list (TASK-551) reloads with its approvals, like the save it stands in for,
+      // unless the operator has unsaved approval choices: then the list alone reloads.
+      _configMgmtReloadMcpStale() {
+        const c = this.configMgmt, m = c.mcp;
+        this._configMgmtReloadStale(m, () => this._loadMcp(c.gen, this.configMgmtMcpApprovalsDirty()));
       },
       // --- MCP fields editor (TASK-272) ------------------------------------------------
       // A type select shows that transport's fields, and the form builds the same entry
@@ -3935,6 +4009,7 @@
           return this._configMgmtRefuse("Server entry must be a JSON object.");
         }
         const gen = c.gen, origin = document.activeElement;
+        const key = this._configMgmtViewKey();  // the list this write lands in (TASK-551)
         m.ops += 1; m.busy = true; c.error = ""; c.saved = false;
         try {
           const body = Object.assign(this._configMgmtTarget(), {
@@ -3943,15 +4018,16 @@
           const res = await fetch(ROOT + "/api/config-write/mcp/server", {
             method: "POST", headers: JSON_HEADERS, body: JSON.stringify(body),
           });
-          if (c.gen !== gen) return;
+          if (c.gen !== gen) { if (res.ok) this._configMgmtMarkStale(m, key); return; }
           if (this._authExpired(res)) return;
           if (res.ok) {
             c.saved = true; m.editing = false; m.confirm = "";
             const current = await this._configMgmtTakeWarnings(res, () => c.gen === gen);
-            // An editor opened during the wait stays open, and an approval toggled during it
-            // (it clears `saved`) keeps its choice: the reload would reset both.
-            if (!current || !c.saved || m.editing) return;
-            await this._loadMcp(gen);
+            // An editor opened during the wait stays open (the reload would close it), so the
+            // list is marked stale for its Cancel (TASK-551). An approval toggled during the
+            // wait (it clears `saved`) keeps its choice: only the server list reloads.
+            if (!current || m.editing) { this._configMgmtMarkStale(m, key); return; }
+            await this._loadMcp(gen, !c.saved);
           }
           else await this._configMgmtWriteErr(res);
         } catch (e) { this._configMgmtWriteFailed(e, gen, "Save failed."); }
@@ -3970,8 +4046,9 @@
         const m = this.configMgmt.mcp;
         m.deletingName = ""; m.confirm = "";
         // Same rule as configMgmtCancelMcp: only reload to recover an orphaned
-        // approvals load; otherwise preserve loaded (and any unsaved) choices.
+        // approvals load or a stale list; otherwise preserve loaded (and any unsaved) choices.
         if (m.approvals.loading) this.configMgmtReload();
+        else this._configMgmtReloadMcpStale();
       },
       configMgmtCanDeleteMcp() {
         const m = this.configMgmt.mcp;
@@ -3982,6 +4059,7 @@
         const c = this.configMgmt, m = c.mcp;
         if (!this.configMgmtCanDeleteMcp()) return;
         const gen = c.gen, origin = document.activeElement;
+        const key = this._configMgmtViewKey();  // the list this write lands in (TASK-551)
         m.ops += 1; m.busy = true; c.error = ""; c.saved = false;
         const name = m.deletingName;
         try {
@@ -3989,7 +4067,7 @@
           const res = await fetch(ROOT + "/api/config-write/mcp/server", {
             method: "POST", headers: JSON_HEADERS, body: JSON.stringify(body),
           });
-          if (c.gen !== gen) return;
+          if (c.gen !== gen) { if (res.ok) this._configMgmtMarkStale(m, key); return; }
           if (this._authExpired(res)) return;
           if (res.ok) { c.saved = true; c.warnings = []; m.deletingName = ""; m.confirm = ""; await this._loadMcp(gen); }
           else await this._configMgmtWriteErr(res);
@@ -4166,7 +4244,7 @@
             const d = await res.json();
             if (c.skills.listId !== listId) return;
             const skills = d.skills || [];
-            c.skills.list = local ? [] : skills;
+            c.skills.list = local ? [] : skills; c.skills.listStale = false;
             names = skills.map(sk => sk.name);
           }
         } catch (e) {
@@ -4460,6 +4538,8 @@
       configMgmtCancelSkill() {
         const s = this.configMgmt.skills;
         s.editing = false; s.confirm = ""; s.converted = ""; this.configMgmt.error = "";
+        // `true` keeps unsaved visibility choices, as the skill save's own reload does.
+        this._configMgmtReloadStale(s, () => this._loadSkills(true));
       },
       configMgmtSkillDirty() {
         const s = this.configMgmt.skills;
@@ -4479,6 +4559,7 @@
         const c = this.configMgmt, s = c.skills;
         if (!this.configMgmtCanSaveSkill()) return;
         const gen = c.gen, origin = document.activeElement;
+        const key = this._configMgmtViewKey();  // the list this write lands in (TASK-551)
         s.ops += 1; s.busy = true; c.error = ""; c.saved = false;
         try {
           const body = Object.assign(this._configMgmtTarget(), {
@@ -4487,13 +4568,14 @@
           const res = await fetch(ROOT + "/api/config-write/skills", {
             method: "PUT", headers: JSON_HEADERS, body: JSON.stringify(body),
           });
-          if (c.gen !== gen) return;
+          if (c.gen !== gen) { if (res.ok) this._configMgmtMarkStale(s, key); return; }
           if (this._authExpired(res)) return;
           if (res.ok) {
             c.saved = true; s.editing = false; s.confirm = ""; s.converted = "";
             const current = await this._configMgmtTakeWarnings(res, () => c.gen === gen);
-            // An editor opened during the wait (New skill) stays open: the reload closes it.
-            if (!current || s.editing) return;
+            // An editor opened during the wait (New skill) stays open: the reload closes it,
+            // so the list is marked stale for that editor's Cancel to reload (TASK-551).
+            if (!current || s.editing) { this._configMgmtMarkStale(s, key); return; }
             await this._loadSkills(true);
           }
           else await this._configMgmtWriteErr(res);
@@ -4510,7 +4592,9 @@
         this.revealFeedback('[data-test="cm-skill-delete-confirm"]', true);
       },
       configMgmtCancelDeleteSkill() {
-        this.configMgmt.skills.deletingName = ""; this.configMgmt.skills.confirm = "";
+        const s = this.configMgmt.skills;
+        s.deletingName = ""; s.confirm = "";
+        this._configMgmtReloadStale(s, () => this._loadSkills(true));
       },
       configMgmtCanDeleteSkill() {
         const c = this.configMgmt, s = c.skills;
@@ -4521,6 +4605,7 @@
         const c = this.configMgmt, s = c.skills;
         if (!this.configMgmtCanDeleteSkill()) return;
         const gen = c.gen, origin = document.activeElement;
+        const key = this._configMgmtViewKey();  // the list this write lands in (TASK-551)
         s.ops += 1; s.busy = true; c.error = ""; c.saved = false;
         const name = s.deletingName;
         try {
@@ -4528,7 +4613,7 @@
           const res = await fetch(ROOT + "/api/config-write/skills/delete", {
             method: "POST", headers: JSON_HEADERS, body: JSON.stringify(body),
           });
-          if (c.gen !== gen) return;
+          if (c.gen !== gen) { if (res.ok) this._configMgmtMarkStale(s, key); return; }
           if (this._authExpired(res)) return;
           if (res.ok) { c.saved = true; c.warnings = []; s.deletingName = ""; s.confirm = ""; await this._loadSkills(true); }
           else await this._configMgmtWriteErr(res);
@@ -5040,8 +5125,8 @@
       // Where focus goes when the viewer closes: the opener while it is still in the DOM.
       // A live session row's button (TASK-269) leaves the DOM when that session ends while
       // the modal is open. Then fall back, in this order, to a shown and enabled control on
-      // the same bridge row: the sessions toggle, the row's Transcript button (hidden for a
-      // worktree bridge), and the Logs toggle (on every bridge row). Stop is never a
+      // the same bridge row: the sessions toggle, the row's Transcript button, and the Logs
+      // toggle (on every bridge row). Stop is never a
       // target: one stray Enter would end the bridge. If the bridge row is gone too, focus
       // the Active sessions heading, so keyboard focus never drops to the page body.
       _transcriptFocusTarget(t) {
@@ -6147,8 +6232,10 @@
       // First-paint batch: one request returns {name: {ok, checks}} for every
       // project from a single server-side discovery scan (avoids N per-project calls).
       async loadAllPreflight() {
+        // Every project shown now (TASK-521), so one created since page load is checked too.
+        const names = this.projectNames.slice();
         const seqs = {};
-        for (const n of PROJECT_NAMES) seqs[n] = this._preflightTake(n);
+        for (const n of names) seqs[n] = this._preflightTake(n);
         const ctrl = new AbortController();
         const timer = setTimeout(() => ctrl.abort(), this.preflightTimeoutMs);
         try {
@@ -6156,7 +6243,7 @@
           if (this._authExpired(res)) return;
           if (!res.ok) { this._allPreflightFailed(seqs, "the server answered HTTP " + res.status); return; }
           const all = await res.json();
-          for (const n of PROJECT_NAMES) {
+          for (const n of names) {
             if (seqs[n] !== this._preflightSeq[n]) continue;  // a newer request owns this row
             if (all && all[n]) {
               // An applied answer was sent after any config write (the save path supersedes
@@ -6171,7 +6258,7 @@
         } finally { clearTimeout(timer); }
       },
       _allPreflightFailed(seqs, why) {
-        for (const n of PROJECT_NAMES) {
+        for (const n of Object.keys(seqs)) {
           if (seqs[n] === this._preflightSeq[n]) this._preflightFailed(n, why);
         }
       },
@@ -6870,6 +6957,7 @@
         if (!(name in this.resumeMode)) this.resumeMode[name] = DEFAULT_RESUME_MODE;
         if (!(name in this.customName)) this.customName[name] = "";
         if (proj && proj.trust_state) this.trustState[name] = proj.trust_state;
+        this._addProjectName(name);  // TASK-521: the picker and project-wide loops see it now
         // The rows list only exists once there is ≥1 project; the very first project has no
         // #project-grid yet (the empty-state renders instead), so reload to render it.
         const grid = document.getElementById("project-grid");
@@ -6908,6 +6996,37 @@
         el.scrollIntoView({ behavior: "smooth", block: "center" });
       },
       reloadToProject() { window.location.reload(); },
+      // --- the live project-name list (TASK-521) -------------------------------------
+      // Discovery sorts by lowercased name, so an added name lands where a reload puts it.
+      // Each write bumps the sequence, so an older /api/projects answer cannot undo it.
+      _addProjectName(name) {
+        if (this.projectNames.includes(name)) return;
+        const key = (n) => n.toLowerCase();
+        const names = this.projectNames.concat([name]);
+        names.sort((a, b) => (key(a) < key(b) ? -1 : (key(a) > key(b) ? 1 : 0)));
+        this._projectNamesSeq += 1;
+        this.projectNames = names;
+      },
+      // Replace the list with a discovered set (an /api/projects or trust-all answer).
+      _setProjectNames(projects) {
+        this._projectNamesSeq += 1;
+        this.projectNames = projects.map((p) => p && p.name).filter((n) => typeof n === "string");
+      },
+      // Re-read the discovered projects, so one removed on disk leaves the list too.
+      // Single-flight; a failed read keeps the current list (the picker shows what it had).
+      async refreshProjectNames() {
+        if (this._projectNamesLoading) return;
+        this._projectNamesLoading = true;
+        const seq = this._projectNamesSeq;
+        try {
+          const res = await fetch(ROOT + "/api/projects");
+          if (this._authExpired(res) || !res.ok) return;
+          const list = await res.json();
+          if (seq !== this._projectNamesSeq || !Array.isArray(list)) return;
+          this._setProjectNames(list);
+        } catch (e) { /* keep the current list */ }
+        finally { this._projectNamesLoading = false; }
+      },
       async _spawn(name) {
         this.errors[name] = null;
         // Launch mode: the visible picker wins (it's how a second, interactive
@@ -7229,6 +7348,7 @@
             // with a count no click can clear. Then refresh readiness with a SINGLE batched
             // call (loadAllPreflight replaced the per-project fan-out) so trust checks clear.
             this.trustState = Object.fromEntries(projects.map((p) => [p.name, p.trust_state]));
+            this._setProjectNames(projects);  // the same authoritative set (TASK-521)
             this.loadAllPreflight();
             this.toast("trusted all projects", "success");
           } else {

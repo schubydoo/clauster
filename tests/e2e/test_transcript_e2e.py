@@ -34,17 +34,25 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.e2e
 
 
-def _seed_session(home: Path, project_path: Path, name: str) -> None:
-    """Write one Claude-format transcript with a user + assistant turn for ``project_path``."""
+def _seed_session(home: Path, project_path: Path, name: str, *, record_cwd: bool = False) -> None:
+    """Write one Claude-format transcript with a user + assistant turn for ``project_path``.
+
+    ``record_cwd`` writes the ``cwd`` Claude records on a turn. A worktree transcript needs
+    it: the list takes one from a worktree directory only once its recorded cwd proves it
+    belongs to the project.
+    """
     from clauster.pointers import sanitize_cwd  # pure cwd→dirname mapping
 
     tdir = home / ".claude" / "projects" / sanitize_cwd(project_path)
     tdir.mkdir(parents=True, exist_ok=True)
+    first: dict = {
+        "timestamp": "2026-07-16T00:00:00Z",
+        "message": {"role": "user", "content": "hello from e2e"},
+    }
+    if record_cwd:
+        first["cwd"] = str(project_path)
     lines = [
-        {
-            "timestamp": "2026-07-16T00:00:00Z",
-            "message": {"role": "user", "content": "hello from e2e"},
-        },
+        first,
         {
             "timestamp": "2026-07-16T00:00:05Z",
             "message": {
@@ -298,10 +306,10 @@ def test_bridge_session_transcript_close_keeps_focus_on_worktree_bridge_row(
 ) -> None:
     """Closing the viewer after its session ended keeps focus on the bridge row (TASK-269).
 
-    A worktree bridge hides its row's Transcript button, and the sessions toggle hides
-    once the last session ends. So when the session that opened the viewer ends while
-    it is open, the only shown control left on the row is the Logs toggle, and closing
-    the viewer must focus it, never the page body.
+    The sessions toggle hides once the last session ends. So when the session that
+    opened the viewer ends while it is open, closing the viewer must focus the next shown
+    control on the row, never the page body. Since TASK-488 a worktree bridge shows its
+    row's Transcript button too, so that is the control.
     """
     server = tracked_session_server
     alpha = (mutable_projects_tree / "alpha").resolve()  # a git repo: worktree spawn offered
@@ -333,7 +341,7 @@ def test_bridge_session_transcript_close_keeps_focus_on_worktree_bridge_row(
     toggle = 'section.zone-active [data-test="bridge-sessions-toggle"]'
     button = 'section.zone-active [data-test="bridge-session-transcript"]'
     browser.expect_visible(toggle, timeout_ms=STATUS_TIMEOUT)
-    browser.expect_hidden('section.zone-active [data-test="transcript-trigger-session"]')
+    browser.expect_visible('section.zone-active [data-test="transcript-trigger-session"]')
     browser.click(toggle)
     # The expanded list pushes the rows below it down: wait for it before the click.
     browser.expect_visible(button, timeout_ms=STATUS_TIMEOUT)
@@ -349,4 +357,41 @@ def test_bridge_session_transcript_close_keeps_focus_on_worktree_bridge_row(
     browser.click(f"{modal} .btn-close")
     browser.expect_hidden(modal)
     focused = browser.eval_json("[(document.activeElement || {dataset: {}}).dataset.test || null]")
-    assert focused == ["bridge-logs-toggle"]
+    assert focused == ["transcript-trigger-session"]
+
+
+def test_worktree_bridge_row_transcript_button_lists_its_worktree_session(
+    browser: AgentBrowser, tracked_session_server: Server, mutable_projects_tree: Path
+) -> None:
+    """A worktree bridge row shows its Transcript button, and it lists the worktree session.
+
+    TASK-488: the button was hidden for worktree bridges because their transcripts once
+    were missing from the project-keyed list. The list includes the project's worktrees
+    now, so the button shows and opens a list that holds the worktree's transcript.
+    """
+    server = tracked_session_server
+    alpha = (mutable_projects_tree / "alpha").resolve()  # a git repo: worktree spawn offered
+    browser.goto(server.url)
+    browser.expect_visible('[data-project="alpha"]')
+    open_desktop_launch(browser, "alpha")
+    browser.click('[data-project="alpha"] [data-test="launch-more-options"]')
+    browser.expect_visible("#spawn-alpha")
+    browser.select("#spawn-alpha", "worktree")
+    trust_and_start(browser, "alpha")
+    browser.expect_text("section.zone-active", "Running", timeout_ms=STATUS_TIMEOUT)
+
+    # A finished worktree session: its transcript lives under the worktree's own dir.
+    worktree = alpha / ".claude" / "worktrees" / "wt-488"
+    worktree.mkdir(parents=True)
+    home = server.state_dir.parent / "home"
+    _seed_session(home, worktree, "sess-488.jsonl", record_cwd=True)
+
+    button = 'section.zone-active [data-test="transcript-trigger-session"]'
+    browser.expect_visible(button, timeout_ms=STATUS_TIMEOUT)
+    browser.click(button)
+    modal = '[data-test="transcript-modal"]'
+    browser.expect_visible(modal)
+    browser.expect_count('[data-test="transcript-session"]', 1, timeout_ms=STATUS_TIMEOUT)
+    browser.click('[data-test="transcript-session"]')
+    browser.expect_text(modal, "hello from e2e", timeout_ms=STATUS_TIMEOUT)
+    browser.expect_text(modal, "hi back from the fixture", timeout_ms=STATUS_TIMEOUT)
