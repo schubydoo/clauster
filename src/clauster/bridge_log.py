@@ -24,10 +24,12 @@ from typing import NamedTuple
 class _Marker(NamedTuple):
     r"""A marker pattern split in two: ``head`` is the tag, ``tail`` the rest of the pattern.
 
-    The tail starts with ``[^\n]*`` or ``[^{}]*``: it reads on to its text only up to the
-    next ``edge`` (a line end, or a JSON object's brace). Joined into one pattern, ``search``
-    tries the tail again after each head, so a line of N heads costs N times its length
-    (TASK-471). :func:`_first_hit` finds the same match and tries the tail once per segment.
+    The tail starts with ``[^\n]*`` or ``[^{}]*``: that leading star reads only up to the
+    next ``edge`` (a line end, or a JSON object's brace), so the rest of the tail can start
+    only before the edge (it can still read past it, as ``Unarchive\s+`` can). Joined into
+    one pattern, ``search`` tries the tail again after each head, so a line of N heads costs
+    N times its length (TASK-471). :func:`_first_hit` finds the same match and tries the
+    tail once per segment.
     """
 
     head: re.Pattern[str]
@@ -121,8 +123,9 @@ def _first_hit(text: str, marker: _Marker) -> tuple[re.Match[str], re.Match[str]
 
     This is the match that ``search`` finds with the joined pattern, at the same place and
     with the same groups. If the tail fails after the first head of a segment (the text up
-    to the next ``edge``), it fails after every later head of that segment too: the tail can
-    read on only to the edge, and a later head leaves it a part of the same text. So the
+    to the next ``edge``), it fails after every later head of that segment too: the tail's
+    leading star reads only to the edge, so the rest of the tail can start only before it,
+    and a later head only shrinks that set of starts. So the
     search goes on at the next segment, and the cost is linear in the length of ``text``.
     """
     pos = 0
