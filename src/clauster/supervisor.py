@@ -536,12 +536,12 @@ class ResumeGate:
         with self._lock:
             abandoned = self._outcome == "abandon"
         if abandoned:
-            raise ResumeError("the resume passed its time limit and was abandoned")
+            raise ResumeError("the request gave up this resume (time limit or cancel)")
 
     def commit(self) -> None:
         """Claim the dispatch, or raise :class:`ResumeError` when the request gave up."""
         if not self._decide("dispatch"):
-            raise ResumeError("the resume passed its time limit and was abandoned")
+            raise ResumeError("the request gave up this resume (time limit or cancel)")
 
     def abandon(self) -> bool:
         """Give up the resume; return False when the dispatch already started."""

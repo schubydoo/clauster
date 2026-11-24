@@ -271,7 +271,7 @@ async def _resume_within_limit(
     loop = asyncio.get_running_loop()
     outcome: asyncio.Future[str] = loop.create_future()
 
-    def _settle(result: str, error: Exception | None) -> None:
+    def _settle(result: str, error: BaseException | None) -> None:
         """Hand the thread's result or error to the waiting request, once."""
         if outcome.done():
             return
@@ -283,10 +283,11 @@ async def _resume_within_limit(
     def _run() -> None:
         """Run ``work`` and pass its outcome back to the event loop."""
         result = ""
-        error: Exception | None = None
+        error: BaseException | None = None
         try:
             result = work(gate)
-        except Exception as exc:  # raised again in the request by ``await outcome``
+        # Any exception, so that a request waiting on a dispatch that started never hangs.
+        except BaseException as exc:  # raised again in the request by ``await outcome``
             error = exc
         try:
             loop.call_soon_threadsafe(_settle, result, error)
@@ -306,13 +307,15 @@ async def _resume_within_limit(
         if gate.abandon():
             outcome.cancel()
         else:
-            outcome.add_done_callback(lambda done: done.cancelled() or done.exception())
+            outcome.add_done_callback(_log_unreported_failure(job_id))
         raise
     except TimeoutError:
         if not limit.expired():
             raise  # a TimeoutError from the work itself, not the limit
         if not gate.abandon():
-            return await outcome  # the dispatch started first: wait for it
+            # The dispatch started first: wait for it. A cancel during this unshielded wait
+            # cancels ``outcome`` itself, so ``_settle`` drops the late hand-back.
+            return await outcome
         outcome.cancel()  # nothing waits for the thread now: drop what it hands back
         raise HTTPException(
             status_code=504,
@@ -322,6 +325,28 @@ async def _resume_within_limit(
                 "hung. Try again later."
             ),
         ) from None
+
+
+def _log_unreported_failure(job_id: str) -> Callable[[asyncio.Future[str]], None]:
+    """Return a done callback that logs a resume failure no request is left to report.
+
+    Reading the exception also keeps asyncio from logging it as never retrieved. Only the
+    class name is logged: the message of a dispatch error can name a path.
+    """
+
+    def _callback(done: asyncio.Future[str]) -> None:
+        """Log the class of the failure, if the dispatch failed."""
+        if done.cancelled():
+            return
+        error = done.exception()
+        if error is not None:
+            logger.warning(
+                "background resume of %s failed after its request ended: %s",
+                job_id,
+                type(error).__name__,
+            )
+
+    return _callback
 
 
 def _resume_ceiling_refusal(config: ClausterConfig, cwd: Path, permission_mode: str) -> str | None:

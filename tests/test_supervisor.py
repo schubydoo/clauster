@@ -2021,9 +2021,9 @@ def test_resume_gate_first_decision_wins():
     abandoned = supervisor.ResumeGate()
     assert abandoned.abandon() is True
     assert abandoned.abandon() is True
-    with pytest.raises(supervisor.ResumeError, match="abandoned"):
+    with pytest.raises(supervisor.ResumeError, match="gave up"):
         abandoned.check()
-    with pytest.raises(supervisor.ResumeError, match="abandoned"):
+    with pytest.raises(supervisor.ResumeError, match="gave up"):
         abandoned.commit()
 
 
@@ -2049,7 +2049,7 @@ def test_resume_into_an_abandoned_gate_never_trusts_or_spawns(tmp_path, monkeypa
     )
     gate = supervisor.ResumeGate()
     assert gate.abandon()
-    with pytest.raises(supervisor.ResumeError, match="abandoned"):
+    with pytest.raises(supervisor.ResumeError, match="gave up"):
         supervisor.resume_background_job(
             "29e8026f", permission_mode="default", refuse_cwd=lambda cwd: None, gate=gate
         )
@@ -2094,12 +2094,23 @@ def test_api_resume_agent_past_the_time_limit_is_504_and_never_dispatches(
 ):
     # Both places stand in for a resolve() on a hung network mount. A hang before the trust
     # write stops at the gate check; a hang in it stops at the claim before the spawn.
+    # The limit can pass before the worker reaches the hang on a slow runner, so the
+    # request's abandon waits until the worker is blocked there.
+    hung = threading.Event()
     release = threading.Event()
+    real_abandon = supervisor.ResumeGate.abandon
+
+    def _abandon(self):
+        assert hung.wait(30)
+        return real_abandon(self)
+
+    monkeypatch.setattr(supervisor.ResumeGate, "abandon", _abandon)
     monkeypatch.setattr(agents, "_RESUME_TIME_LIMIT", 0.05)
     trusted, spawned, finished, errors = _bound_resume(monkeypatch, projects_root / "alpha")
     if hang_in == "ceiling check":
 
         def _hung_check(config, cwd, permission_mode):
+            hung.set()
             release.wait(30)
             return None
 
@@ -2107,6 +2118,7 @@ def test_api_resume_agent_past_the_time_limit_is_504_and_never_dispatches(
     else:
 
         def _hung_trust(*args):
+            hung.set()
             release.wait(30)
             trusted.append(args)
 
@@ -2128,7 +2140,7 @@ def test_api_resume_agent_past_the_time_limit_is_504_and_never_dispatches(
     assert len(trusted) == (0 if hang_in == "ceiling check" else 1)
     assert len(errors) == 1
     assert isinstance(errors[0], supervisor.ResumeError)
-    assert str(errors[0]) == "the resume passed its time limit and was abandoned"
+    assert str(errors[0]) == "the request gave up this resume (time limit or cancel)"
 
 
 def test_api_resume_agent_waits_for_a_dispatch_that_started_before_the_limit(
@@ -2230,9 +2242,10 @@ async def test_resume_within_limit_drops_a_late_result_while_the_loop_runs(monke
             await agents._resume_within_limit(_work, job_id="0000d00e")
         assert info.value.status_code == 504
         del info  # its traceback would keep a never-retrieved error alive past gc
+        worker = _worker("0000d00e")  # found while it is surely still blocked
     finally:
         release.set()
-    await asyncio.to_thread(_worker("0000d00e").join, 30)
+    await asyncio.to_thread(worker.join, 30)
     for _ in range(3):
         await asyncio.sleep(0)  # run the hand-back the thread scheduled
     gc.collect()  # a future whose error nobody read reports it when it is collected
@@ -2242,6 +2255,8 @@ async def test_resume_within_limit_drops_a_late_result_while_the_loop_runs(monke
 async def test_resume_within_limit_cancelled_request_never_dispatches_later():
     # A request cancelled before the limit (a shutdown, say) must abandon the gate too: the
     # thread that wakes up later must not resume a job that no request reports.
+    loop_errors: list[dict] = []
+    asyncio.get_running_loop().set_exception_handler(lambda loop, ctx: loop_errors.append(ctx))
     started = threading.Event()
     release = threading.Event()
     dispatched: list[str] = []
@@ -2261,19 +2276,25 @@ async def test_resume_within_limit_cancelled_request_never_dispatches_later():
     task = asyncio.create_task(agents._resume_within_limit(_work, job_id="0000d00f"))
     try:
         assert await asyncio.to_thread(started.wait, 30)
+        worker = _worker("0000d00f")  # found while it is surely still blocked
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
     finally:
         release.set()
-    await asyncio.to_thread(_worker("0000d00f").join, 30)
+    await asyncio.to_thread(worker.join, 30)
     assert dispatched == []
-    assert [str(e) for e in errors] == ["the resume passed its time limit and was abandoned"]
+    assert [str(e) for e in errors] == ["the request gave up this resume (time limit or cancel)"]
+    errors.clear()  # the list would keep the error alive past gc
+    for _ in range(3):
+        await asyncio.sleep(0)  # run the hand-back the thread scheduled
+    gc.collect()  # the cancelled outcome drops the late error instead of leaving it unread
+    assert loop_errors == []
 
 
-async def test_resume_within_limit_cancel_after_the_claim_reads_the_dispatch_error():
+async def test_resume_within_limit_cancel_after_the_claim_logs_the_dispatch_error(caplog):
     # The dispatch already started when the request was cancelled: it runs on, and its error
-    # is read, so the loop does not log it as never retrieved.
+    # is logged by class (its text can name a path), so it is not lost or left unread.
     loop_errors: list[dict] = []
     asyncio.get_running_loop().set_exception_handler(lambda loop, ctx: loop_errors.append(ctx))
     committed = threading.Event()
@@ -2283,18 +2304,53 @@ async def test_resume_within_limit_cancel_after_the_claim_reads_the_dispatch_err
         gate.commit()
         committed.set()
         release.wait(30)
-        raise supervisor.DispatchError("`claude --bg` failed (exit 1): boom")
+        raise supervisor.DispatchError("`claude --bg` failed (exit 1): /secret/path")
 
     task = asyncio.create_task(agents._resume_within_limit(_work, job_id="0000d010"))
-    try:
-        assert await asyncio.to_thread(committed.wait, 30)
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-    finally:
-        release.set()
-    await asyncio.to_thread(_worker("0000d010").join, 30)
-    for _ in range(3):
-        await asyncio.sleep(0)  # run the hand-back the thread scheduled
+    with caplog.at_level(logging.WARNING, logger="clauster.routes.agents"):
+        try:
+            assert await asyncio.to_thread(committed.wait, 30)
+            worker = _worker("0000d010")  # found while it is surely still blocked
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        finally:
+            release.set()
+        await asyncio.to_thread(worker.join, 30)
+        for _ in range(3):
+            await asyncio.sleep(0)  # run the hand-back the thread scheduled
     gc.collect()
     assert loop_errors == []
+    assert "0000d010 failed after its request ended: DispatchError" in caplog.text
+    assert "/secret/path" not in caplog.text
+
+
+async def test_log_unreported_failure_logs_only_a_failure(caplog):
+    loop = asyncio.get_running_loop()
+    callback = agents._log_unreported_failure("0000d011")
+    ok, cancelled, failed = loop.create_future(), loop.create_future(), loop.create_future()
+    ok.set_result("newjob01")
+    cancelled.cancel()
+    failed.set_exception(supervisor.DispatchError("boom"))
+    with caplog.at_level(logging.WARNING, logger="clauster.routes.agents"):
+        callback(ok)
+        callback(cancelled)
+        assert caplog.text == ""  # a dispatch that worked, or was dropped, is not a failure
+        callback(failed)
+    assert "0000d011 failed after its request ended: DispatchError" in caplog.text
+
+
+class _Abort(BaseException):
+    """A BaseException that is not SystemExit or KeyboardInterrupt."""
+
+
+async def test_resume_within_limit_hands_back_a_base_exception():
+    # The request waits for a dispatch that claimed the gate with no limit of its own, so the
+    # thread must hand back any exception, or the request would wait forever.
+    def _work(gate):
+        gate.commit()
+        raise _Abort("stop")
+
+    async with asyncio.timeout(30):  # only reached when the hand-back is missing
+        with pytest.raises(_Abort, match="stop"):
+            await agents._resume_within_limit(_work, job_id="0000d012")

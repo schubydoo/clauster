@@ -446,8 +446,10 @@ answer. This is usually a network mount (NFS, SMB, sshfs) that hangs.
 
 Clauster did not resume the job, and it does not resume it later when the folder
 answers again. The blocked step can stay in the background until the mount answers.
-If the trust write was the step that hung, it can still finish then. It only marks
-the job's directory as trusted, the same entry that a successful resume writes.
+If the step that hung was one of the last ones (the second folder check, the search
+for the `claude` binary or the trust write), the trust write can still finish then. It
+only marks the job's directory as trusted, the same entry that a successful resume
+writes.
 
 **Fix:**
 
