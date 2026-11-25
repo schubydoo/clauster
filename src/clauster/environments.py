@@ -92,8 +92,8 @@ def load_credentials(
     unreadable bytes, invalid JSON, a valid-JSON root that is not an object, and a missing
     field. Callers guard on that one type, so a shape that escaped it (a credentials file
     holding a bare string, list or ``null``) surfaced as an ``AttributeError`` from ``.get``
-    and blocked a spawn. Expiry is checked **only when the caller supplies ``now_ms``**
-    (ms epoch); with the default ``None`` an expired token is returned unchecked.
+    and escaped every caller's guard. Expiry is checked **only when the caller supplies
+    ``now_ms``** (ms epoch); with the default ``None`` an expired token is returned unchecked.
     """
     cred_file = Path(credentials_path).expanduser()
     try:
@@ -107,9 +107,7 @@ def load_credentials(
         raise CredentialsError(f"{cred_file} is not valid JSON: {exc}") from exc
     # Type-check the ROOT before `.get`. Valid JSON is not necessarily an object — a file
     # holding `"str"`, `[]` or `null` parses fine and then raises AttributeError from
-    # `.get`, which is not a CredentialsError, so it escaped every caller's guard. That
-    # reached `runner`'s spawn preflight unwrapped and would fail a spawn the docstrings
-    # promise it can never block.
+    # `.get`, which is not a CredentialsError, so it escaped every caller's guard.
     if not isinstance(parsed, dict):
         raise CredentialsError(f"{cred_file} is not a JSON object")
     oauth = parsed.get("claudeAiOauth") or {}

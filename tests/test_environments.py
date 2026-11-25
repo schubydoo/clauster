@@ -621,8 +621,7 @@ def test_https_transport_forwards_valid_url_to_roundtrip(monkeypatch):
 def test_load_credentials_rejects_a_non_object_json_root(tmp_path):
     # Valid JSON is not necessarily an object. A credentials file holding a bare string
     # parsed fine and then raised AttributeError from `.get` — not a CredentialsError, so
-    # it escaped every caller's guard, including runner's spawn preflight, which calls the
-    # anchor check unwrapped and would fail the spawn outright.
+    # it escaped every caller's guard, which catches only CredentialsError.
     cred = tmp_path / "creds.json"
     for payload in ('"just-a-string"', "[]", "null", "42"):
         cred.write_text(payload)
