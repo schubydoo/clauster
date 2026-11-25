@@ -2482,19 +2482,77 @@ def test_dead_roster_pid_with_state_blocked_is_not_live(tmp_path: Path, monkeypa
     _write_job(jobs, "bd1cea2f", _state(state="blocked"))
     roster = _roster(tmp_path, {"bd1cea2f": {"pid": 4242, "procStart": "100"}})
     monkeypatch.setattr(supervisor, "is_live_process", lambda *a, **k: False)  # pid is gone
+    monkeypatch.setattr(supervisor, "proc_is_gone", lambda pid: True)
     [job] = supervisor.list_background_jobs(jobs, roster)
     assert (job.worker_checked, job.live) == (True, False)
 
 
-def test_recycled_pid_with_state_working_is_not_live(tmp_path: Path, monkeypatch):
-    # Same pid, another process one tick later: the pid+ticks match fails, so the worker is
-    # gone, and the last `working` state does not bring the job back to life.
+@pytest.mark.parametrize("state,live", [("working", True), ("blocked", True), ("done", False)])
+def test_running_pid_that_does_not_match_keeps_the_last_state(
+    tmp_path: Path, monkeypatch, state, live
+):
+    # Same pid, another process one tick later. Clauster cannot tell that recycled pid from
+    # a live worker whose procStart it cannot compare, so the roster does not settle it,
+    # and the last state counts as before: no resume over a worker that may still run.
     jobs = tmp_path / "jobs"
-    _write_job(jobs, "bd1cea2f", _state(state="working"))
+    _write_job(jobs, "bd1cea2f", _state(state=state))
     roster = _roster(tmp_path, {"bd1cea2f": {"pid": 4242, "procStart": "770579"}})
     _fake_worker(monkeypatch, ticks=770580, create_time=1_007_705.79, btime=1_000_000.0)
+    monkeypatch.setattr(supervisor, "proc_is_gone", lambda pid: False)
     [job] = supervisor.list_background_jobs(jobs, roster)
-    assert (job.worker_alive, job.live) == (False, False)
+    assert (job.worker_alive, job.worker_checked, job.live) == (False, False, live)
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {"pid": 4242},  # no procStart: the CLI may leave it out (Windows writes procStartFt)
+        {"pid": 4242, "procStart": None},
+        {"pid": 4242, "procStart": "131234567890123456"},  # a FILETIME-sized digit string
+    ],
+    ids=["absent", "null", "filetime"],
+)
+def test_running_worker_without_a_comparable_procstart_stays_live(
+    tmp_path: Path, monkeypatch, entry
+):
+    jobs = tmp_path / "jobs"
+    cwd = tmp_path / "proj"
+    cwd.mkdir()
+    _write_job(jobs, "bd1cea2f", _state(state="blocked", cwd=str(cwd)))
+    roster = _roster(tmp_path, {"bd1cea2f": entry})
+    monkeypatch.setattr(supervisor, "proc_start_ticks", lambda pid: None)
+    monkeypatch.setattr(supervisor, "jiffies_to_epoch", lambda j: None)
+    monkeypatch.setattr(supervisor, "proc_is_gone", lambda pid: False)
+    [job] = supervisor.list_background_jobs(jobs, roster)
+    assert (job.worker_alive, job.worker_checked, job.live) == (False, False, True)
+    trusted, seen = _patch_dispatch(monkeypatch)
+    with pytest.raises(supervisor.ResumeError, match="still live"):
+        supervisor.resume_background_job(
+            "bd1cea2f",
+            permission_mode="plan",
+            refuse_cwd=lambda cwd: None,
+            gate=supervisor.ResumeGate(),
+            jobs_dir=jobs,
+            roster_json=roster,
+        )
+    assert seen == {}
+
+
+@pytest.mark.parametrize("pid", [None, "4242", True, 0, -1])
+def test_roster_entry_without_a_usable_pid_keeps_the_last_state(tmp_path: Path, pid):
+    jobs = tmp_path / "jobs"
+    _write_job(jobs, "bd1cea2f", _state(state="working"))
+    roster = _roster(tmp_path, {"bd1cea2f": {"pid": pid, "procStart": "770579"}})
+    [job] = supervisor.list_background_jobs(jobs, roster)
+    assert (job.worker_checked, job.live) == (False, True)
+
+
+def test_roster_entry_that_is_not_an_object_keeps_the_last_state(tmp_path: Path):
+    jobs = tmp_path / "jobs"
+    _write_job(jobs, "bd1cea2f", _state(state="blocked"))
+    roster = _roster(tmp_path, {"bd1cea2f": "garbage"})
+    [job] = supervisor.list_background_jobs(jobs, roster)
+    assert (job.worker_checked, job.live) == (False, True)
 
 
 def test_live_worker_with_a_stale_done_state_is_live(tmp_path: Path, monkeypatch):
@@ -2553,11 +2611,19 @@ def test_dashboard_reads_the_server_live_rule():
     assert "agentLive(j) { return j.live === true; }" in script
     rail = script[script.index("agentRailClass(j) {") :]
     rail = rail[: rail.index("},")]
-    assert 'if (!this.agentLive(j)) return "sess-dead";' in rail
+    # The ended check comes first: a dead worker with state `blocked` must not get sess-warn.
+    assert rail.index('if (!this.agentLive(j)) return "sess-dead";') < rail.index('"blocked"')
     assert "includes(j.state)" not in script
     assert "includes(j.state)" not in page
     assert 'x-show="j.detail && agentLive(j)"' in page
+    assert 'x-show="agentLive(j) && j.needs && j.needs !== j.detail"' in page
     assert 'x-show="!agentLive(j) && j.session_id"' in page  # Resume only for an ended job
+    # A successful resume holds the button, so a second click cannot start a copy.
+    resume = script[script.index("async resumeAgent(j) {") :]
+    resume = resume[: resume.index("\n      },")]
+    assert "held = true;" in resume
+    assert "finally { if (!held) this.agentResuming[j.id] = false; }" in resume
+    assert 'b.id === j.id ? ": resumed" : ": resumed as " + b.id' in resume
 
 
 _SID = "bd1cea2f-19ef-4eef-97e9-bdd466105f17"  # the sessionId in _state()
@@ -2679,6 +2745,8 @@ def test_parse_job_id_reads_the_copy_id_not_the_original():
     assert supervisor.parse_job_id(_FLAGS_COPY_NOTE) == "f64d2d7a"
     assert supervisor.parse_job_id(_COPY_NOTE + _COPY_BANNER) == "c59c2bec"
     assert supervisor.parse_job_id("started a copy as c59c2bec") == "c59c2bec"
+    # A longer hex token is not a job id: no 8-hex prefix of it is taken.
+    assert supervisor.parse_job_id("started a copy as c59c2bec1f") is None
 
 
 @pytest.mark.parametrize(

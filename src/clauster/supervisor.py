@@ -56,6 +56,7 @@ from .procutil import (
     jiffies_to_epoch,
     lstart_to_epoch,
     proc_create_time,
+    proc_is_gone,
     proc_start_ticks,
     start_time_is_drift_prone,
 )
@@ -236,8 +237,29 @@ def _job_from_state(job_id: str, data: dict, workers: dict[str, dict] | None) ->
         updated_at=_clean(data.get("updatedAt")),
         worker_pid=pid if alive and isinstance(pid, int) else None,
         worker_alive=alive,
-        worker_checked=workers is not None,
+        worker_checked=_worker_checked(workers, worker, pid, alive=alive),
     )
+
+
+def _worker_checked(
+    workers: dict[str, dict] | None, worker: object, pid: object, *, alive: bool
+) -> bool:
+    """Whether the roster settles if the job has a worker, so its last state must not count.
+
+    Settled: the roster lists no worker for the job (the supervisor drops a worker that
+    ended), the worker matched, or its pid runs no process. Not settled: no roster, an
+    entry without a usable pid, or a running pid whose identity did not match. The last
+    case is a recycled pid, or a ``procStart`` that this platform cannot compare (absent,
+    or another form); the two cannot be told apart, so the last state keeps counting there,
+    as it did before TASK-588, and no resume starts a second worker for the session.
+    """
+    if workers is None:
+        return False
+    if worker is None or alive:
+        return True
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return False
+    return proc_is_gone(pid)
 
 
 def list_background_jobs(

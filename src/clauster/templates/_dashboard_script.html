@@ -5731,16 +5731,23 @@
         const label = j.name || j.id;
         if (this.agentResuming[j.id]) return;  // a resume is already in flight — ignore the double-click
         this.agentResuming[j.id] = true;
+        let held = false;
         try {
           const res = await fetch(ROOT + "/api/agents/" + encodeURIComponent(j.id) + "/resume", { method: "POST" });
           if (this._authExpired(res)) return;
           const b = await res.json().catch(() => ({}));
-          if (res.ok && b.id) this.toast(label + (b.id === j.id ? ": resumed" : ": resumed as " + b.id), "success");
+          if (res.ok && b.id) {
+            this.toast(label + (b.id === j.id ? ": resumed" : ": resumed as " + b.id), "success");
+            // Hold the button for a while (TASK-588): until the new worker shows in the roster
+            // the row can still read as ended, and a second click makes claude start a copy.
+            held = true;
+            setTimeout(() => { this.agentResuming[j.id] = false; }, 10000);
+          }
           else this.toast(label + ": resume failed — " + this._errDetail(res, b), "error");
         } catch (e) { this.toast(label + ": resume failed", "error"); }
-        // finally: reset on EVERY path (incl. the 401 early-return) so the button can't
+        // finally: reset on EVERY other path (incl. the 401 early-return) so the button can't
         // wedge on "Resuming…" if the login redirect is slow/blocked.
-        finally { this.agentResuming[j.id] = false; }
+        finally { if (!held) this.agentResuming[j.id] = false; }
         await this.refresh();
       },
       // Forget = drop a stopped/ended session's record so it leaves Recent/resumable.

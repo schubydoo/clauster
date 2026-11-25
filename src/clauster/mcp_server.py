@@ -301,6 +301,7 @@ def _summarize_job(job: BackgroundJob) -> dict[str, Any]:
         "session_id": job.session_id,
         "worker_pid": job.worker_pid,
         "worker_alive": job.worker_alive,
+        "live": job.live,  # the dashboard's Stop-versus-Resume rule (TASK-588)
         "created_at": job.created_at or None,
         "updated_at": job.updated_at or None,
     }

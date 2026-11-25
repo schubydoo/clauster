@@ -435,8 +435,9 @@ class BackgroundJob(BaseModel):
     updated_at: str = ""
     worker_pid: int | None = None  # set only when worker_alive
     worker_alive: bool = False
-    # True when the supervisor's roster was read, so worker_alive is the answer; False when
-    # the roster is missing or unreadable and only the last state is left (TASK-588).
+    # True when the supervisor's roster settles whether the job has a worker, so
+    # worker_alive is the answer; False when there is no roster, or its entry for the job
+    # names a running pid that Clauster could not match (TASK-588).
     worker_checked: bool = False
 
     @computed_field  # type: ignore[prop-decorator]
@@ -444,10 +445,10 @@ class BackgroundJob(BaseModel):
     def live(self) -> bool:
         """Whether the job still has a worker: the rule for Stop versus Resume and Forget.
 
-        With a roster to check, only a live worker counts: a worker that ended leaves its
-        last ``state`` on disk (often ``blocked``), and that state must not keep the job
-        live (TASK-588, issue 1958). Without a roster, the last ``working``/``blocked``
-        state is the only sign, so it still counts.
+        When the roster settles it, only a live worker counts: a worker that ended leaves
+        its last ``state`` on disk (often ``blocked``), and that state must not keep the job
+        live (TASK-588, issue 1958). Otherwise the last ``working``/``blocked`` state is
+        the only sign, so it still counts.
         """
         if self.worker_alive:
             return True
