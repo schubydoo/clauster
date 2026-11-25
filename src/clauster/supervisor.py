@@ -345,19 +345,20 @@ class DispatchError(RuntimeError):
     """A ``claude --bg`` dispatch failed (bad exit, timeout, or no job id printed)."""
 
 
-def parse_job_id(stdout: str) -> str | None:
-    """Extract the dispatched 8-hex job id from ``claude --bg`` stdout.
+def parse_job_id(stdout: str, *, stderr: str) -> str | None:
+    """Extract the dispatched 8-hex job id from ``claude --bg`` output.
 
-    The success banner is ``backgrounded · <id>``; that labelled form wins. Next is
-    the copy note of a resume (``started a copy as <id>``), whose first 8-hex token is
-    the original id, not the new one. A bare 8-hex token is accepted as a last fallback.
-    Returns None when no id-shaped token is present (so the caller can fail closed
-    rather than invent an id).
+    The success banner on stdout is ``backgrounded · <id>``; that labelled form wins.
+    Next is the copy note of a resume (``started a copy as <id>``), on stdout or stderr,
+    whose first 8-hex token is the original id, not the new one. A bare 8-hex token on
+    stdout is accepted only as the last fallback, after both labelled forms; stderr is
+    never read for a bare token, because any id can appear there. Returns None when no
+    id-shaped token is present (so the caller can fail closed rather than invent an id).
     """
     labelled = _DISPATCH_ID_RE.search(stdout)
     if labelled is not None:
         return labelled.group(1)
-    copy = _COPY_ID_RE.search(stdout)
+    copy = _COPY_ID_RE.search(stdout) or _COPY_ID_RE.search(stderr)
     if copy is not None:
         return copy.group(1)
     bare = _BARE_ID_RE.search(stdout)
@@ -519,15 +520,10 @@ def dispatch_background_job(
     if proc.returncode != 0:
         detail = _clean(proc.stderr) or _clean(proc.stdout) or f"exit {proc.returncode}"
         raise DispatchError(f"`claude --bg` failed (exit {proc.returncode}): {detail}")
-    job_id = parse_job_id(proc.stdout or "")
-    # The copy note goes to stderr. Only that labelled note is read there: a bare 8-hex
-    # token on stderr can be any id, the original one included.
-    copy = _COPY_ID_RE.search(proc.stderr or "")
-    if job_id is None and copy is not None:
-        job_id = copy.group(1)
+    job_id = parse_job_id(proc.stdout or "", stderr=proc.stderr or "")
     if job_id is None:
         raise DispatchError("`claude --bg` exited 0 but printed no job id")
-    if copy is not None:
+    if _COPY_ID_RE.search(proc.stdout or "") or _COPY_ID_RE.search(proc.stderr or ""):
         _log.warning(
             "`claude --bg --resume` started a copy as %s instead of continuing the session",
             job_id,

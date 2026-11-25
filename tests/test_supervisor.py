@@ -662,12 +662,15 @@ def test_build_dispatch_argv_dash_prompt_is_positional_after_separator():
 
 
 def test_parse_job_id_banner_ack_noise_and_fallback():
-    assert supervisor.parse_job_id(_BANNER) == "29e8026f"
+    assert supervisor.parse_job_id(_BANNER, stderr="") == "29e8026f"
     # the dispatcher's internal retry line still carries the right id
-    assert supervisor.parse_job_id("bg: ack-timeout for 8662a9aa, retrying (1/2)") == "8662a9aa"
+    assert (
+        supervisor.parse_job_id("bg: ack-timeout for 8662a9aa, retrying (1/2)", stderr="")
+        == "8662a9aa"
+    )
     # no banner -> bare-hex fallback
-    assert supervisor.parse_job_id("queued deadbeef ok") == "deadbeef"
-    assert supervisor.parse_job_id("nothing id-shaped here") is None
+    assert supervisor.parse_job_id("queued deadbeef ok", stderr="") == "deadbeef"
+    assert supervisor.parse_job_id("nothing id-shaped here", stderr="") is None
 
 
 def _patch_dispatch(monkeypatch, *, proc=None, run=None):
@@ -2741,14 +2744,46 @@ _FLAGS_COPY_NOTE = (
 )
 
 
+def test_a_labelled_copy_note_on_stderr_beats_a_bare_stdout_token():
+    # A reworded banner with no `backgrounded ·` label still leaves the ORIGINAL id as a
+    # bare token on stdout; the labelled note on stderr must win over that fallback.
+    reworded = "resume hint: claude attach bd1cea2f\n"
+    assert supervisor.parse_job_id(reworded, stderr=_FLAGS_COPY_NOTE) == "f64d2d7a"
+    # The bare stdout fallback still applies when no labelled form exists anywhere.
+    assert supervisor.parse_job_id(reworded, stderr="some other stderr") == "bd1cea2f"
+    # stderr is never read for a bare token.
+    assert supervisor.parse_job_id("", stderr="bd1cea2f") is None
+    # The labelled banner beats a copy note that names a different id.
+    assert supervisor.parse_job_id("backgrounded · 29e8026f\n", stderr=_FLAGS_COPY_NOTE) == (
+        "29e8026f"
+    )
+
+
+@pytest.mark.parametrize(
+    "stdout,stderr",
+    [
+        ("resume hint: claude attach bd1cea2f\n", _FLAGS_COPY_NOTE),  # note on stderr
+        (_FLAGS_COPY_NOTE, ""),  # note on stdout
+    ],
+)
+def test_dispatch_returns_and_logs_the_copy_id(tmp_path, monkeypatch, caplog, stdout, stderr):
+    _patch_dispatch(monkeypatch, proc=_FakeProc(stdout=stdout, stderr=stderr))
+    with caplog.at_level(logging.WARNING, logger="clauster.supervisor"):
+        job_id = supervisor.dispatch_background_job(
+            tmp_path, permission_mode="default", remote_control=False, before_spawn=None
+        )
+    assert job_id == "f64d2d7a"
+    assert "started a copy as f64d2d7a" in caplog.text
+
+
 def test_parse_job_id_reads_the_copy_id_not_the_original():
     # Without the banner, the bare fallback found the ORIGINAL id first in the copy note.
-    assert supervisor.parse_job_id(_COPY_NOTE) == "c59c2bec"
-    assert supervisor.parse_job_id(_FLAGS_COPY_NOTE) == "f64d2d7a"
-    assert supervisor.parse_job_id(_COPY_NOTE + _COPY_BANNER) == "c59c2bec"
-    assert supervisor.parse_job_id("started a copy as c59c2bec") == "c59c2bec"
+    assert supervisor.parse_job_id(_COPY_NOTE, stderr="") == "c59c2bec"
+    assert supervisor.parse_job_id(_FLAGS_COPY_NOTE, stderr="") == "f64d2d7a"
+    assert supervisor.parse_job_id(_COPY_NOTE + _COPY_BANNER, stderr="") == "c59c2bec"
+    assert supervisor.parse_job_id("started a copy as c59c2bec", stderr="") == "c59c2bec"
     # A longer hex token is not a job id: no 8-hex prefix of it is taken.
-    assert supervisor.parse_job_id("started a copy as c59c2bec1f") is None
+    assert supervisor.parse_job_id("started a copy as c59c2bec1f", stderr="") is None
 
 
 @pytest.mark.parametrize(

@@ -475,10 +475,9 @@ no longer connected to claude.ai.
 A background agent is live only while Clauster finds its worker process in the
 roster file of Claude Code (`~/.claude/daemon/roster.json`). When the worker
 stops, the row shows **Resume** and **Forget**, also when its last state is still
-`blocked` or `working`. If Clauster cannot read the roster file, or the roster has
-an entry for the agent that Clauster cannot use or that names a running process that
-Clauster cannot match to the agent, it uses the last state,
-and a `working` or `blocked` agent then stays live.
+`blocked` or `working`. If Clauster cannot read the roster file, cannot use the
+roster entry for the agent, or cannot match the running process that the entry
+names, it uses the last state, and a `working` or `blocked` agent then stays live.
 
 **Fix:**
 

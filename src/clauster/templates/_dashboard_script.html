@@ -1036,8 +1036,7 @@
       _hostedIsEnded(h) { return ["stopped", "crashed", "error"].includes(h.status); },
       // A detached session is "live" while its worker process runs; once ended there's no
       // process to Stop — only Resume or Forget (remove the record). The server computes the
-      // rule (`live`): a working/blocked state counts only when there was no roster to check
-      // the worker against, because an ended worker leaves its last state on disk (TASK-588).
+      // rule: see BackgroundJob.live and supervisor._worker_checked (TASK-588).
       agentLive(j) { return j.live === true; },
       liveAgents() { return this.agents.filter((j) => this.agentLive(j)); },
       endedAgents() { return this.agents.filter((j) => !this.agentLive(j)); },
@@ -5725,8 +5724,8 @@
         await this.refresh();
       },
       // Resume an ended bg agent: `--bg --resume <session uuid>` continues the prior
-      // conversation (#336). Claude keeps the job id, or starts a copy under a new id when it
-      // reads the session as running; the toast names a new id, and the refresh shows its row.
+      // conversation (#336). Claude keeps the job id or starts a copy under a new id (see
+      // supervisor.resume_background_job); the toast names a new id, and the refresh shows it.
       async resumeAgent(j) {
         const label = j.name || j.id;
         if (this.agentResuming[j.id]) return;  // a resume is already in flight — ignore the double-click
@@ -5740,7 +5739,8 @@
             this.toast(label + (b.id === j.id ? ": resumed" : ": resumed as " + b.id), "success");
             // Hold the button for a while (TASK-588): until the new worker shows in the roster
             // the row can still read as ended, and a second click in this tab would make claude
-            // start a copy. Only this tab and this row are held; a copy's old row stays ended.
+            // start a copy. Only this tab and this row are held. When claude starts a copy, the row
+            // of the old id stays ended.
             held = true;
             setTimeout(() => { this.agentResuming[j.id] = false; }, 10000);
           }
