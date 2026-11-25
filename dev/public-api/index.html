@@ -1690,7 +1690,7 @@ changed.</p>
 <tr>
 <td>GET</td>
 <td><code>/agents</code></td>
-<td>List <code>claude --bg</code> background sessions</td>
+<td>List <code>claude --bg</code> background sessions. <code>live</code> is <code>true</code> while the worker process runs; <code>worker_checked</code> is <code>false</code> when the roster file of Claude Code could not be read, has an entry for the job that Clauster cannot use, or names a running process that Clauster could not match, and <code>live</code> then follows a last state of <code>working</code> or <code>blocked</code></td>
 </tr>
 <tr>
 <td>POST</td>
@@ -1705,7 +1705,7 @@ changed.</p>
 <tr>
 <td>POST</td>
 <td><code>/agents/{job_id}/resume</code></td>
-<td>Resume an ended background session, in <code>instance_defaults.permission_mode</code> (<code>403</code> when the <a href="../security/#bypasspermissions-footgun-gate">bypass ceiling</a> refuses that mode; <code>409</code> when the job does not exist, the session is still live, has no resumable session id, has no valid recorded directory that can be resolved, or its directory no longer exists as a folder or cannot be checked; <code>504</code> when the directory checks take longer than 20 seconds, for example on a hung network mount, and the job is not resumed)</td>
+<td>Resume an ended background session, in <code>instance_defaults.permission_mode</code>, with <code>--remote-control</code> when the session was registered with claude.ai. Returns the job <code>id</code> that <code>claude</code> printed: the same id, or a new one when <code>claude</code> started a copy. Errors: <code>403</code> when the <a href="../security/#bypasspermissions-footgun-gate">bypass ceiling</a> refuses that mode; <code>409</code> when the job does not exist, the session is still live, has no resumable session id, has no valid recorded directory that can be resolved, or its directory no longer exists as a folder or cannot be checked; <code>504</code> when the directory checks take longer than 20 seconds, for example on a hung network mount, and the job is not resumed</td>
 </tr>
 </tbody>
 </table>
