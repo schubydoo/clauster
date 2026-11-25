@@ -585,12 +585,19 @@ class _FakeProc:
 
 
 def test_build_dispatch_argv_bare_and_full():
-    assert supervisor.build_dispatch_argv("/abs/claude", permission_mode="inherit") == [
+    assert supervisor.build_dispatch_argv(
+        "/abs/claude", permission_mode="inherit", remote_control=False
+    ) == [
         "/abs/claude",
         "--bg",
     ]
     assert supervisor.build_dispatch_argv(
-        "/abs/claude", rc_name="proj-rc", model="opus", permission_mode="auto", prompt="go"
+        "/abs/claude",
+        rc_name="proj-rc",
+        model="opus",
+        permission_mode="auto",
+        remote_control=False,
+        prompt="go",
     ) == [
         "/abs/claude",
         "--bg",
@@ -609,7 +616,9 @@ def test_build_dispatch_argv_omits_permission_mode_for_inherit():
     # #1231: the dashboard's per-project picker feeds both the bridge launch and this
     # background dispatch, so the sentinel must drop the flag here too rather than hand
     # `claude --bg` a mode string it does not know.
-    argv = supervisor.build_dispatch_argv("/abs/claude", permission_mode="inherit", prompt="go")
+    argv = supervisor.build_dispatch_argv(
+        "/abs/claude", permission_mode="inherit", remote_control=False, prompt="go"
+    )
     assert argv == ["/abs/claude", "--bg", "--", "go"]
 
 
@@ -634,7 +643,7 @@ def test_dispatch_rejects_a_none_permission_mode_before_trust(tmp_path, monkeypa
     trusted, seen = _patch_dispatch(monkeypatch)
     with pytest.raises(supervisor.DispatchError, match="invalid permission mode: None"):
         supervisor.dispatch_background_job(
-            tmp_path, prompt="hi", permission_mode=None, before_spawn=None
+            tmp_path, prompt="hi", permission_mode=None, remote_control=False, before_spawn=None
         )
     assert trusted == []
     assert seen == {}
@@ -643,7 +652,7 @@ def test_dispatch_rejects_a_none_permission_mode_before_trust(tmp_path, monkeypa
 def test_build_dispatch_argv_dash_prompt_is_positional_after_separator():
     # a prompt that looks like a flag lands after `--`, so claude can't parse it as one
     assert supervisor.build_dispatch_argv(
-        "/abs/claude", permission_mode="inherit", prompt="--dangerously-skip"
+        "/abs/claude", permission_mode="inherit", remote_control=False, prompt="--dangerously-skip"
     ) == [
         "/abs/claude",
         "--bg",
@@ -685,6 +694,7 @@ def test_dispatch_happy_pretrusts_and_returns_id(tmp_path, monkeypatch):
         prompt="hi",
         rc_name="proj-rc",
         permission_mode="inherit",
+        remote_control=False,
         binary="claude",
         claude_json=cj,
         before_spawn=None,
@@ -697,7 +707,9 @@ def test_dispatch_happy_pretrusts_and_returns_id(tmp_path, monkeypatch):
 
 def test_dispatch_default_claude_json_path(tmp_path, monkeypatch):
     trusted, _ = _patch_dispatch(monkeypatch)
-    supervisor.dispatch_background_job(tmp_path, permission_mode="default", before_spawn=None)
+    supervisor.dispatch_background_job(
+        tmp_path, permission_mode="default", remote_control=False, before_spawn=None
+    )
     assert trusted == [(tmp_path,)]  # no claude_json -> trust_directory called with cwd only
 
 
@@ -705,7 +717,7 @@ def test_dispatch_rejects_nondir_cwd(tmp_path, monkeypatch):
     _patch_dispatch(monkeypatch)
     with pytest.raises(supervisor.DispatchError, match="not a directory"):
         supervisor.dispatch_background_job(
-            tmp_path / "nope", permission_mode="default", before_spawn=None
+            tmp_path / "nope", permission_mode="default", remote_control=False, before_spawn=None
         )
 
 
@@ -715,7 +727,9 @@ def test_dispatch_rejects_flag_like_or_nonstring_values(tmp_path, monkeypatch, f
     trusted, _ = _patch_dispatch(monkeypatch)
     with pytest.raises(supervisor.DispatchError, match="invalid"):
         supervisor.dispatch_background_job(
-            tmp_path, **{"permission_mode": "default", field: bad}, before_spawn=None
+            tmp_path,
+            **{"permission_mode": "default", "remote_control": False, field: bad},
+            before_spawn=None,
         )
     assert trusted == []  # rejected before the trust write — no side effect
 
@@ -727,6 +741,7 @@ def test_dispatch_rejects_nonstring_prompt_before_trust(tmp_path, monkeypatch):
             tmp_path,
             prompt=["not", "a", "string"],
             permission_mode="default",
+            remote_control=False,
             before_spawn=None,
         )
     assert trusted == []  # a malformed request must not trust the cwd then 500
@@ -735,13 +750,17 @@ def test_dispatch_rejects_nonstring_prompt_before_trust(tmp_path, monkeypatch):
 def test_dispatch_nonzero_exit_raises_with_redacted_detail(tmp_path, monkeypatch):
     _patch_dispatch(monkeypatch, proc=_FakeProc(returncode=1, stderr="boom"))
     with pytest.raises(supervisor.DispatchError, match="exit 1.*boom"):
-        supervisor.dispatch_background_job(tmp_path, permission_mode="default", before_spawn=None)
+        supervisor.dispatch_background_job(
+            tmp_path, permission_mode="default", remote_control=False, before_spawn=None
+        )
 
 
 def test_dispatch_no_id_raises(tmp_path, monkeypatch):
     _patch_dispatch(monkeypatch, proc=_FakeProc(stdout="all done, nothing here"))
     with pytest.raises(supervisor.DispatchError, match="no job id"):
-        supervisor.dispatch_background_job(tmp_path, permission_mode="default", before_spawn=None)
+        supervisor.dispatch_background_job(
+            tmp_path, permission_mode="default", remote_control=False, before_spawn=None
+        )
 
 
 def test_dispatch_timeout_raises(tmp_path, monkeypatch):
@@ -751,14 +770,16 @@ def test_dispatch_timeout_raises(tmp_path, monkeypatch):
     _patch_dispatch(monkeypatch, run=boom)
     with pytest.raises(supervisor.DispatchError, match="timed out"):
         supervisor.dispatch_background_job(
-            tmp_path, permission_mode="default", timeout=5, before_spawn=None
+            tmp_path, permission_mode="default", remote_control=False, timeout=5, before_spawn=None
         )
 
 
 def test_dispatch_claude_not_found_propagates(tmp_path, monkeypatch):
     monkeypatch.setattr(supervisor, "resolve_binary", _raise_not_found)
     with pytest.raises(ClaudeNotFound):
-        supervisor.dispatch_background_job(tmp_path, permission_mode="default", before_spawn=None)
+        supervisor.dispatch_background_job(
+            tmp_path, permission_mode="default", remote_control=False, before_spawn=None
+        )
 
 
 def _raise_not_found(_binary):
@@ -782,6 +803,7 @@ def test_dispatch_unparseable_claude_json_raises_without_spawning(tmp_path, monk
             cwd,
             prompt="hi",
             permission_mode="default",
+            remote_control=False,
             claude_json=cj,
             before_spawn=None,
         )
@@ -806,7 +828,9 @@ def test_dispatch_trusts_before_spawning_subprocess(tmp_path, monkeypatch):
 
     monkeypatch.setattr(supervisor.subprocess, "run", _run)
 
-    supervisor.dispatch_background_job(tmp_path, permission_mode="default", before_spawn=None)
+    supervisor.dispatch_background_job(
+        tmp_path, permission_mode="default", remote_control=False, before_spawn=None
+    )
 
     assert calls == ["trust", "spawn"]  # trust strictly precedes the subprocess spawn
 
@@ -1264,7 +1288,7 @@ _UUID = "29e8026f-1234-4abc-8def-0123456789ab"  # a full RFC-4122 session UUID
 
 def test_build_dispatch_argv_resume():
     assert supervisor.build_dispatch_argv(
-        "/abs/claude", permission_mode="inherit", resume=_UUID
+        "/abs/claude", permission_mode="inherit", remote_control=False, resume=_UUID
     ) == [
         "/abs/claude",
         "--bg",
@@ -1288,12 +1312,23 @@ def test_dispatch_rejects_invalid_resume(tmp_path, monkeypatch):
     monkeypatch.setattr(supervisor, "trust_directory", lambda *a, **k: None)
     with pytest.raises(supervisor.DispatchError, match="resume session id"):
         supervisor.dispatch_background_job(
-            tmp_path, permission_mode="default", resume="--evil", before_spawn=None
+            tmp_path,
+            permission_mode="default",
+            remote_control=False,
+            resume="--evil",
+            before_spawn=None,
         )
 
 
 def _fake_job(**kw):
-    base = {"id": "29e8026f", "session_id": _UUID, "cwd": Path("/proj"), "worker_alive": False}
+    base = {
+        "id": "29e8026f",
+        "session_id": _UUID,
+        "cwd": Path("/proj"),
+        "worker_alive": False,
+        "live": False,
+        "bridge_session_id": None,
+    }
     base.update(kw)
     return SimpleNamespace(**base)
 
@@ -1453,7 +1488,7 @@ def test_resume_background_job_refused_cwd_never_dispatches(monkeypatch):
     "job,match",
     [
         (None, "no background job"),
-        (_fake_job(worker_alive=True), "still live"),  # API mirrors the UI's live gate
+        (_fake_job(worker_alive=True, live=True), "still live"),  # API mirrors the UI's gate
         (_fake_job(session_id=None), "no resumable session id"),
         (_fake_job(session_id="29e8026f"), "no resumable session id"),  # 8-hex is not a uuid
         (_fake_job(cwd=None), "no recorded working directory"),
@@ -2037,7 +2072,10 @@ def test_dispatch_runs_before_spawn_after_the_trust_write(tmp_path, monkeypatch)
         lambda argv, **kw: calls.append("spawn") or _FakeProc(stdout=_BANNER),
     )
     supervisor.dispatch_background_job(
-        tmp_path, permission_mode="default", before_spawn=lambda: calls.append("gate")
+        tmp_path,
+        permission_mode="default",
+        remote_control=False,
+        before_spawn=lambda: calls.append("gate"),
     )
     assert calls == ["trust", "gate", "spawn"]
 
@@ -2418,3 +2456,287 @@ async def test_resume_within_limit_cancel_while_waiting_for_a_claimed_dispatch_l
     assert loop_errors == []
     assert "0000d013 failed after its request ended: DispatchError" in caplog.text
     assert "/secret/path" not in caplog.text
+
+
+# ----- TASK-588: liveness of an ended worker, Resume with Remote Control -------------------
+# Issue 1958. A worker that ended left `state: blocked` on disk, and the dashboard rule
+# `worker_alive || state in (working, blocked)` kept the row live: only Stop showed, and
+# Stop removes the job. The rule now lives in `BackgroundJob.live`.
+
+
+@pytest.mark.parametrize("state", ["blocked", "working"])
+def test_ended_worker_with_a_live_state_is_not_live(tmp_path: Path, state):
+    # The shape seen in a sandbox with claude 2.1.332 (2026-11-25): the transient supervisor
+    # exited and left a roster with no workers; the job kept its last state.
+    jobs = tmp_path / "jobs"
+    _write_job(jobs, "bd1cea2f", _state(state=state))
+    roster = _roster(tmp_path, {})
+    [job] = supervisor.list_background_jobs(jobs, roster)
+    assert job.worker_alive is False
+    assert job.worker_checked is True
+    assert job.live is False
+
+
+def test_dead_roster_pid_with_state_blocked_is_not_live(tmp_path: Path, monkeypatch):
+    jobs = tmp_path / "jobs"
+    _write_job(jobs, "bd1cea2f", _state(state="blocked"))
+    roster = _roster(tmp_path, {"bd1cea2f": {"pid": 4242, "procStart": "100"}})
+    monkeypatch.setattr(supervisor, "is_live_process", lambda *a, **k: False)  # pid is gone
+    [job] = supervisor.list_background_jobs(jobs, roster)
+    assert (job.worker_checked, job.live) == (True, False)
+
+
+def test_recycled_pid_with_state_working_is_not_live(tmp_path: Path, monkeypatch):
+    # Same pid, another process one tick later: the pid+ticks match fails, so the worker is
+    # gone, and the last `working` state does not bring the job back to life.
+    jobs = tmp_path / "jobs"
+    _write_job(jobs, "bd1cea2f", _state(state="working"))
+    roster = _roster(tmp_path, {"bd1cea2f": {"pid": 4242, "procStart": "770579"}})
+    _fake_worker(monkeypatch, ticks=770580, create_time=1_007_705.79, btime=1_000_000.0)
+    [job] = supervisor.list_background_jobs(jobs, roster)
+    assert (job.worker_alive, job.live) == (False, False)
+
+
+def test_live_worker_with_a_stale_done_state_is_live(tmp_path: Path, monkeypatch):
+    jobs = tmp_path / "jobs"
+    _write_job(jobs, "bd1cea2f", _state(state="done"))
+    roster = _roster(tmp_path, {"bd1cea2f": {"pid": 4242, "procStart": "770579"}})
+    _fake_worker(monkeypatch, ticks=770579, create_time=1_007_705.79, btime=1_000_000.0)
+    [job] = supervisor.list_background_jobs(jobs, roster)
+    assert (job.worker_alive, job.worker_checked, job.live) == (True, True, True)
+
+
+@pytest.mark.parametrize(
+    "roster_text",
+    [None, "{not json", '{"proto": 1}', '{"workers": []}', "[]"],
+    ids=["missing", "malformed", "no-workers-key", "workers-not-a-map", "not-an-object"],
+)
+@pytest.mark.parametrize("state,live", [("working", True), ("blocked", True), ("done", False)])
+def test_without_a_roster_the_last_state_still_counts(tmp_path: Path, roster_text, state, live):
+    # The case the old state clause protected: with no roster to check the worker against,
+    # the last working/blocked state is the only sign that a worker runs.
+    jobs = tmp_path / "jobs"
+    _write_job(jobs, "bd1cea2f", _state(state=state))
+    roster = tmp_path / "roster.json"
+    if roster_text is not None:
+        roster.write_text(roster_text, encoding="utf-8")
+    [job] = supervisor.list_background_jobs(jobs, roster)
+    assert job.worker_checked is False
+    assert job.live is live
+
+
+def test_read_roster_workers_tells_an_empty_roster_from_none(tmp_path: Path):
+    assert supervisor.read_roster_workers(tmp_path / "absent.json") is None
+    assert supervisor.read_roster_workers(_roster(tmp_path, {})) == {}
+    # load_roster_workers keeps its old answer for both.
+    assert supervisor.load_roster_workers(tmp_path / "absent.json") == {}
+    assert supervisor.load_roster_workers(_roster(tmp_path, {})) == {}
+
+
+def test_api_agents_serializes_live_and_worker_checked(write_config, tmp_path, monkeypatch):
+    jobs = tmp_path / "jobs"
+    _write_job(jobs, "bd1cea2f", _state(state="blocked"))
+    monkeypatch.setattr(supervisor, "JOBS_DIR", jobs)
+    monkeypatch.setattr(supervisor, "ROSTER_JSON", _roster(tmp_path, {}))
+    [item] = _client(write_config, tmp_path).get("/api/agents").json()
+    assert (item["state"], item["worker_checked"], item["live"]) == ("blocked", True, False)
+
+
+_TEMPLATES = Path(supervisor.__file__).parent / "templates"
+
+
+def test_dashboard_reads_the_server_live_rule():
+    # The dashboard has no JS test harness. Pin that each liveness use for a background row
+    # reads `live`, and that no copy of the old state clause is left for agents.
+    script = (_TEMPLATES / "_dashboard_script.html").read_text(encoding="utf-8")
+    page = (_TEMPLATES / "dashboard.html").read_text(encoding="utf-8")
+    assert "agentLive(j) { return j.live === true; }" in script
+    rail = script[script.index("agentRailClass(j) {") :]
+    rail = rail[: rail.index("},")]
+    assert 'if (!this.agentLive(j)) return "sess-dead";' in rail
+    assert "includes(j.state)" not in script
+    assert "includes(j.state)" not in page
+    assert 'x-show="j.detail && agentLive(j)"' in page
+    assert 'x-show="!agentLive(j) && j.session_id"' in page  # Resume only for an ended job
+
+
+_SID = "bd1cea2f-19ef-4eef-97e9-bdd466105f17"  # the sessionId in _state()
+
+
+def _resume_world(tmp_path: Path, *, state: dict, roster: dict | None) -> tuple[Path, Path]:
+    jobs = tmp_path / "jobs"
+    cwd = tmp_path / "proj"
+    cwd.mkdir()
+    _write_job(jobs, "bd1cea2f", _state(cwd=str(cwd), **state))
+    roster_path = _roster(tmp_path, roster) if roster is not None else tmp_path / "absent.json"
+    return jobs, roster_path
+
+
+def _run_resume(monkeypatch, jobs, roster, *, stdout=_BANNER, stderr=""):
+    _, seen = _patch_dispatch(monkeypatch, proc=_FakeProc(stdout=stdout, stderr=stderr))
+    new_id = supervisor.resume_background_job(
+        "bd1cea2f",
+        permission_mode="plan",
+        refuse_cwd=lambda cwd: None,
+        gate=supervisor.ResumeGate(),
+        binary="claude",
+        jobs_dir=jobs,
+        roster_json=roster,
+    )
+    return new_id, seen["argv"]
+
+
+def test_resume_of_a_claude_ai_job_adds_remote_control(tmp_path: Path, monkeypatch):
+    jobs, roster = _resume_world(
+        tmp_path, state={"state": "blocked", "bridgeSessionId": "cse_01abc"}, roster={}
+    )
+    new_id, argv = _run_resume(monkeypatch, jobs, roster)
+    assert new_id == "29e8026f"
+    assert argv == [
+        "/abs/claude",
+        "--bg",
+        "--resume",
+        _SID,
+        "--remote-control",
+        "--permission-mode",
+        "plan",
+    ]
+
+
+@pytest.mark.parametrize("bridge", [None, "", 5], ids=["absent", "empty", "not-a-string"])
+def test_resume_of_a_local_job_stays_local(tmp_path: Path, monkeypatch, bridge):
+    state: dict = {"state": "done"}
+    if bridge is not None:
+        state["bridgeSessionId"] = bridge
+    jobs, roster = _resume_world(tmp_path, state=state, roster={})
+    _, argv = _run_resume(monkeypatch, jobs, roster)
+    assert argv == ["/abs/claude", "--bg", "--resume", _SID, "--permission-mode", "plan"]
+
+
+def test_resume_without_a_roster_refuses_a_job_that_reads_blocked(tmp_path: Path, monkeypatch):
+    # No roster to check: the last `blocked` state counts as live, in the API as in the UI.
+    jobs, roster = _resume_world(tmp_path, state={"state": "blocked"}, roster=None)
+    trusted, seen = _patch_dispatch(monkeypatch)
+    with pytest.raises(supervisor.ResumeError, match="still live"):
+        supervisor.resume_background_job(
+            "bd1cea2f",
+            permission_mode="plan",
+            refuse_cwd=lambda cwd: None,
+            gate=supervisor.ResumeGate(),
+            jobs_dir=jobs,
+            roster_json=roster,
+        )
+    assert seen == {}
+    assert trusted == []
+
+
+def test_resume_of_an_ended_job_without_a_session_id_still_refuses(tmp_path: Path, monkeypatch):
+    jobs, roster = _resume_world(
+        tmp_path, state={"state": "blocked", "sessionId": None}, roster={}
+    )
+    with pytest.raises(supervisor.ResumeError, match="no resumable session id"):
+        _run_resume(monkeypatch, jobs, roster)
+
+
+# What claude 2.1.332 printed for a resume of a session it read as running (sandbox,
+# 2026-11-25): the note on stderr, the banner with the copy's id on stdout.
+_COPY_NOTE = (
+    "Starting background service…\n"
+    "note: session bd1cea2f is already running in the background, so this started a copy "
+    "as c59c2bec. `claude attach bd1cea2f` opens the original.\n"
+)
+_COPY_BANNER = "backgrounded · c59c2bec\n  claude agents             list sessions\n"
+
+
+def test_resume_returns_the_copy_id_claude_started(tmp_path: Path, monkeypatch, caplog):
+    jobs, roster = _resume_world(tmp_path, state={"state": "done"}, roster={})
+    with caplog.at_level(logging.WARNING, logger="clauster.supervisor"):
+        new_id, _ = _run_resume(monkeypatch, jobs, roster, stdout=_COPY_BANNER, stderr=_COPY_NOTE)
+    assert new_id == "c59c2bec"
+    assert "started a copy as c59c2bec" in caplog.text
+
+
+def test_resume_continuing_under_the_same_id_returns_it(tmp_path: Path, monkeypatch, caplog):
+    same = "Starting background service…\nbackgrounded · bd1cea2f\n"
+    jobs, roster = _resume_world(tmp_path, state={"state": "done"}, roster={})
+    with caplog.at_level(logging.WARNING, logger="clauster.supervisor"):
+        new_id, _ = _run_resume(monkeypatch, jobs, roster, stdout=same)
+    assert new_id == "bd1cea2f"
+    assert "copy" not in caplog.text
+
+
+# The other copy note claude 2.1.332 printed in the same sandbox: a resume whose flags differ
+# from the session's saved options (clauster passes --permission-mode, --remote-control).
+_FLAGS_COPY_NOTE = (
+    "note: background session bd1cea2f keeps its own saved options, so the flags you passed "
+    "started a copy as f64d2d7a. Without flags, the same command continues bd1cea2f itself.\n"
+)
+
+
+def test_parse_job_id_reads_the_copy_id_not_the_original():
+    # Without the banner, the bare fallback found the ORIGINAL id first in the copy note.
+    assert supervisor.parse_job_id(_COPY_NOTE) == "c59c2bec"
+    assert supervisor.parse_job_id(_FLAGS_COPY_NOTE) == "f64d2d7a"
+    assert supervisor.parse_job_id(_COPY_NOTE + _COPY_BANNER) == "c59c2bec"
+    assert supervisor.parse_job_id("started a copy as c59c2bec") == "c59c2bec"
+
+
+@pytest.mark.parametrize(
+    "note,expected", [(_COPY_NOTE, "c59c2bec"), (_FLAGS_COPY_NOTE, "f64d2d7a")]
+)
+def test_dispatch_reads_a_copy_note_on_stderr_when_stdout_is_empty(
+    tmp_path, monkeypatch, note, expected
+):
+    _patch_dispatch(monkeypatch, proc=_FakeProc(stdout="", stderr=note))
+    job_id = supervisor.dispatch_background_job(
+        tmp_path, permission_mode="default", remote_control=False, before_spawn=None
+    )
+    assert job_id == expected
+
+
+@pytest.mark.parametrize(
+    "stderr",
+    ["", "note: session bd1cea2f is already running in the background", "error deadbeef"],
+)
+def test_dispatch_never_takes_a_bare_id_from_stderr(tmp_path, monkeypatch, stderr):
+    # Claude printing nothing on stdout, or an id-shaped token on stderr without the copy
+    # note, fails closed: the token there can be the original job's id.
+    _patch_dispatch(monkeypatch, proc=_FakeProc(stdout="", stderr=stderr))
+    with pytest.raises(supervisor.DispatchError, match="printed no job id"):
+        supervisor.dispatch_background_job(
+            tmp_path, permission_mode="default", remote_control=False, before_spawn=None
+        )
+
+
+def test_build_dispatch_argv_remote_control():
+    assert supervisor.build_dispatch_argv(
+        "/abs/claude", permission_mode="inherit", remote_control=True, resume=_UUID
+    ) == ["/abs/claude", "--bg", "--resume", _UUID, "--remote-control"]
+    # A named --rc already opens the claude.ai door: no second flag.
+    assert supervisor.build_dispatch_argv(
+        "/abs/claude", rc_name="proj-rc", permission_mode="inherit", remote_control=True
+    ) == ["/abs/claude", "--bg", "--rc", "proj-rc"]
+
+
+@pytest.mark.parametrize(
+    "fn", [supervisor.build_dispatch_argv, supervisor.dispatch_background_job]
+)
+def test_remote_control_is_keyword_required_with_no_default(fn):
+    param = inspect.signature(fn).parameters["remote_control"]
+    assert param.kind is inspect.Parameter.KEYWORD_ONLY
+    assert param.default is inspect.Parameter.empty
+
+
+def test_api_dispatch_passes_no_remote_control(write_config, tmp_path, monkeypatch):
+    seen: dict = {}
+
+    def _fake(cwd, **kw):
+        seen.update(kw)
+        return "29e8026f"
+
+    monkeypatch.setattr(supervisor, "dispatch_background_job", _fake)
+    r = _client(write_config, tmp_path).post(
+        "/api/agents", json={"project": "alpha", "prompt": "hi"}
+    )
+    assert r.status_code == 201, r.text
+    assert seen["remote_control"] is False

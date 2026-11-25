@@ -659,12 +659,13 @@
                      `!!` coercion: see the hosted-row note above — without it the button is
                      stuck DISABLED on first paint (Alpine 3.15.x x-for missing-key `:disabled`). #}
                   {# Resume an ENDED agent with a session UUID: `--bg --resume` continues the
-                     prior conversation in a new job (#336). `!!` coercion on :disabled — same
-                     Alpine 3.15.x x-for missing-key guard as the sibling buttons. #}
+                     prior conversation (#336); a claude.ai job gets `--remote-control` too.
+                     `!!` coercion on :disabled — same Alpine 3.15.x x-for missing-key guard as
+                     the sibling buttons. #}
                   <button type="button" class="btn btn-sm btn-outline-primary me-1"
                           x-show="!agentLive(j) && j.session_id" x-cloak
                           :disabled="!!agentResuming[j.id]" @click="resumeAgent(j)"
-                          title="Resume this ended session — continues the conversation in a new background job">
+                          title="Resume this ended session — continues the conversation in the background">
                     <span x-text="agentResuming[j.id] ? 'Resuming…' : 'Resume'">Resume</span>
                   </button>
                   <button type="button" class="btn btn-sm" :disabled="!!agentStopping[j.id]" @click="stopAgent(j)"
@@ -683,7 +684,7 @@
               <!-- detail only while the worker is live: a 'done'/'stopped' job often keeps a
                    stale 'starting…' detail on disk, which reads as wrong under a done badge. -->
               <div class="text-secondary small mt-1" x-cloak
-                   x-show="j.detail && (j.worker_alive || ['working', 'blocked'].includes(j.state))"
+                   x-show="j.detail && agentLive(j)"
                    x-text="j.detail"></div>
               <!-- de-dupe: only show needs when it differs from detail -->
               <div class="small mt-1 text-warning" x-show="j.needs && j.needs !== j.detail"

@@ -1034,9 +1034,11 @@
       // row's Resume `x-if` keeps the same list inline, where the test that pins every
       // mirror of the Resume gate reads it.
       _hostedIsEnded(h) { return ["stopped", "crashed", "error"].includes(h.status); },
-      // A detached session is "live" while its worker process runs or it's actively
-      // working/blocked; once ended there's no process to Stop — only Forget (remove the record).
-      agentLive(j) { return j.worker_alive || ["working", "blocked"].includes(j.state); },
+      // A detached session is "live" while its worker process runs; once ended there's no
+      // process to Stop — only Resume or Forget (remove the record). The server computes the
+      // rule (`live`): a working/blocked state counts only when there was no roster to check
+      // the worker against, because an ended worker leaves its last state on disk (TASK-588).
+      agentLive(j) { return j.live === true; },
       liveAgents() { return this.agents.filter((j) => this.agentLive(j)); },
       endedAgents() { return this.agents.filter((j) => !this.agentLive(j)); },
       // Stopped/crashed bridges that can be reconnected (Resume) — surfaced in Recent.
@@ -1114,9 +1116,9 @@
         return "sess-dead";
       },
       agentRailClass(j) {
+        if (!this.agentLive(j)) return "sess-dead";
         if (j.state === "blocked") return "sess-warn";
-        if (j.worker_alive || j.state === "working") return "sess-live";
-        return "sess-dead";
+        return "sess-live";
       },
       bridgeRailClass(name) {
         const s = this.displayStatus(name);
@@ -5723,7 +5725,8 @@
         await this.refresh();
       },
       // Resume an ended bg agent: `--bg --resume <session uuid>` continues the prior
-      // conversation in a NEW job (new id), so we refresh to surface the new row (#336).
+      // conversation (#336). Claude keeps the job id, or starts a copy under a new id when it
+      // reads the session as running; the toast names a new id, and the refresh shows its row.
       async resumeAgent(j) {
         const label = j.name || j.id;
         if (this.agentResuming[j.id]) return;  // a resume is already in flight — ignore the double-click
@@ -5732,7 +5735,7 @@
           const res = await fetch(ROOT + "/api/agents/" + encodeURIComponent(j.id) + "/resume", { method: "POST" });
           if (this._authExpired(res)) return;
           const b = await res.json().catch(() => ({}));
-          if (res.ok && b.id) this.toast(label + ": resumed as " + b.id, "success");
+          if (res.ok && b.id) this.toast(label + (b.id === j.id ? ": resumed" : ": resumed as " + b.id), "success");
           else this.toast(label + ": resume failed — " + this._errDetail(res, b), "error");
         } catch (e) { this.toast(label + ": resume failed", "error"); }
         // finally: reset on EVERY path (incl. the 401 early-return) so the button can't
