@@ -377,7 +377,10 @@ def _anchor_reads_as_archived(claude_json: Path, monkeypatch) -> list[str]:
     Writes the OAuth token and organization that a ``/v1/code/sessions`` probe loads (next
     to ``claude_json``, where the removed pre-spawn check looked), and answers every HTTPS
     request with an archived session. A spawn that still probed the anchor would clear the
-    pointer, so the returned list of request paths must stay empty.
+    pointer, so the returned list of request paths must stay empty. A probe that loaded
+    credentials from somewhere else (such as the defaults of ``load_credentials``) would
+    find none and send no request, so the empty list only proves there was no probe that
+    could read these credentials.
     """
     creds = claude_json.parent / ".claude" / ".credentials.json"
     creds.parent.mkdir(parents=True, exist_ok=True)
@@ -421,7 +424,9 @@ async def test_spawn_keeps_a_preserved_pointer_whose_anchor_reads_archived(
     config, claude_json = runner_config
     runner = SessionRunner(config, claude_json=claude_json)
     pointer = _write_nonlive_pointer(runner, "alpha")
-    if not session_id:  # the shape clear_pointer leaves: environment kept, no anchor
+    # The "" case pins the shape clear_pointer leaves (environment kept, no anchor). The old
+    # check skipped it too, so only the "session_x" case failed before TASK-591.
+    if not session_id:
         pointer.write_text(json.dumps({**json.loads(pointer.read_text()), "sessionId": ""}))
     before = pointer.read_bytes()
     requests = _anchor_reads_as_archived(claude_json, monkeypatch)
@@ -3446,7 +3451,7 @@ async def test_resume_reuses_modes_and_backfills_session(runner_config, monkeypa
         environment_id = "env_01TESTENVAAAAAAAAAAAAAAAA"
         session_id = "session_01RESUMEDBBBBBBBBBBB"
 
-    # accept the extra claude_projects_dir arg the #867 L2 pre-spawn health-check passes
+    # accept any args: callers pass claude_projects_dir as well
     monkeypatch.setattr("clauster.pointers.pointer_for_project", lambda *a, **k: FakePtr())
 
     resumed = await runner.resume(first.instance_id)
@@ -3483,7 +3488,7 @@ async def test_resume_keeps_recorded_mode_when_config_flips(runner_config, monke
         environment_id = "env_01TESTENVAAAAAAAAAAAAAAAA"
         session_id = "session_01RESUMEDBBBBBBBBBBB"
 
-    # accept the extra claude_projects_dir arg the #867 L2 pre-spawn health-check passes
+    # accept any args: callers pass claude_projects_dir as well
     monkeypatch.setattr("clauster.pointers.pointer_for_project", lambda *a, **k: FakePtr())
 
     resumed = await runner.resume(first.instance_id)
@@ -5331,8 +5336,8 @@ async def test_resume_does_not_relink_a_session_that_ended(
 async def test_plain_start_after_stop_does_not_relink_an_ended_session(
     runner_config, monkeypatch, polled
 ):
-    # A new row with a new id: nothing is carried from the old row, and the pointer can
-    # still name the archived session when the anchor probe could not reach the API.
+    # A new row with a new id: nothing is carried from the old row, and the pointer still
+    # names the archived session, because a start keeps the anchor (TASK-591).
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
     runner = _make_runner(runner_config)
     first = await runner.spawn("alpha")

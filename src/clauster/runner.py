@@ -557,28 +557,25 @@ class SessionRunner:
             prune_stale_pointers=lambda: self._prune_stale_pointers(),
             retire_ended_starters=lambda: self._retire_ended_starters(),
         )
-        # Spawn / resume path (#1157): the security-critical collaborator that owns the
-        # fail-closed gate sequence, both bridge launches (standard + pty), the readiness
-        # waits, and the off-request startup watch. Built LAST — after every other
-        # collaborator — and handed the ONE `RunnerState` (registry + locks + persist),
-        # `RecordFacade` (the `spawn`/`ready` lifecycle emits), `BridgeLaunch` (the two
-        # subprocess launches), and `Rediscovery` (the cross-process standard reattach the
-        # per-mode idempotency check performs). The gate ORDER, the two synchronous gates
-        # (`_gate_stale_resume` / `_enforce_bridge_cap`), the two-mode separation, and the
-        # lock order are preserved byte-for-byte by the move. `stop` / `forget` / `adopt`
-        # STAY on the runner and keep taking the SAME shared locks from `_registry` — the
-        # coordinator does not own the locks. The still-on-runner helpers it calls but does
-        # not own — project resolution, the mode picker, option validation, the
-        # poisoned-pointer clear, the log-retention prune + path resolvers, the
-        # redacted-mirror flush, the poison-heal, the post-spawn enrich, the readiness
-        # parsers, the status reconciler, and the error-detail capture — are injected as
-        # deferring lambdas (the same pattern the earlier collaborators use), so a
-        # monkeypatched seam is honored and the coordinator holds no runner. The public
-        # exception classes, `SpawnOutcome`, and `_normalize_custom_name` stay on this module
-        # and are imported lazily inside the coordinator's methods (no module-level `runner`
-        # import — the cycle break). The runner keeps thin delegators (below) for the moved
-        # methods so the façade and the direct-call/patch test seams still reach them — see
-        # :class:`SpawnCoordinator`.
+        # Spawn / resume path (#1157): the security-critical collaborator that owns the fail-closed
+        # gate sequence, both bridge launches (standard + pty), the readiness waits, and the
+        # off-request startup watch. Built LAST — after every other collaborator — and handed the
+        # ONE `RunnerState` (registry + locks + persist), `RecordFacade` (the `spawn`/`ready`
+        # lifecycle emits), `BridgeLaunch` (the two subprocess launches), and `Rediscovery` (the
+        # cross-process standard reattach the per-mode idempotency check performs). The gate ORDER,
+        # the two synchronous gates (`_gate_stale_resume` / `_enforce_bridge_cap`), the two-mode
+        # separation, and the lock order are preserved byte-for-byte by the move. `stop` / `forget`
+        # / `adopt` STAY on the runner and keep taking the SAME shared locks from `_registry` — the
+        # coordinator does not own the locks. The still-on-runner helpers it calls but does not own
+        # — project resolution, the mode picker, option validation, the log-retention prune + path
+        # resolvers, the redacted-mirror flush, the poison-heal, the post-spawn enrich, the
+        # readiness parsers, the status reconciler, and the error-detail capture — are injected as
+        # deferring lambdas (the same pattern the earlier collaborators use), so a monkeypatched
+        # seam is honored and the coordinator holds no runner. The public exception classes,
+        # `SpawnOutcome`, and `_normalize_custom_name` stay on this module and are imported lazily
+        # inside the coordinator's methods (no module-level `runner` import — the cycle break). The
+        # runner keeps thin delegators (below) for the moved methods so the façade and the
+        # direct-call/patch test seams still reach them — see :class:`SpawnCoordinator`.
         self._spawner = spawn_coordinator.SpawnCoordinator(
             config=config,
             registry=self._registry,
@@ -1677,11 +1674,11 @@ class SessionRunner:
             yield
 
     # ----- _spawn_locked's pre-spawn gates (delegate to :class:`SpawnCoordinator`, #1157) ---
-    # The gate bodies moved with `_spawn_locked` to `spawn_coordinator`; the coordinator runs
-    # them in the SAME fail-closed order: stale-resume → option validation → fork-target
-    # ownership → per-mode idempotency → trust gate → claude-side settings → poisoned-pointer
-    # clear → bridge cap → deferred --trust write → launch. These delegators keep the exact
-    # signatures (and async-ness) the direct-call/patch test seams reach on the runner.
+    # The gate bodies moved with `_spawn_locked` to `spawn_coordinator`; the coordinator runs them
+    # in the SAME fail-closed order: stale-resume → option validation → fork-target ownership →
+    # per-mode idempotency → trust gate → claude-side settings → bridge cap → deferred --trust
+    # write → launch. These delegators keep the exact signatures (and async-ness) the
+    # direct-call/patch test seams reach on the runner.
     #
     # ⚠️ `_gate_stale_resume` and `_enforce_bridge_cap` stay SYNCHRONOUS (`def`, not
     # `async def`) on the coordinator AND here — each reads loop-owned mutable state and

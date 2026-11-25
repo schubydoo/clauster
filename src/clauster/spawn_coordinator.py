@@ -41,17 +41,16 @@ lifecycle emission goes through the ONE :class:`~clauster.record_facade.RecordFa
 :class:`~clauster.bridge_launch.BridgeLaunch` (``self._launch``). There is no second
 registry, and nothing that ran on the event loop is moved off it.
 
-The still-on-runner helpers this path calls but does not own — project resolution, the
-mode picker, option validation, the poisoned-pointer clear, the log-retention prune, the
-redacted-mirror flush, the poison-heal, the post-spawn enrich, the readiness parsers, the
-status reconciler, and the error-detail capture — are injected as callables (the same
-pattern the earlier collaborators use). ``SpawnCoordinator`` keeps no ``_runner``
-attribute; each injected callable is a deferring lambda that resolves the runner's CURRENT
-attribute at call time, so a monkeypatched seam is honored and no bound method is frozen at
-construction. The module-level exception classes, :class:`~clauster.runner.SpawnOutcome`,
-and ``_normalize_custom_name`` stay on :mod:`clauster.runner` (the façade contract) and are
-imported lazily inside the methods that need them, so this module carries NO module-level
-``runner`` import and the two modules do not form an import cycle.
+The still-on-runner helpers this path calls but does not own — project resolution, the mode picker,
+option validation, the log-retention prune, the redacted-mirror flush, the poison-heal, the
+post-spawn enrich, the readiness parsers, the status reconciler, and the error-detail capture — are
+injected as callables (the same pattern the earlier collaborators use). ``SpawnCoordinator`` keeps
+no ``_runner`` attribute; each injected callable is a deferring lambda that resolves the runner's
+CURRENT attribute at call time, so a monkeypatched seam is honored and no bound method is frozen at
+construction. The module-level exception classes, :class:`~clauster.runner.SpawnOutcome`, and
+``_normalize_custom_name`` stay on :mod:`clauster.runner` (the façade contract) and are imported
+lazily inside the methods that need them, so this module carries NO module-level ``runner`` import
+and the two modules do not form an import cycle.
 
 The runner delegates the moved methods to the single instance, preserving the exact public
 signatures (and async-ness) that callers (``routes/*``, ``engine.py``, ``mcp_server.py``)
@@ -392,11 +391,10 @@ class SpawnCoordinator:
 
     # ----- _spawn_locked's pre-spawn gates, in the order the spawn runs them ---------
     # Extracted from _spawn_locked (#1155) so the gate ordering is legible in one screen:
-    # stale-resume → option validation → fork-target ownership → per-mode idempotency →
-    # trust gate → claude-side settings → poisoned-pointer clear → bridge cap →
-    # deferred --trust write → launch. Each helper preserves its gate's logic, ordering
-    # and messages exactly; _gate_stale_resume is the one whose nested guards were
-    # inverted into early returns, and nothing here relaxes or short-circuits a gate.
+    # stale-resume → option validation → fork-target ownership → per-mode idempotency → trust gate
+    # → claude-side settings → bridge cap → deferred --trust write → launch. Each helper preserves
+    # its gate's logic, ordering and messages exactly; _gate_stale_resume is the one whose nested
+    # guards were inverted into early returns, and nothing here relaxes or short-circuits a gate.
     #
     # ⚠️ _gate_stale_resume and _enforce_bridge_cap are SYNCHRONOUS BY DESIGN. Each reads
     # loop-owned mutable state (_instances / _row_backed / _persisted) and raises on what
@@ -688,15 +686,15 @@ class SpawnCoordinator:
     def _enforce_bridge_cap(self, max_bridges: int | None) -> None:
         """Fail closed when the optional concurrent-bridge cap is already reached.
 
-        EVERY live bridge counts, this project's included. The per-mode idempotency
-        early-returns in :meth:`_apply_mode_spawn_policy` already sent back any live bridge
-        this spawn would duplicate, so nothing reaching here is the instance being spawned —
-        but the same project can legitimately hold a live bridge on the OTHER axis (a live
-        pty session does not block a standard spawn, and vice versa), and skipping those made
-        a project with an interactive session contribute 0 to the cap. Raised BEFORE the
-        log-file creation, the process spawn, and the deferred ``--trust`` write. The earlier
-        side effect is the empty test scope of the task-limit probe, which ends at once. It is
-        not per-spawn state.
+        EVERY live bridge counts, this project's included. The per-mode idempotency early-returns
+        in :meth:`_apply_mode_spawn_policy` already sent back any live bridge this spawn would
+        duplicate, so nothing reaching here is the instance being spawned — but the same project
+        can legitimately hold a live bridge on the OTHER axis (a live pty session does not block a
+        standard spawn, and vice versa), and skipping those made a project with an interactive
+        session contribute 0 to the cap. Raised BEFORE the log-file creation, the process spawn,
+        and the deferred ``--trust`` write. The earlier side effects (the once-per-runner
+        claude-side settings, the in-memory starter retirement, and the empty test scope of the
+        task-limit probe, which ends at once) are not per-spawn state.
         """
         from .runner import CapacityExceeded
 
