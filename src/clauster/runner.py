@@ -33,7 +33,6 @@ from . import (
     bridge_launch,
     bridge_log,
     bridge_prune,
-    code_sessions,
     metrics,
     pointers,
     poll_loop,
@@ -595,9 +594,6 @@ class SessionRunner:
             ),
             validate_spawn_options=lambda *a, **kw: self._validate_spawn_options(*a, **kw),
             live_standard_for_project=lambda name: self._live_standard_for_project(name),
-            clear_pointer_if_anchor_poisoned=lambda path: self._clear_pointer_if_anchor_poisoned(
-                path
-            ),
             log_set_key=lambda filename: self._log_set_key(filename),
             prune_logs=lambda protected: self._prune_logs(protected),
             unique_log_path=lambda name: self._unique_log_path(name),
@@ -1565,49 +1561,6 @@ class SessionRunner:
         return list(self._discovered().values())
 
     # ----- spawn ----------------------------------------------------------
-
-    async def _clear_pointer_if_anchor_poisoned(self, project_path: Path) -> None:
-        """#867 L2: pre-spawn, drop a preserved pointer whose anchor was archived/deleted.
-
-        The CLI reattaches an existing environment purely from ``bridge-pointer.json``; if
-        the anchor session behind it is gone, that reattach dead-ends into a bridge with no
-        session (#671). Probing ``/v1/code/sessions`` and dropping a poisoned pointer forces
-        a clean cold start instead. Best-effort throughout: only a non-live pointer is
-        considered, any uncertainty leaves the pointer intact, and nothing here blocks or
-        fails the spawn.
-        """
-        resolved = project_path.resolve()
-        pointer = await asyncio.to_thread(
-            pointers.pointer_for_project, resolved, self._claude_projects_dir
-        )
-        if pointer is None or not pointer.session_id:
-            return  # cold start (or pty, which writes no pointer) — nothing to reattach
-        if await asyncio.to_thread(pointers.is_live, pointer):
-            return  # a live bridge owns it; never touch a running anchor
-        credentials_path = self._claude_json.parent / ".claude" / ".credentials.json"
-        health = await asyncio.to_thread(
-            code_sessions.anchor_health_for_pointer,
-            pointer.session_id,
-            credentials_path=credentials_path,
-            claude_json_path=self._claude_json,
-        )
-        if health is not code_sessions.AnchorHealth.POISONED:
-            return  # HEALTHY -> reattach as-is; UNKNOWN -> leave it, the backstop covers it
-        _log.info(
-            "clearing bridge-pointer for %s: anchor session %s is archived/deleted; "
-            "would dead-end on reattach (#671)",
-            resolved,
-            pointer.session_id,
-        )
-        try:
-            await asyncio.to_thread(
-                pointers.clear_pointer,
-                resolved,
-                claude_projects_dir=self._claude_projects_dir,
-                keep_mtime=False,
-            )
-        except (pointers.PointerStillLive, OSError) as exc:
-            _log.warning("could not clear poisoned bridge-pointer for %s: %s", resolved, exc)
 
     async def spawn(
         self,

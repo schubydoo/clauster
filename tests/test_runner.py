@@ -14,7 +14,7 @@ from typing import cast
 import psutil
 import pytest
 
-from clauster import bridge_log, code_sessions, inspector, pointers, procutil, task_limits
+from clauster import bridge_log, inspector, pointers, procutil, task_limits
 from clauster.claude_json import ClaudeJsonUnparseable
 from clauster.db.persistence import Persistence
 from clauster.models import (
@@ -337,7 +337,7 @@ async def test_forget_tolerates_pointer_clear_oserror(runner_config, monkeypatch
     assert inst.instance_id not in runner._persisted
 
 
-# ----- #867 L2: pre-spawn anchor health-check ---------------------------------------
+# ----- TASK-591: a spawn keeps the preserved anchor ----------------------------------
 
 
 def _write_nonlive_pointer(runner: SessionRunner, project_name: str) -> Path:
@@ -371,73 +371,65 @@ def _anchor_kept(pointer: Path) -> bool:
     return pointer.exists() and json.loads(pointer.read_text())["sessionId"] == "session_x"
 
 
-def _pin_health(monkeypatch, health, *, calls: list | None = None) -> None:
-    def _fake(*_a, **_k):
-        if calls is not None:
-            calls.append(1)
-        return health
+def _anchor_reads_as_archived(claude_json: Path, monkeypatch) -> list[str]:
+    """Make any anchor probe read the session as archived; return the log of requests.
 
-    monkeypatch.setattr("clauster.code_sessions.anchor_health_for_pointer", _fake)
+    Writes the OAuth token and organization that a ``/v1/code/sessions`` probe loads (next
+    to ``claude_json``, where the removed pre-spawn check looked), and answers every HTTPS
+    request with an archived session. A spawn that still probed the anchor would clear the
+    pointer, so the returned list of request paths must stay empty.
+    """
+    creds = claude_json.parent / ".claude" / ".credentials.json"
+    creds.parent.mkdir(parents=True, exist_ok=True)
+    creds.write_text(json.dumps({"claudeAiOauth": {"accessToken": "tok"}}))
+    data = json.loads(claude_json.read_text())
+    data["oauthAccount"] = {"organizationUuid": "org-x"}
+    claude_json.write_text(json.dumps(data))
+    requests: list[str] = []
+
+    class _Resp:
+        status = 200
+
+        def read(self) -> bytes:
+            return json.dumps({"status": "archived"}).encode()
+
+    class _Conn:
+        def __init__(self, *_a, **_k) -> None:
+            pass
+
+        def request(self, _method, path, *_a, **_k) -> None:
+            requests.append(path)
+
+        def getresponse(self) -> _Resp:
+            return _Resp()
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr("http.client.HTTPSConnection", _Conn)
+    return requests
 
 
-async def test_heal_clears_poisoned_pointer(runner_config, monkeypatch):
+@pytest.mark.parametrize("session_id", ["session_x", ""])
+async def test_spawn_keeps_a_preserved_pointer_whose_anchor_reads_archived(
+    runner_config, monkeypatch, session_id
+):
+    # TASK-591: on current Claude Code a bridge recovers from an archived or deleted anchor
+    # by itself, and clearing the anchor before the start made it add a blank second
+    # session. A spawn must leave the preserved pointer, its sessionId included, as it was.
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
     config, claude_json = runner_config
     runner = SessionRunner(config, claude_json=claude_json)
     pointer = _write_nonlive_pointer(runner, "alpha")
-    _pin_health(monkeypatch, code_sessions.AnchorHealth.POISONED)
-    await runner._clear_pointer_if_anchor_poisoned(config.projects_root / "alpha")
-    assert _anchor_dropped(pointer)  # archived/deleted anchor -> pointer cleared, cold start
-
-
-async def test_heal_keeps_healthy_pointer(runner_config, monkeypatch):
-    config, claude_json = runner_config
-    runner = SessionRunner(config, claude_json=claude_json)
-    pointer = _write_nonlive_pointer(runner, "alpha")
-    _pin_health(monkeypatch, code_sessions.AnchorHealth.HEALTHY)
-    await runner._clear_pointer_if_anchor_poisoned(config.projects_root / "alpha")
-    assert _anchor_kept(pointer)  # reattach as-is
-
-
-async def test_heal_keeps_pointer_on_unknown(runner_config, monkeypatch):
-    config, claude_json = runner_config
-    runner = SessionRunner(config, claude_json=claude_json)
-    pointer = _write_nonlive_pointer(runner, "alpha")
-    _pin_health(monkeypatch, code_sessions.AnchorHealth.UNKNOWN)
-    await runner._clear_pointer_if_anchor_poisoned(config.projects_root / "alpha")
-    assert _anchor_kept(pointer)  # indeterminate -> never destroy state
-
-
-async def test_heal_noop_without_pointer(runner_config, monkeypatch):
-    config, claude_json = runner_config
-    runner = SessionRunner(config, claude_json=claude_json)
-    calls: list = []
-    _pin_health(monkeypatch, code_sessions.AnchorHealth.POISONED, calls=calls)
-    await runner._clear_pointer_if_anchor_poisoned(config.projects_root / "alpha")
-    assert not calls  # cold start -> never probes the API
-
-
-async def test_heal_skips_live_pointer(runner_config, monkeypatch):
-    config, claude_json = runner_config
-    runner = SessionRunner(config, claude_json=claude_json)
-    pointer = _write_nonlive_pointer(runner, "alpha")
-    monkeypatch.setattr(pointers, "is_live", lambda ptr: True)
-    calls: list = []
-    _pin_health(monkeypatch, code_sessions.AnchorHealth.POISONED, calls=calls)
-    await runner._clear_pointer_if_anchor_poisoned(config.projects_root / "alpha")
-    assert _anchor_kept(pointer) and not calls  # a running anchor is never probed or cleared
-
-
-async def test_heal_tolerates_clear_error(runner_config, monkeypatch):
-    config, claude_json = runner_config
-    runner = SessionRunner(config, claude_json=claude_json)
-    _write_nonlive_pointer(runner, "alpha")
-    _pin_health(monkeypatch, code_sessions.AnchorHealth.POISONED)
-
-    def _boom(*_a, **_k):
-        raise OSError("io error")
-
-    monkeypatch.setattr("clauster.pointers.clear_pointer", _boom)
-    await runner._clear_pointer_if_anchor_poisoned(config.projects_root / "alpha")  # no raise
+    if not session_id:  # the shape clear_pointer leaves: environment kept, no anchor
+        pointer.write_text(json.dumps({**json.loads(pointer.read_text()), "sessionId": ""}))
+    before = pointer.read_bytes()
+    requests = _anchor_reads_as_archived(claude_json, monkeypatch)
+    inst = await runner.spawn("alpha")
+    assert inst.status is InstanceStatus.RUNNING
+    assert pointer.read_bytes() == before
+    assert json.loads(pointer.read_text())["sessionId"] == session_id
+    assert requests == [], "a spawn must not probe the anchor session"
 
 
 # ----- #867 L3: poisoned-reattach detection + heal --------------------------------

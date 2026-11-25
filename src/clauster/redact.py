@@ -1423,9 +1423,8 @@ _known_matcher: _KnownMatcher | None = None
 def _known_forms(value: object) -> frozenset[str]:
     """Return the forms of ``value`` the store holds: none, the value, or a session id pair.
 
-    A ``session_<id>`` and the ``cse_<id>`` code-session id that Clauster derives from it
-    (:func:`clauster.code_sessions.code_session_id_for`) share their random part, so each one
-    stores both.
+    A ``session_<id>`` and the ``cse_<id>`` code-session id of the same session share their
+    random part, so each one stores both.
 
     A value whose random part repeats a run of :data:`KNOWN_FRAGMENT_MIN` characters is not
     stored. It is not random, so it is not a real id (for 22 random characters the chance of

@@ -627,53 +627,6 @@ def test_hosted_instance_from_record_generator_reaches_the_iso_branch() -> None:
     assert parsed > 0, "no generated timestamp ever parsed — the accept branch is dead"
 
 
-# --- is_session_not_found_fuzzer -----------------------------------------------------
-
-
-_NOT_FOUND_BODIES = [
-    b"",
-    b"not json",
-    b"[]",
-    b"{}",
-    b'{"error": {"type": "not_found_error", "resource_type": "session"}}',
-    b'{"type": "not_found_error", "resource_type": "session"}',
-    b'{"error": {"type": "not_found_error", "resource_type": "environment"}}',
-    b'{"error": {"type": "invalid_request_error", "message": "session gone"}}',
-    b"<!DOCTYPE html>404",
-    b"\xff\xfe",
-    b'{"a":' + b"[" * 400 + b"]" * 400 + b"}",
-]
-
-
-@pytest.mark.parametrize("raw", _NOT_FOUND_BODIES)
-def test_is_session_not_found_is_total_and_fails_closed(raw: bytes) -> None:
-    """Never raises, always a bool, and a ``True`` is always evidenced by the body."""
-    harness = _load("is_session_not_found_fuzzer.py")
-    harness.check(raw)
-
-
-def test_is_session_not_found_oracle_fires_on_a_broken_implementation(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Make the check answer ``True`` for a route-level 404; the harness must notice.
-
-    That is the direction with consequences: a ``True`` clears a healthy bridge pointer,
-    and the whole reason this function requires BOTH signals is to keep a moved endpoint
-    from doing it across every project at once.
-    """
-    from clauster import code_sessions
-
-    harness = _load("is_session_not_found_fuzzer.py")
-    route_404 = b'{"error": {"type": "invalid_request_error", "message": "session gone"}}'
-    harness.check(route_404)  # unbroken: passes
-
-    monkeypatch.setattr(code_sessions, "_is_session_not_found", lambda raw: True)
-    with pytest.raises(AssertionError, match="^said not-found with no not_found_error"):
-        harness.check(route_404)
-    with pytest.raises(AssertionError, match="^said not-found for a body it could not parse"):
-        harness.check(b"not json")
-
-
 # --- pty_screen_feed_fuzzer ----------------------------------------------------------
 
 

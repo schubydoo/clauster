@@ -36,7 +36,7 @@ from clauster.usage import _line_to_turn
 # Shaped like real ids: the prefix, then `01` and 22 base62 characters.
 ENV = "env_01Xk3PqR8sTvW2yZ4bNc6dFg"
 SESSION = "session_01Hm7JtL9wQe5RuY3iOp2aSd"
-CSE = "cse_01Hm7JtL9wQe5RuY3iOp2aSd"  # derived from SESSION (code_sessions.code_session_id_for)
+CSE = "cse_01Hm7JtL9wQe5RuY3iOp2aSd"  # the same random part as SESSION
 BRIDGE = "3f2b9c1e-7a4d-4e8b-9c2f-1d6a5b4e3c21"
 VALUES = (ENV, SESSION, CSE, BRIDGE)
 

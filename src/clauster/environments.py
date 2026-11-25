@@ -93,8 +93,7 @@ def load_credentials(
     field. Callers guard on that one type, so a shape that escaped it (a credentials file
     holding a bare string, list or ``null``) surfaced as an ``AttributeError`` from ``.get``
     and blocked a spawn. Expiry is checked **only when the caller supplies ``now_ms``**
-    (ms epoch); with the default ``None`` an expired token is returned unchecked —
-    ``code_sessions.check_anchor_health`` calls it that way.
+    (ms epoch); with the default ``None`` an expired token is returned unchecked.
     """
     cred_file = Path(credentials_path).expanduser()
     try:
@@ -209,7 +208,7 @@ def _https_roundtrip(method, parts, headers, body, timeout):  # pragma: no cover
         conn.close()
 
 
-# The default 30s transport; a preflight caller (e.g. code_sessions) builds a shorter one.
+# The default 30s transport.
 _https_transport = https_transport()
 
 

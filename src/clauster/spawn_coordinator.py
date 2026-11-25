@@ -176,7 +176,6 @@ class SpawnCoordinator:
         is_pty_mode: Callable[..., bool],
         validate_spawn_options: Callable[..., None],
         live_standard_for_project: Callable[[str], RemoteControlInstance | None],
-        clear_pointer_if_anchor_poisoned: Callable[[Path], Awaitable[None]],
         log_set_key: Callable[[str], str],
         prune_logs: Callable[[set[str]], None],
         unique_log_path: Callable[[str], Path],
@@ -228,7 +227,6 @@ class SpawnCoordinator:
         self._is_pty_mode = is_pty_mode
         self._validate_spawn_options = validate_spawn_options
         self._live_standard_for_project = live_standard_for_project
-        self._clear_pointer_if_anchor_poisoned = clear_pointer_if_anchor_poisoned
         self._log_set_key = log_set_key
         self._prune_logs = prune_logs
         self._unique_log_path = unique_log_path
@@ -697,9 +695,8 @@ class SpawnCoordinator:
         pty session does not block a standard spawn, and vice versa), and skipping those made
         a project with an interactive session contribute 0 to the cap. Raised BEFORE the
         log-file creation, the process spawn, and the deferred ``--trust`` write. The earlier
-        side effects are the injected ``_clear_pointer_if_anchor_poisoned``, which is
-        best-effort pointer hygiene, and the empty test scope of the task-limit probe, which
-        ends at once. Neither is per-spawn state.
+        side effect is the empty test scope of the task-limit probe, which ends at once. It is
+        not per-spawn state.
         """
         from .runner import CapacityExceeded
 
@@ -802,12 +799,6 @@ class SpawnCoordinator:
             )
 
         await self._ensure_claude_side_settings()
-
-        # #867 L2: before launching, drop a preserved pointer whose anchor was archived or
-        # deleted — otherwise the CLI reattaches it and the bridge comes back with no
-        # session (#671). Best-effort; a no-op for a cold start, a pty spawn, or when the
-        # anchor is healthy/indeterminate.
-        await self._clear_pointer_if_anchor_poisoned(proj.path)
 
         # The poll may not have read the previous bridge's log since its session ended, and
         # this start can seed that session's id from the pointer. Read it first (TASK-557).
