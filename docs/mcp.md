@@ -104,7 +104,10 @@ session sources the dashboard already surfaces:
   collided across a project's bridges);
 - **hosted** — Direct Session (claustrum stream-json) sessions, from their
   persisted records;
-- **background-agents** — agent-view background jobs (`claude --bg`);
+- **background-agents** — agent-view background jobs (`claude --bg`). `live` is
+  the rule that the dashboard uses for Stop versus Resume: whether the worker
+  still runs, read from the roster file of Claude Code, or from the last `state`
+  when the roster cannot settle it;
 - **external-session** / **bridge-session** — live working sessions seen via the
   `claude agents --json` cross-check (unmanaged externals and the sessions under
   a managed bridge). A `bridge-session` is listed **once**, under the bridge that

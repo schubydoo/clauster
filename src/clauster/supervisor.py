@@ -56,6 +56,7 @@ from .procutil import (
     jiffies_to_epoch,
     lstart_to_epoch,
     proc_create_time,
+    proc_is_gone,
     proc_start_ticks,
     start_time_is_drift_prone,
 )
@@ -108,16 +109,29 @@ def load_roster_workers(roster_json: Path | None = None) -> dict[str, dict]:
     resolves to :data:`ROSTER_JSON` at call time (late-bound so tests can
     monkeypatch the module constant).
     """
+    workers = read_roster_workers(roster_json)
+    return workers if workers is not None else {}
+
+
+def read_roster_workers(roster_json: Path | None = None) -> dict[str, dict] | None:
+    """Return the roster's ``workers`` map, or None when there is no roster to read.
+
+    None means a missing, unreadable or malformed file, or one without a ``workers`` map.
+    An empty map is a different answer: the supervisor wrote the roster and lists no worker.
+    The file stays after the transient supervisor exits (seen with claude 2.1.332), and the
+    supervisor drops a worker from it when the worker ends. So a job without an entry in a
+    roster that was read has no worker, whatever its last ``state`` says (TASK-588).
+    """
     if roster_json is None:
         roster_json = ROSTER_JSON
     try:
         raw = roster_json.read_text(encoding="utf-8")
     except FileNotFoundError:
-        return {}
+        return None
     except (OSError, UnicodeDecodeError) as exc:
         # UnicodeDecodeError is a ValueError, not an OSError: a non-UTF-8 roster fails here.
         _log.warning("could not read %s: %s", roster_json, exc)
-        return {}
+        return None
     try:
         data = json.loads(raw)
     except (ValueError, RecursionError) as exc:
@@ -125,9 +139,9 @@ def load_roster_workers(roster_json: Path | None = None) -> dict[str, dict]:
         # deeply-nested JSON overflows the recursive scanner with RecursionError (not a
         # ValueError). Both used to escape and fail the whole /api/agents listing.
         _log.warning("malformed roster %s: %s", roster_json, exc)
-        return {}
+        return None
     workers = data.get("workers") if isinstance(data, dict) else None
-    return workers if isinstance(workers, dict) else {}
+    return workers if isinstance(workers, dict) else None
 
 
 def worker_alive(
@@ -194,11 +208,15 @@ def _lstart_matches(pid: int, proc_start: str) -> bool:
     return math.floor(created) == started
 
 
-def _job_from_state(job_id: str, data: dict, workers: dict[str, dict]) -> BackgroundJob:
-    """Map one parsed ``state.json`` object to a :class:`BackgroundJob`."""
+def _job_from_state(job_id: str, data: dict, workers: dict[str, dict] | None) -> BackgroundJob:
+    """Map one parsed ``state.json`` object to a :class:`BackgroundJob`.
+
+    ``workers`` is None when there was no roster to read: the job then gets
+    ``worker_checked=False``, so its last state is all there is to go on.
+    """
     output = data.get("output")
     result = output.get("result") if isinstance(output, dict) else None
-    worker = workers.get(job_id)
+    worker = workers.get(job_id) if workers is not None else None
     pid = worker.get("pid") if isinstance(worker, dict) else None
     alive = worker_alive(pid, worker.get("procStart")) if isinstance(worker, dict) else False
     return BackgroundJob(
@@ -219,7 +237,30 @@ def _job_from_state(job_id: str, data: dict, workers: dict[str, dict]) -> Backgr
         updated_at=_clean(data.get("updatedAt")),
         worker_pid=pid if alive and isinstance(pid, int) else None,
         worker_alive=alive,
+        worker_checked=_worker_checked(workers, job_id, pid, alive=alive),
     )
+
+
+def _worker_checked(
+    workers: dict[str, dict] | None, job_id: str, pid: object, *, alive: bool
+) -> bool:
+    """Whether the roster settles if the job has a worker, so its last state must not count.
+
+    Settled: the roster has no key for the job (the supervisor drops a worker that ended),
+    the worker matched, or its pid runs no process. Not settled: no roster, an entry that
+    is not an object (``null`` included) or has no usable pid, or a running pid whose
+    identity did not match. The last case is a recycled pid, or a ``procStart`` that this
+    platform cannot compare (absent, or another form); the two cannot be told apart, so the
+    last state keeps counting there, as it did before TASK-588, and no resume starts a
+    second worker for the session.
+    """
+    if workers is None:
+        return False
+    if job_id not in workers or alive:
+        return True
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return False
+    return proc_is_gone(pid)
 
 
 def list_background_jobs(
@@ -241,7 +282,7 @@ def list_background_jobs(
     except OSError as exc:
         _log.warning("could not list %s: %s", jobs_dir, exc)
         return []
-    workers = load_roster_workers(roster_json)
+    workers = read_roster_workers(roster_json)
     states: list[tuple[str, dict]] = []
     for entry in entries:
         state_file = entry / "state.json"
@@ -290,22 +331,36 @@ _DISPATCH_TIMEOUT = 60.0
 # 8-hex token is a fallback so a future banner reword still yields the id.
 _DISPATCH_ID_RE = re.compile(r"backgrounded[^\n0-9a-f]*([0-9a-f]{8})\b")
 _BARE_ID_RE = re.compile(r"\b[0-9a-f]{8}\b")
+# A resume can start a copy under a NEW id, and claude says so on stderr (claude 2.1.332).
+# Two reasons were seen: the session still reads as running (`note: session 54fa1981 is
+# already running in the background, so this started a copy as b1eff445. ...`), and flags
+# that differ from the session's saved options (`note: background session a851e4e2 keeps
+# its own saved options, so the flags you passed started a copy as f64d2d7a. ...`). The
+# first 8-hex token there is the ORIGINAL id, so the bare fallback must never read this
+# line (TASK-588).
+_COPY_ID_RE = re.compile(r"started a copy as ([0-9a-f]{8})\b")
 
 
 class DispatchError(RuntimeError):
     """A ``claude --bg`` dispatch failed (bad exit, timeout, or no job id printed)."""
 
 
-def parse_job_id(stdout: str) -> str | None:
-    """Extract the dispatched 8-hex job id from ``claude --bg`` stdout.
+def parse_job_id(stdout: str, *, stderr: str) -> str | None:
+    """Extract the dispatched 8-hex job id from ``claude --bg`` output.
 
-    The success banner is ``backgrounded · <id>``; that labelled form wins. A
-    bare 8-hex token is accepted as a fallback. Returns None when no id-shaped
-    token is present (so the caller can fail closed rather than invent an id).
+    The success banner on stdout is ``backgrounded · <id>``; that labelled form wins.
+    Next is the copy note of a resume (``started a copy as <id>``), on stdout or stderr,
+    whose first 8-hex token is the original id, not the new one. A bare 8-hex token on
+    stdout is accepted only as the last fallback, after both labelled forms; stderr is
+    never read for a bare token, because any id can appear there. Returns None when no
+    id-shaped token is present (so the caller can fail closed rather than invent an id).
     """
     labelled = _DISPATCH_ID_RE.search(stdout)
     if labelled is not None:
         return labelled.group(1)
+    copy = _COPY_ID_RE.search(stdout) or _COPY_ID_RE.search(stderr)
+    if copy is not None:
+        return copy.group(1)
     bare = _BARE_ID_RE.search(stdout)
     return bare.group(0) if bare is not None else None
 
@@ -325,6 +380,7 @@ def build_dispatch_argv(
     rc_name: str | None = None,
     model: str | None = None,
     permission_mode: str,
+    remote_control: bool,
     prompt: str | None = None,
     resume: str | None = None,
 ) -> list[str]:
@@ -334,7 +390,13 @@ def build_dispatch_argv(
     session); omit it for a purely local background job. ``prompt`` is the
     trailing positional (the session's initial instruction) and may be omitted.
     ``resume`` is a prior session's full UUID — ``--bg --resume <uuid>`` continues
-    that conversation in a new bg job inheriting its transcript (#336).
+    that conversation in the background (#336).
+
+    ``remote_control`` adds a bare ``--remote-control`` when no ``rc_name`` is given. A
+    resume of a job that was registered with claude.ai needs it: without the flag the
+    resumed job never registers again, and with it the desktop app can continue the
+    conversation (verified with claude 2.1.332, TASK-588). It is keyword-required with no
+    default, so a call site that forgets it is a type error.
 
     ``permission_mode`` of :data:`~clauster.config.INHERIT_PERMISSION_MODE` emits **no**
     ``--permission-mode`` (#1231): the dashboard's per-project picker feeds both the
@@ -350,6 +412,8 @@ def build_dispatch_argv(
         argv += ["--resume", resume]
     if rc_name:
         argv += ["--rc", rc_name]
+    elif remote_control:
+        argv.append("--remote-control")
     if model:
         argv += ["--model", model]
     if permission_mode != INHERIT_PERMISSION_MODE:
@@ -369,6 +433,7 @@ def dispatch_background_job(
     rc_name: str | None = None,
     model: str | None = None,
     permission_mode: str,
+    remote_control: bool,
     binary: str = "claude",
     claude_json: Path | None = None,
     timeout: float = _DISPATCH_TIMEOUT,
@@ -396,6 +461,9 @@ def dispatch_background_job(
     starts, and stops the dispatch when it raises. A resume uses it to claim its
     :class:`ResumeGate` (TASK-487). It is keyword-required with no default, so a caller
     that forgets it is a type error; a plain dispatch passes ``None``.
+
+    ``remote_control`` is passed to :func:`build_dispatch_argv` and is keyword-required
+    with no default for the same reason; a plain dispatch passes ``False``.
 
     ``rc_name`` opens the cloud door. NOTE: a consent-gated ``permission_mode``
     (auto / acceptEdits / bypassPermissions) is passed through, but the cloud
@@ -432,6 +500,7 @@ def dispatch_background_job(
         rc_name=rc_name,
         model=model,
         permission_mode=permission_mode,
+        remote_control=remote_control,
         prompt=prompt,
         resume=resume,
     )
@@ -451,9 +520,14 @@ def dispatch_background_job(
     if proc.returncode != 0:
         detail = _clean(proc.stderr) or _clean(proc.stdout) or f"exit {proc.returncode}"
         raise DispatchError(f"`claude --bg` failed (exit {proc.returncode}): {detail}")
-    job_id = parse_job_id(proc.stdout or "")
+    job_id = parse_job_id(proc.stdout or "", stderr=proc.stderr or "")
     if job_id is None:
         raise DispatchError("`claude --bg` exited 0 but printed no job id")
+    if _COPY_ID_RE.search(proc.stdout or "") or _COPY_ID_RE.search(proc.stderr or ""):
+        _log.warning(
+            "`claude --bg --resume` started a copy as %s instead of continuing the session",
+            job_id,
+        )
     return job_id
 
 
@@ -560,12 +634,19 @@ def resume_background_job(
     roster_json: Path | None = None,
     timeout: float = _DISPATCH_TIMEOUT,
 ) -> str:
-    """Resume an ended `claude --bg` session into a NEW bg job that inherits it (#336).
+    """Resume an ended `claude --bg` session in the background (#336).
 
     Looks the job up by its 8-hex id, reads its full session UUID + cwd, then
-    dispatches ``claude --bg --resume <uuid>`` in that cwd. Returns the **new** job
-    id — a resume mints a fresh 8-hex id (and a new session UUID) that inherits the
-    prior transcript, so the resumed agent surfaces as a new panel row.
+    dispatches ``claude --bg --resume <uuid>`` in that cwd. Returns the job id that
+    claude printed. Claude 2.1.332 continues an ended session under the SAME id when no
+    flags are passed. It starts a copy under a NEW id when the session still reads as
+    running, or when the flags differ from the ones the session saved (a resume with
+    ``--permission-mode`` or ``--remote-control`` usually does). The copy's id is the one
+    returned (TASK-588). Older versions minted a new id each time.
+
+    A job that was registered with claude.ai (it has a ``bridge_session_id``) is resumed
+    with ``--remote-control``, so the resumed job registers with claude.ai again and the
+    desktop app can continue it (TASK-588). A job without one stays local.
 
     ``permission_mode`` is passed to the dispatch like a new job's. It is required
     because a resume with no mode would pass no ``--permission-mode`` flag, which is
@@ -585,9 +666,10 @@ def resume_background_job(
     job = next((j for j in list_background_jobs(jobs_dir, roster_json) if j.id == job_id), None)
     if job is None:
         raise ResumeError(f"no background job {job_id!r}")
-    # Server-side guard mirroring the UI's `!agentLive(j)` gate: resuming a still-live
-    # session would spawn a second worker over the same transcript. Don't rely on the UI.
-    if job.worker_alive:
+    # Server-side guard: the UI's `agentLive(j)` reads this same `live` rule. Resuming a
+    # still-live session makes claude start a copy over the same transcript. A job with no
+    # roster to check and a last state of working/blocked counts as live, as in the UI.
+    if job.live:
         raise ResumeError(f"job {job_id!r} is still live — stop it before resuming")
     if not valid_session_id(job.session_id):
         raise ResumeError(f"job {job_id!r} has no resumable session id")
@@ -625,6 +707,7 @@ def resume_background_job(
         cwd,
         resume=job.session_id,
         permission_mode=permission_mode,
+        remote_control=job.bridge_session_id is not None,
         binary=binary,
         claude_json=claude_json,
         timeout=timeout,

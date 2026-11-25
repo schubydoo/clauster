@@ -34,10 +34,10 @@ changed.
 | GET | `/instances/{instance_id}` | Read one instance |
 | DELETE | `/instances/{instance_id}` | Stop an instance |
 | POST | `/instances/{instance_id}/resume` | Resume a stopped/crashed instance |
-| GET | `/agents` | List `claude --bg` background sessions |
+| GET | `/agents` | List `claude --bg` background sessions. `live` is `true` while the worker process runs; `worker_checked` is `false` when the roster file of Claude Code could not be read, has an entry for the job that Clauster cannot use, or names a running process that Clauster could not match, and `live` then follows a last state of `working` or `blocked` |
 | POST | `/agents` | Dispatch a background session |
 | DELETE | `/agents/{job_id}` | Stop a background session |
-| POST | `/agents/{job_id}/resume` | Resume an ended background session, in `instance_defaults.permission_mode` (`403` when the [bypass ceiling](security.md#bypasspermissions-footgun-gate) refuses that mode; `409` when the job does not exist, the session is still live, has no resumable session id, has no valid recorded directory that can be resolved, or its directory no longer exists as a folder or cannot be checked; `504` when the directory checks take longer than 20 seconds, for example on a hung network mount, and the job is not resumed) |
+| POST | `/agents/{job_id}/resume` | Resume an ended background session, in `instance_defaults.permission_mode`, with `--remote-control` when the session was registered with claude.ai. Returns the job `id` that `claude` printed: the same id, or a new one when `claude` started a copy. Errors: `403` when the [bypass ceiling](security.md#bypasspermissions-footgun-gate) refuses that mode; `409` when the job does not exist, the session is still live, has no resumable session id, has no valid recorded directory that can be resolved, or its directory no longer exists as a folder or cannot be checked; `504` when the directory checks take longer than 20 seconds, for example on a hung network mount, and the job is not resumed |
 
 A request to a route not on this list (e.g. `GET /api/v1/widget`) 404s — the
 internal surface was never aliased, by design.

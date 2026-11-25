@@ -1064,6 +1064,7 @@ def test_gather_sessions_includes_background_job_without_freetext(cfg, monkeypat
     assert bg[0]["id"] == "bgjob01"
     assert bg[0]["state"] == "working"
     assert bg[0]["worker_pid"] == 4242
+    assert bg[0]["live"] is True
     # No free-text field is surfaced, even though it is already redacted upstream.
     blob = json.dumps(bg[0])
     assert "SECRET" not in blob

@@ -146,6 +146,7 @@ async def api_dispatch_agent(body: dict, config: ConfigDep, runner: RunnerDep) -
             rc_name=rc_name,
             model=model,
             permission_mode=pm,
+            remote_control=False,  # rc_name above is the dispatch's claude.ai door
             binary=config.claude.binary,
             claude_json=runner.claude_json,
             before_spawn=None,
@@ -208,13 +209,15 @@ async def api_stop_agent(job_id: str, config: ConfigDep, runner: RunnerDep) -> d
 
 @router.post("/api/agents/{job_id}/resume", status_code=201)
 async def api_resume_agent(job_id: str, config: ConfigDep, runner: RunnerDep) -> dict:
-    """Resume an ended `claude --bg` session into a new bg job inheriting its transcript.
+    """Resume an ended `claude --bg` session in the background, with its transcript.
 
     The path `{job_id}` is the 8-hex short id (validated like the stop path); the
     `--resume` argument is the job's full session UUID, validated separately
-    (`valid_session_id`) — the 8-hex guard would reject a UUID. Resume mints a NEW
-    job id (and session UUID) that inherits the prior transcript, so `{id}` returned
-    here differs from the path id; the panel surfaces it as a new row.
+    (`valid_session_id`) — the 8-hex guard would reject a UUID. `{id}` is the job id
+    claude printed: the same id when claude continues the session (claude 2.1.332), or a
+    new one when it started a copy (the session reads as running, or the flags differ from
+    its saved ones), or on an older claude (TASK-588). A job that was
+    registered with claude.ai is resumed with `--remote-control`, so it registers again.
 
     The resume runs in the configured default permission mode, like a dispatch that
     names none, and that mode faces the ceiling of the project holding the job's

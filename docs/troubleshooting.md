@@ -459,6 +459,47 @@ writes.
 2. Repair or remount that folder.
 3. Click **Resume** again.
 
+### A fork from the Claude desktop app shows as a background agent, and it stops after an idle hour
+
+**What you see:** you fork an Interactive Session (pty) in the Claude desktop app.
+The fork shows on the dashboard as a background agent, with the **background** and
+**claude.ai** badges. After some idle time, the desktop app shows "Remote Control
+disconnected" for the fork.
+
+**Cause:** an Interactive Session bridge holds one session. So Claude Code runs the
+fork as a `claude --bg` background session (a background agent). Claude Code stops
+idle background sessions after about an hour (`claude daemon --help`: "Idle
+background sessions usually stop after about an hour."). A session that stopped is
+no longer connected to claude.ai.
+
+A background agent is live only while Clauster finds its worker process in the
+roster file of Claude Code (`~/.claude/daemon/roster.json`). When the worker
+stops, the row shows **Resume** and **Forget**, also when its last state is still
+`blocked` or `working`. If Clauster cannot read the roster file, cannot use the
+roster entry for the agent, or cannot match the running process that the entry
+names, it uses the last state, and a `working` or `blocked` agent then stays live.
+
+**Fix:**
+
+1. Click **Resume** on the row of the ended agent. Clauster runs
+   `claude --bg --resume <session id>`. If the agent was registered with
+   claude.ai, Clauster also adds `--remote-control`, so the resumed agent
+   registers with claude.ai again and the desktop app can continue the
+   conversation.
+2. Read the id in the message that Clauster shows. Claude Code can continue the
+   agent under the same id, or start a copy of the conversation under a new id.
+   It starts a copy when the flags differ from the ones the agent saved (the
+   permission mode or `--remote-control`), or when it still reads the agent as
+   running. If you get a copy, the old row stays ended, and you can click
+   **Forget** on it.
+
+Do not click **Stop** on a live agent that you want to keep. Stop ends the worker
+and removes the agent from the list, and you cannot resume it after that. The
+conversation itself stays on disk. To continue it after a Stop, click **Run Claude
+here** on the project, then **In claude.ai / Desktop**, then **More options**. Set
+**Mode** to **Interactive Session**, select the conversation in **Conversation** (it
+shows its first message), and start the session.
+
 ## Claude itself is the problem
 
 ### "not logged in" / "access token has expired; re-authenticate with `claude`"
@@ -586,9 +627,11 @@ each old one:
    Resume starts a new keeper.
 3. For a background agent, wait until it finishes its task, then click
    **Resume**. If it waits for your input or a permission answer, answer it
-   first. Resume starts a new background job, with a new id, that continues the
-   conversation. If its row shows no **Resume**, the agent has no recorded
-   session, and you cannot resume it.
+   first. Resume starts a new worker that continues the conversation. Claude Code
+   can keep the id or start a copy under a new id (see
+   [A fork from the Claude desktop app shows as a background agent](#a-fork-from-the-claude-desktop-app-shows-as-a-background-agent-and-it-stops-after-an-idle-hour)).
+   If its row shows no **Resume**, the agent has no recorded session, and you
+   cannot resume it.
    Do not click **Stop** first: Stop removes the agent from the list, and you
    cannot resume it after that. Claude Code starts background agents from its
    own supervisor process, which Clauster does not manage. If new agents still

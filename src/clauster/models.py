@@ -415,6 +415,7 @@ class BackgroundJob(BaseModel):
     redacts every free-text field before it gets here. ``worker_pid`` /
     ``worker_alive`` are Clauster-derived: a roster pid counts only after the
     pid+procStart liveness check (same posture as :class:`BridgePointer`).
+    ``worker_checked`` and ``live`` are Clauster-derived too (TASK-588).
     """
 
     id: str  # the supervisor's short id (jobs/<id>/ dir name), e.g. "3c509237"
@@ -434,3 +435,21 @@ class BackgroundJob(BaseModel):
     updated_at: str = ""
     worker_pid: int | None = None  # set only when worker_alive
     worker_alive: bool = False
+    # True when the supervisor's roster settles whether the job has a worker, so
+    # worker_alive is the answer; False when there is no roster, or its entry for the job
+    # has no usable pid or names a running pid that Clauster could not match (TASK-588).
+    worker_checked: bool = False
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def live(self) -> bool:
+        """Whether the job still has a worker: the rule for Stop versus Resume and Forget.
+
+        When the roster settles it, only a live worker counts: a worker that ended leaves
+        its last ``state`` on disk (often ``blocked``), and that state must not keep the job
+        live (TASK-588, issue 1958). Otherwise the last ``working``/``blocked`` state is
+        the only sign, so it still counts.
+        """
+        if self.worker_alive:
+            return True
+        return not self.worker_checked and self.state in ("working", "blocked")
