@@ -5739,7 +5739,8 @@
           if (res.ok && b.id) {
             this.toast(label + (b.id === j.id ? ": resumed" : ": resumed as " + b.id), "success");
             // Hold the button for a while (TASK-588): until the new worker shows in the roster
-            // the row can still read as ended, and a second click makes claude start a copy.
+            // the row can still read as ended, and a second click in this tab would make claude
+            // start a copy. Only this tab and this row are held; a copy's old row stays ended.
             held = true;
             setTimeout(() => { this.agentResuming[j.id] = false; }, 10000);
           }

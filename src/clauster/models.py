@@ -437,7 +437,7 @@ class BackgroundJob(BaseModel):
     worker_alive: bool = False
     # True when the supervisor's roster settles whether the job has a worker, so
     # worker_alive is the answer; False when there is no roster, or its entry for the job
-    # names a running pid that Clauster could not match (TASK-588).
+    # has no usable pid or names a running pid that Clauster could not match (TASK-588).
     worker_checked: bool = False
 
     @computed_field  # type: ignore[prop-decorator]

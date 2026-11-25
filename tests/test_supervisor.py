@@ -2547,10 +2547,12 @@ def test_roster_entry_without_a_usable_pid_keeps_the_last_state(tmp_path: Path, 
     assert (job.worker_checked, job.live) == (False, True)
 
 
-def test_roster_entry_that_is_not_an_object_keeps_the_last_state(tmp_path: Path):
+@pytest.mark.parametrize("entry", ["garbage", None, 4242], ids=["string", "null", "int"])
+def test_roster_entry_that_is_not_an_object_keeps_the_last_state(tmp_path: Path, entry):
+    # A `null` entry is still an entry: only a missing key says the worker is gone.
     jobs = tmp_path / "jobs"
     _write_job(jobs, "bd1cea2f", _state(state="blocked"))
-    roster = _roster(tmp_path, {"bd1cea2f": "garbage"})
+    roster = _roster(tmp_path, {"bd1cea2f": entry})
     [job] = supervisor.list_background_jobs(jobs, roster)
     assert (job.worker_checked, job.live) == (False, True)
 
