@@ -115,7 +115,6 @@ component_management:
         - src/clauster/field_decode.py # #1157 — persisted-row/pointer/sidecar field decoders split from runner
         - src/clauster/procutil.py
         - src/clauster/pointers.py
-        - src/clauster/code_sessions.py # #867 — pre-spawn anchor-session liveness for bridge pointers
         - src/clauster/pty_keeper.py
         - src/clauster/pty_screen.py # #534 — server-side pyte screen for live pty terminal
         - src/clauster/state.py

@@ -33,7 +33,6 @@ from . import (
     bridge_launch,
     bridge_log,
     bridge_prune,
-    code_sessions,
     metrics,
     pointers,
     poll_loop,
@@ -558,28 +557,25 @@ class SessionRunner:
             prune_stale_pointers=lambda: self._prune_stale_pointers(),
             retire_ended_starters=lambda: self._retire_ended_starters(),
         )
-        # Spawn / resume path (#1157): the security-critical collaborator that owns the
-        # fail-closed gate sequence, both bridge launches (standard + pty), the readiness
-        # waits, and the off-request startup watch. Built LAST — after every other
-        # collaborator — and handed the ONE `RunnerState` (registry + locks + persist),
-        # `RecordFacade` (the `spawn`/`ready` lifecycle emits), `BridgeLaunch` (the two
-        # subprocess launches), and `Rediscovery` (the cross-process standard reattach the
-        # per-mode idempotency check performs). The gate ORDER, the two synchronous gates
-        # (`_gate_stale_resume` / `_enforce_bridge_cap`), the two-mode separation, and the
-        # lock order are preserved byte-for-byte by the move. `stop` / `forget` / `adopt`
-        # STAY on the runner and keep taking the SAME shared locks from `_registry` — the
-        # coordinator does not own the locks. The still-on-runner helpers it calls but does
-        # not own — project resolution, the mode picker, option validation, the
-        # poisoned-pointer clear, the log-retention prune + path resolvers, the
-        # redacted-mirror flush, the poison-heal, the post-spawn enrich, the readiness
-        # parsers, the status reconciler, and the error-detail capture — are injected as
-        # deferring lambdas (the same pattern the earlier collaborators use), so a
-        # monkeypatched seam is honored and the coordinator holds no runner. The public
-        # exception classes, `SpawnOutcome`, and `_normalize_custom_name` stay on this module
-        # and are imported lazily inside the coordinator's methods (no module-level `runner`
-        # import — the cycle break). The runner keeps thin delegators (below) for the moved
-        # methods so the façade and the direct-call/patch test seams still reach them — see
-        # :class:`SpawnCoordinator`.
+        # Spawn / resume path (#1157): the security-critical collaborator that owns the fail-closed
+        # gate sequence, both bridge launches (standard + pty), the readiness waits, and the
+        # off-request startup watch. Built LAST — after every other collaborator — and handed the
+        # ONE `RunnerState` (registry + locks + persist), `RecordFacade` (the `spawn`/`ready`
+        # lifecycle emits), `BridgeLaunch` (the two subprocess launches), and `Rediscovery` (the
+        # cross-process standard reattach the per-mode idempotency check performs). The gate ORDER,
+        # the two synchronous gates (`_gate_stale_resume` / `_enforce_bridge_cap`), the two-mode
+        # separation, and the lock order are preserved byte-for-byte by the move. `stop` / `forget`
+        # / `adopt` STAY on the runner and keep taking the SAME shared locks from `_registry` — the
+        # coordinator does not own the locks. The still-on-runner helpers it calls but does not own
+        # — project resolution, the mode picker, option validation, the log-retention prune + path
+        # resolvers, the redacted-mirror flush, the poison-heal, the post-spawn enrich, the
+        # readiness parsers, the status reconciler, and the error-detail capture — are injected as
+        # deferring lambdas (the same pattern the earlier collaborators use), so a monkeypatched
+        # seam is honored and the coordinator holds no runner. The public exception classes,
+        # `SpawnOutcome`, and `_normalize_custom_name` stay on this module and are imported lazily
+        # inside the coordinator's methods (no module-level `runner` import — the cycle break). The
+        # runner keeps thin delegators (below) for the moved methods so the façade and the
+        # direct-call/patch test seams still reach them — see :class:`SpawnCoordinator`.
         self._spawner = spawn_coordinator.SpawnCoordinator(
             config=config,
             registry=self._registry,
@@ -595,9 +591,6 @@ class SessionRunner:
             ),
             validate_spawn_options=lambda *a, **kw: self._validate_spawn_options(*a, **kw),
             live_standard_for_project=lambda name: self._live_standard_for_project(name),
-            clear_pointer_if_anchor_poisoned=lambda path: self._clear_pointer_if_anchor_poisoned(
-                path
-            ),
             log_set_key=lambda filename: self._log_set_key(filename),
             prune_logs=lambda protected: self._prune_logs(protected),
             unique_log_path=lambda name: self._unique_log_path(name),
@@ -1566,49 +1559,6 @@ class SessionRunner:
 
     # ----- spawn ----------------------------------------------------------
 
-    async def _clear_pointer_if_anchor_poisoned(self, project_path: Path) -> None:
-        """#867 L2: pre-spawn, drop a preserved pointer whose anchor was archived/deleted.
-
-        The CLI reattaches an existing environment purely from ``bridge-pointer.json``; if
-        the anchor session behind it is gone, that reattach dead-ends into a bridge with no
-        session (#671). Probing ``/v1/code/sessions`` and dropping a poisoned pointer forces
-        a clean cold start instead. Best-effort throughout: only a non-live pointer is
-        considered, any uncertainty leaves the pointer intact, and nothing here blocks or
-        fails the spawn.
-        """
-        resolved = project_path.resolve()
-        pointer = await asyncio.to_thread(
-            pointers.pointer_for_project, resolved, self._claude_projects_dir
-        )
-        if pointer is None or not pointer.session_id:
-            return  # cold start (or pty, which writes no pointer) — nothing to reattach
-        if await asyncio.to_thread(pointers.is_live, pointer):
-            return  # a live bridge owns it; never touch a running anchor
-        credentials_path = self._claude_json.parent / ".claude" / ".credentials.json"
-        health = await asyncio.to_thread(
-            code_sessions.anchor_health_for_pointer,
-            pointer.session_id,
-            credentials_path=credentials_path,
-            claude_json_path=self._claude_json,
-        )
-        if health is not code_sessions.AnchorHealth.POISONED:
-            return  # HEALTHY -> reattach as-is; UNKNOWN -> leave it, the backstop covers it
-        _log.info(
-            "clearing bridge-pointer for %s: anchor session %s is archived/deleted; "
-            "would dead-end on reattach (#671)",
-            resolved,
-            pointer.session_id,
-        )
-        try:
-            await asyncio.to_thread(
-                pointers.clear_pointer,
-                resolved,
-                claude_projects_dir=self._claude_projects_dir,
-                keep_mtime=False,
-            )
-        except (pointers.PointerStillLive, OSError) as exc:
-            _log.warning("could not clear poisoned bridge-pointer for %s: %s", resolved, exc)
-
     async def spawn(
         self,
         name: str,
@@ -1724,11 +1674,11 @@ class SessionRunner:
             yield
 
     # ----- _spawn_locked's pre-spawn gates (delegate to :class:`SpawnCoordinator`, #1157) ---
-    # The gate bodies moved with `_spawn_locked` to `spawn_coordinator`; the coordinator runs
-    # them in the SAME fail-closed order: stale-resume → option validation → fork-target
-    # ownership → per-mode idempotency → trust gate → claude-side settings → poisoned-pointer
-    # clear → bridge cap → deferred --trust write → launch. These delegators keep the exact
-    # signatures (and async-ness) the direct-call/patch test seams reach on the runner.
+    # The gate bodies moved with `_spawn_locked` to `spawn_coordinator`; the coordinator runs them
+    # in the SAME fail-closed order: stale-resume → option validation → fork-target ownership →
+    # per-mode idempotency → trust gate → claude-side settings → bridge cap → deferred --trust
+    # write → launch. These delegators keep the exact signatures (and async-ness) the
+    # direct-call/patch test seams reach on the runner.
     #
     # ⚠️ `_gate_stale_resume` and `_enforce_bridge_cap` stay SYNCHRONOUS (`def`, not
     # `async def`) on the coordinator AND here — each reads loop-owned mutable state and
