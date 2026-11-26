@@ -1,5 +1,37 @@
 # Changelog
 
+## 1.6.0 (2026-11-25)
+
+[Compare with 1.5.0](https://github.com/schubydoo/clauster/compare/v1.5.0...v1.6.0)
+
+### Features
+
+- Show the service task limit, current count and refused forks in `clauster doctor`, and show on a crashed bridge when a task limit is the likely cause. ([#1934](https://github.com/schubydoo/clauster/pull/1934))
+- Add `instance_defaults.bridge_task_limit` (off by default; needs Linux, systemd and `loginctl enable-linger`, else bridges start unscoped and `clauster doctor` warns): each bridge starts in its own systemd user scope with this task limit. ([#1932](https://github.com/schubydoo/clauster/pull/1932))
+- Add a Force restart button for standard bridges (`instance_defaults.allow_force_restart`, off by default): it archives the bridge's cloud environment and starts the bridge in a new one with no session. ([#1915](https://github.com/schubydoo/clauster/pull/1915))
+
+### Fixes
+
+- A background agent whose worker ended now shows Resume and Forget instead of Stop, also when its last state reads `blocked`, and Resume of an agent that was registered with claude.ai adds `--remote-control` and tracks the job id that `claude` prints. ([#1964](https://github.com/schubydoo/clauster/pull/1964))
+- A background resume whose folder is gone answers 409 instead of 502, a bypass or inherit resume that cannot list projects_root gets a 403 that names the error, and Clauster no longer writes Infinity or NaN to `~/.claude.json` and refuses a file that holds them. ([#1955](https://github.com/schubydoo/clauster/pull/1955))
+- A background resume whose folder checks hang, for example on a network mount, now fails with a 504 after 20 seconds and never resumes the job later. ([#1957](https://github.com/schubydoo/clauster/pull/1957))
+- Save a subagent named `yes`, `null` or another YAML keyword, limit the Name box to 239 characters, return a 422 instead of a 500 for a Windows path that is too long, and show the server's reason when a config tab fails to load. ([#1943](https://github.com/schubydoo/clauster/pull/1943))
+- The Plugins tab reports an unreachable git source as a 400 that names it, and shows an installed plugin's description from its marketplace file. The Settings tab saves a list with masked entries after you delete, add or reorder its other entries, when no two masked entries read the same. ([#1947](https://github.com/schubydoo/clauster/pull/1947))
+- Show a session that outlives a standard bridge Clauster saw crash on the crashed row, and say what Resume does to it. ([#1936](https://github.com/schubydoo/clauster/pull/1936))
+- The config window's Project picker and the readiness checks now include a project created after the page loaded, Cancel shows an item saved while another editor opened, and a worktree bridge row shows its Transcript button. ([#1946](https://github.com/schubydoo/clauster/pull/1946))
+- Save Skills and Subagents frontmatter that Claude Code reads (a tab in a value, `!!str 1e3`), save skill names with accents or Hangul, refuse a subagent `model: 1e3`, and convert a zero-indented inline `mcpServers` list. ([#1948](https://github.com/schubydoo/clauster/pull/1948))
+- A Resume or start no longer clears the session from `bridge-pointer.json` when that session was archived or deleted, so the bridge no longer adds a blank second session next to the real conversation. ([#1963](https://github.com/schubydoo/clauster/pull/1963))
+- Start a launch at Ask each time where the configured default mode is gated, ask for the typed name before No forced mode, announce a failed transcript load, and let the header wrap on a phone. ([#1953](https://github.com/schubydoo/clauster/pull/1953))
+- Dashboard sign-in no longer offers a docs link printed before the authorize URL as that URL, and `clauster keepers --kill` no longer reports a failure for a keeper that is slow to exit after the kill. ([#1956](https://github.com/schubydoo/clauster/pull/1956))
+- The Plugins tab now warns when a marketplace Remove leaves it listed or uninstalls plugins, and says how to finish the removal. ([#1935](https://github.com/schubydoo/clauster/pull/1935))
+- Mask the value of secret-named flags in MCP `args` in the MCP, Skills and Subagents editors, and keep the stored value on save. ([#1940](https://github.com/schubydoo/clauster/pull/1940))
+- A Direct Session orphan card now shows the session as lost when its agent exits. On Windows, the standalone binary no longer lets child processes search its unpack folder for DLLs. ([#1954](https://github.com/schubydoo/clauster/pull/1954))
+- An Interactive Session that stops at claude's Settings Error screen now shows Failed to start with the refused settings values, instead of Running with no link. ([#1942](https://github.com/schubydoo/clauster/pull/1942))
+- A resumed bridge's log stream can learn new ids again (each run has its own cap, and earlier ids stay masked), a crafted bridge-log line cannot slow the marker parse, and the pty-screen view masks each frame once. ([#1944](https://github.com/schubydoo/clauster/pull/1944))
+- `clauster start` now exits 1 with the reason on stderr when the new bridge ends in `error`, so a script that relied on exit 0 will see the failure. ([#1935](https://github.com/schubydoo/clauster/pull/1935))
+- Open in Claude no longer links a session that has ended, and a cleared bridge pointer keeps the identity fields that claude needs for its 30-day reuse window. ([#1938](https://github.com/schubydoo/clauster/pull/1938))
+- Explain on the card that a worktree Interactive Session has no commit to branch from, give a reason at the startup deadline, and count a startup crash once, never a keeper error. ([#1945](https://github.com/schubydoo/clauster/pull/1945))
+
 ## 1.5.0 (2026-11-17)
 
 [Compare with 1.4.0](https://github.com/schubydoo/clauster/compare/v1.4.0...v1.5.0)
