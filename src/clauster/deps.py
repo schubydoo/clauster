@@ -526,7 +526,7 @@ _SHAWL_VERSION = "v1.9.0"
 # are the release's checksums.txt asset digests (refreshed by scripts/check_binary_dep_pins.py and
 # fail-closed at install, exactly like Shawl above). Same `# renovate:` customManager pattern.
 # renovate: datasource=github-releases depName=schubydoo/claustrum
-_CLAUSTRUM_VERSION = "v1.21.0"
+_CLAUSTRUM_VERSION = "v1.22.0"
 _CLAUSTRUM_VER_BARE = _CLAUSTRUM_VERSION.removeprefix("v")  # tag "v1.7.1" -> asset infix "1.7.1"
 
 # (platform_marker, GoReleaser OS token, arch_marker, archive ext, sha256 of the archive)
@@ -536,42 +536,42 @@ _CLAUSTRUM_VARIANTS: tuple[tuple[str, str, str, str, str], ...] = (
         "Linux",
         "x86_64",
         "tar.gz",
-        "9ad30db7c5bc5a21106082cff83fcf64ff4326748591dfad05b63e4864793880",
+        "aadf7dccaf4e97cf5ce4897879af28fe872d2d2e754a1b3eebfefe7141dfd866",
     ),
     (
         "linux",
         "Linux",
         "arm64",
         "tar.gz",
-        "a55693630249ab78522e39f4dc972aec11bad01e2c0025104f4e722386542a56",
+        "eca4a39c980f3ef9ed1c2935a2376bbcaf579dac5e249693cd50817a5d8f1249",
     ),
     (
         "darwin",
         "Darwin",
         "x86_64",
         "tar.gz",
-        "b74f437b217014ee766bab2ee14868b7c63978f29cfd7adcbcbb6d5b22d5f410",
+        "5c5bde03fb83dc3f4be52af03538cea2bc6a3e47b0275e7bf23afe72beebb63a",
     ),
     (
         "darwin",
         "Darwin",
         "arm64",
         "tar.gz",
-        "e6b7218f8de83672ec7039facf6f57b84f2928c679a9de1a26919c03ed7dad53",
+        "61dfd90b30b87e3ea4c6b32d8fce83de35906813f0a7d4f2c2948ca7e8725c0e",
     ),
     (
         "win32",
         "Windows",
         "x86_64",
         "zip",
-        "caeea930701dc0458b3eef9ee7b3ec6e38f35ccdea43e188159dafbe94d1270a",
+        "ebd05ba606fd6bae01ee50dfb38016e3119275939dba91d5f07507553abe083c",
     ),
     (
         "win32",
         "Windows",
         "arm64",
         "zip",
-        "c3573fd22a861649e70af5a1ff20bbfdeced18e1850a9c3660357163ce64affc",
+        "90255a528e4c13ba0f2b0a4248bda87d5373081fdaef6b2a32dfa290f504c847",
     ),
 )
 
